@@ -1,0 +1,129 @@
+#pragma once
+
+#include "muuk/core/events.hpp"
+#include "muuk/core/fixed_vector.hpp"
+#include "muuk/core/lot_progression.hpp"
+#include "muuk/core/orders.hpp"
+#include "muuk/core/pnl.hpp"
+#include "muuk/core/risk.hpp"
+#include "muuk/core/types.hpp"
+
+namespace muuk::core {
+
+enum class EngineStatus {
+    Idle,          // constructed, start() not called yet
+    Active,        // one or more pending orders armed / legs open
+    HaltedByRisk,  // a hard risk limit was hit; no new orders will be placed
+    Completed,     // basket profit target reached and closed this cycle
+};
+
+struct StrategyConfig {
+    SymbolSpec symbol;
+    RangeConfig range;
+    LotProgressionConfig lotProgression;
+    RiskLimits riskLimits;
+    CostInputs costs;
+    double basketProfitTargetMoney = 0.0;
+    int maxRejectRetries = 3;
+};
+
+// Deterministic, I/O-free strategy state machine implementing the
+// range-based pending-order grid described in the proposal (§3-§8):
+//   - two boundary pending orders (Buy Stop at range.upperBound,
+//     Sell Stop at range.lowerBound), lot size from the global
+//     progression L(n) = L0 + (n-1)*deltaL (proposal §3)
+//   - on fill, the opposite pending order is left untouched and a new
+//     pending order is immediately re-armed on the side that just
+//     triggered, using the next lot in the sequence (proposal §4)
+//   - basket P/L is evaluated on every tick; once the net P/L target is
+//     reached the whole basket is closed and remaining orders cancelled
+//     (proposal §6)
+//   - a risk check runs before every new order is armed; a breached limit
+//     halts new order creation and raises an alert (proposal §8)
+//
+// The engine takes no I/O actions itself: it only consumes events and
+// produces commands for the caller (backtester or live broker adapter) to
+// execute. This keeps it allocation-free, deterministic, and identically
+// testable in both backtest and live contexts.
+class StrategyEngine {
+public:
+    explicit StrategyEngine(StrategyConfig config);
+
+    // Arms the two initial boundary orders. Must be called once before any
+    // onTick/onOrderConfirmed/onOrderRejected call.
+    CommandBatch start();
+
+    // Re-arms the two initial boundary orders for a new cycle. Only valid
+    // when status() == Completed. Resets the sequence counter and P/L
+    // accumulators; risk-limit state (HaltedByRisk) is not auto-cleared by
+    // design — that requires the caller to construct a fresh engine or
+    // explicitly decide to retry.
+    CommandBatch restart();
+
+    // Evaluates the current basket against the profit target and the risk
+    // engine against live spread. Also updates the mark price used for
+    // floating P/L.
+    CommandBatch onTick(const TickEvent& tick);
+
+    // A previously placed order was filled by the broker at `fillPrice`.
+    // Re-arms the triggering side with the next lot in the sequence.
+    CommandBatch onOrderConfirmed(const OrderConfirmedEvent& event);
+
+    // A previously placed order was rejected. Retries a bounded number of
+    // times (proposal §4: "controlled retry logic"); gives up silently
+    // (leaving that side un-armed until the next restart) once
+    // maxRejectRetries is exhausted.
+    CommandBatch onOrderRejected(const OrderRejectedEvent& event);
+
+    [[nodiscard]] EngineStatus status() const { return status_; }
+    [[nodiscard]] int activeOrderCount() const { return static_cast<int>(pendingOrders_.size()); }
+    [[nodiscard]] int nextSequenceIndex() const { return nextSequenceIndex_; }
+    [[nodiscard]] BasketPnlResult lastBasketPnl() const { return lastBasketPnl_; }
+
+private:
+    // Running per-side accumulator backing aggregatePositionPnlMoney() —
+    // deliberately not a list of individual fills: a basket can accumulate
+    // an unbounded number of fills over a long trend before its profit
+    // target is reached (or if no target is set), and this state must stay
+    // fixed-size regardless. See pnl.hpp for the math.
+    struct SideAggregate {
+        int64_t totalVolumeSteps = 0;
+        int64_t sumEntryPriceTicksVolume = 0;
+    };
+
+    // A pending order plus the bookkeeping needed for bounded reject-retry
+    // (proposal §4). Kept private to the engine — callers only ever see the
+    // plain PendingOrder/commands types.
+    struct ArmedOrder {
+        PendingOrder order;
+        int retryCount = 0;
+    };
+
+    [[nodiscard]] Price boundaryPriceForSide(OrderSide side) const;
+    [[nodiscard]] OrderId allocateOrderId() { return nextOrderId_++; }
+    void resetCycleState();
+    CommandBatch armInitialOrders();
+
+    // Attempts to arm a new pending order for `side` at sequence `seqIndex`.
+    // Runs the risk check first; on breach, emits a RiskAlertCommand,
+    // transitions to HaltedByRisk, and returns without arming anything.
+    void tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount = 0);
+
+    BasketPnlResult evaluateBasketPnl(const TickEvent& tick) const;
+
+    StrategyConfig config_;
+    EngineStatus status_ = EngineStatus::Idle;
+
+    FixedVector<ArmedOrder, kMaxTrackedOrders> pendingOrders_;
+    SideAggregate buyAggregate_;
+    SideAggregate sellAggregate_;
+
+    int nextSequenceIndex_ = 1;
+    OrderId nextOrderId_ = 1;
+    TickEvent lastTick_{};
+    double slippageMoneyAccrued_ = 0.0;
+    double swapMoneyAccrued_ = 0.0;
+    BasketPnlResult lastBasketPnl_{};
+};
+
+}  // namespace muuk::core

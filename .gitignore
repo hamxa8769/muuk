@@ -1,0 +1,29 @@
+# Build outputs
+build/
+out/
+bin/
+cmake-build-*/
+
+# CMake
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+_deps/
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# vcpkg (if ever used locally)
+vcpkg_installed/
+vcpkg/
+
+# Misc
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.log
