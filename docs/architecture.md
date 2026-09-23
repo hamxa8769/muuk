@@ -66,15 +66,21 @@ because a pre-computed range can already be stale by the time it's armed
 moving fast. Instead of committing to both full-width boundaries up
 front, `armInitialOrders()` arms two tiny orders (`seedOffsetPoints` price
 units above/below the reference midpoint) and sets an internal `seeding_`
-flag. Whichever one a real fill confirms first proves an actually-
-tradeable price *right now*; `onOrderConfirmed` then cancels the other
-seed and re-derives the full range from that confirmed fill (the filled
-side's own price becomes one boundary, the opposite boundary is
-`fillPrice ± the originally configured total width`), then falls through
-to the normal re-arm rule above — so only the opposite side gets a fresh
-order at this point, exactly as any other fill would produce; the seed's
-own side isn't re-armed until its opposite eventually fills too. The
-reference midpoint itself prefers `lastTick_`
+flag. Both seeds share a single slot in the lot progression
+(`nextSequenceIndex_` advances once for the pair, not once each) — only
+one of them ever actually becomes a trade, the other is always cancelled
+unfilled below, so only one slot should ever be spent on it. Advancing it
+twice used to make the first real re-armed order jump straight from L(1)
+to L(3) (e.g. 0.01 then 0.03), silently skipping L(2) every single cycle.
+Whichever seed a real fill confirms first proves an actually-tradeable
+price *right now*; `onOrderConfirmed` then cancels the other seed and
+re-derives the full range from that confirmed fill (the filled side's own
+price becomes one boundary, the opposite boundary is `fillPrice ± the
+originally configured total width`), then falls through to the normal
+re-arm rule above — so only the opposite side gets a fresh order at this
+point, exactly as any other fill would produce; the seed's own side isn't
+re-armed until its opposite eventually fills too. The reference midpoint
+itself prefers `lastTick_`
 (the engine's own most recently processed tick, which persists across
 `resetCycleState()`) over `range`'s configured midpoint whenever one
 exists — so a `restart()` after a closed basket re-anchors to the tick

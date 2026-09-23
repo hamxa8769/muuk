@@ -80,12 +80,20 @@ CommandBatch StrategyEngine::armInitialOrders() {
         const Price seedUpper{mid.ticks + offsetTicks};
         const Price seedLower{mid.ticks - offsetTicks};
 
-        tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_, 0, seedUpper);
-        ++nextSequenceIndex_;
+        // Both seeds share one sequence slot: exactly one of them ever
+        // actually becomes a trade (the other is always cancelled
+        // unfilled in onOrderConfirmed's seeding branch), so only one
+        // slot in the lot progression should ever be spent on this pair.
+        // Advancing nextSequenceIndex_ twice here (once per seed) used to
+        // make the *next* real order jump straight from L(1) to L(3) —
+        // e.g. 0.01 then 0.03, silently skipping 0.02 — because the
+        // cancelled seed's slot was never actually used by a fill.
+        const int seedSeq = nextSequenceIndex_;
+        tryArmOrder(out, OrderSide::BuyStop, seedSeq, 0, seedUpper);
         if (status_ != EngineStatus::HaltedByRisk) {
-            tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_, 0, seedLower);
-            ++nextSequenceIndex_;
+            tryArmOrder(out, OrderSide::SellStop, seedSeq, 0, seedLower);
         }
+        ++nextSequenceIndex_;
     } else {
         tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
         ++nextSequenceIndex_;

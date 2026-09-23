@@ -383,7 +383,9 @@ TEST_CASE("seedOffsetPoints>0: after anchoring, the opposite-side alternation co
     const auto& newBuy = std::get<PlaceOrderCommand>(afterSecondFill[0]);
     REQUIRE(newBuy.side == OrderSide::BuyStop);
     REQUIRE(newBuy.price == Price::fromDouble(4336.55, spec));
-    REQUIRE(newBuy.volume.toDouble(spec) == Catch::Approx(0.04));  // L(4): seq1,seq2 seeds, seq3 the anchor re-arm
+    // L(3): seq1 shared by both seeds (only one ever fills), seq2 the
+    // anchor re-arm (the Sell Stop above), seq3 this one.
+    REQUIRE(newBuy.volume.toDouble(spec) == Catch::Approx(0.03));
 }
 
 TEST_CASE("seedOffsetPoints>0: restart() re-seeds around the tick that triggered the close, not the stale prior range") {
