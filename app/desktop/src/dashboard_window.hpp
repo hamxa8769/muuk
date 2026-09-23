@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -10,13 +11,13 @@ struct ImFont;
 
 namespace muuk::desktop {
 
-// The whole app window: connection bar, live KPI cards, a range panel
-// (visual range + Open/Close range + auto-continue + emergency controls),
-// a settings panel for tuning the strategy, and tabs listing open
-// positions, pending orders and the log -- each position/order with its
-// own Close/Cancel button. Holds only UI-local state (text buffers, the
-// settings being edited, theme); all live state comes from LiveController
-// every frame.
+// The whole app window: header (connection), live KPI cards, a range panel
+// (live range chart + Open/Close range + auto-continue + emergency
+// controls), a settings panel for tuning the strategy, and tabs listing
+// open positions, pending orders and the log -- each position/order with
+// its own Close/Cancel button. Drawn in a frosted-glass style (glass_ui.hpp).
+// Holds only UI-local state (text buffers, the settings being edited,
+// theme); all live state comes from LiveController every frame.
 class DashboardWindow {
 public:
     // Pre-fills the credentials-path field via findDefaultConfigPath()
@@ -25,15 +26,19 @@ public:
 
     // Optional extra fonts (loaded by main.cpp); nullptr falls back to the
     // default font.
-    void setFonts(ImFont* bold, ImFont* large);
+    void setFonts(ImFont* bold, ImFont* large, ImFont* numbers);
+
+    // Called whenever the operator switches dark/light, e.g. so main.cpp
+    // can match the native window title bar.
+    void setThemeChangedCallback(std::function<void(bool dark)> callback);
 
     void render(LiveController& controller);
 
 private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending };
 
-    void applyTheme() const;
-    void renderConnectionBar(LiveController& controller, bool running, bool connected);
+    void setTheme(bool dark);
+    void renderHeader(LiveController& controller, bool running, bool connected);
     void renderKpiCards(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap, bool connected);
     void renderRangePanel(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
                           bool connected);
@@ -47,6 +52,7 @@ private:
 
     std::array<char, 512> configPathBuffer_{};
     bool darkMode_ = true;
+    std::function<void(bool)> onThemeChanged_;
 
     muuk::ctrader_fix::LiveSettings editSettings_;
     bool settingsLoaded_ = false;  // editSettings_ holds real values (from the file or the bot)
@@ -63,6 +69,7 @@ private:
 
     ImFont* boldFont_ = nullptr;
     ImFont* largeFont_ = nullptr;
+    ImFont* numberFont_ = nullptr;
 };
 
 }  // namespace muuk::desktop

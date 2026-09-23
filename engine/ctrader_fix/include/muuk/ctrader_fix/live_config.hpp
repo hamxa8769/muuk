@@ -91,6 +91,7 @@ struct LiveSettings {
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit
     bool autoContinue = true;
+    muuk::core::StartSide startSide = muuk::core::StartSide::Both;  // first order(s) of each range
 };
 
 [[nodiscard]] LiveSettings settingsFromConfig(const LiveConfig& config);

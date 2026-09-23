@@ -752,6 +752,7 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     s.maxLot = 1.0;
     s.maxBasketLoss = 200.0;
     s.autoContinue = false;
+    s.startSide = StartSide::BuyOnly;
     saveLiveSettings(path, s);
 
     const LiveConfig reloaded = loadLiveConfig(path);
@@ -768,6 +769,7 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     REQUIRE(back.maxLot == Catch::Approx(1.0));
     REQUIRE(back.maxBasketLoss == Catch::Approx(200.0));
     REQUIRE_FALSE(back.autoContinue);
+    REQUIRE(back.startSide == StartSide::BuyOnly);
 
     std::filesystem::remove(path);
 }

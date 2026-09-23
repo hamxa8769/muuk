@@ -95,16 +95,19 @@ CommandBatch StrategyEngine::armInitialOrders() {
         // e.g. 0.01 then 0.03, silently skipping 0.02 — because the
         // cancelled seed's slot was never actually used by a fill.
         const int seedSeq = nextSequenceIndex_;
-        tryArmOrder(out, OrderSide::BuyStop, seedSeq, 0, seedUpper);
-        if (status_ != EngineStatus::HaltedByRisk) {
+        if (config_.startSide != StartSide::SellOnly) {
+            tryArmOrder(out, OrderSide::BuyStop, seedSeq, 0, seedUpper);
+        }
+        if (config_.startSide != StartSide::BuyOnly && status_ != EngineStatus::HaltedByRisk) {
             tryArmOrder(out, OrderSide::SellStop, seedSeq, 0, seedLower);
         }
         ++nextSequenceIndex_;
     } else {
-        tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
-        ++nextSequenceIndex_;
-
-        if (status_ != EngineStatus::HaltedByRisk) {
+        if (config_.startSide != StartSide::SellOnly) {
+            tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
+            ++nextSequenceIndex_;
+        }
+        if (config_.startSide != StartSide::BuyOnly && status_ != EngineStatus::HaltedByRisk) {
             tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_);
             ++nextSequenceIndex_;
         }

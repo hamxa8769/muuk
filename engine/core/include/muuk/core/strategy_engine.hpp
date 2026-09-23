@@ -19,6 +19,13 @@ enum class EngineStatus {
     Completed,     // basket profit target reached and closed this cycle
 };
 
+// Which order(s) a new cycle starts with.
+enum class StartSide {
+    Both,      // a Buy Stop and a Sell Stop at once (proposal §3's worked example)
+    BuyOnly,   // a single Buy Stop; the Sell Stop only follows once it fills
+    SellOnly,  // a single Sell Stop; the Buy Stop only follows once it fills
+};
+
 struct StrategyConfig {
     SymbolSpec symbol;
     RangeConfig range;
@@ -50,6 +57,14 @@ struct StrategyConfig {
     // configured width — before falling through to the normal re-arm rule
     // below (StrategyConfig::reArmOnFill) exactly as any other fill would.
     double seedOffsetPoints = 0.0;
+
+    // Both (default): start()/restart() arm a Buy Stop and a Sell Stop (or,
+    // with seedOffsetPoints>0, a Buy seed and a Sell seed).
+    // BuyOnly/SellOnly: arm just that one order. Nothing else is armed until
+    // it fills; from then on the normal opposite-side rule applies, so there
+    // is exactly one pending order at any time from the very start. With
+    // seeding, the single seed's fill anchors the range the same way.
+    StartSide startSide = StartSide::Both;
 };
 
 // Deterministic, I/O-free strategy state machine implementing the

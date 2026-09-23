@@ -10,30 +10,27 @@
 #include <imgui.h>
 
 #include "config_discovery.hpp"
+#include "glass_ui.hpp"
 
 namespace muuk::desktop {
 
 using muuk::core::EngineStatus;
 using muuk::core::OrderSide;
+using muuk::core::StartSide;
 using muuk::ctrader_fix::LiveSettings;
 using muuk::ctrader_fix::LiveSnapshot;
+using glass::kAmber;
+using glass::kBlue;
+using glass::kGreen;
+using glass::kGrey;
+using glass::kRed;
+using glass::kViolet;
 
 namespace {
-
-// --- Palette ------------------------------------------------------------
-const ImVec4 kGreen(0.19f, 0.75f, 0.45f, 1.0f);
-const ImVec4 kRed(0.90f, 0.33f, 0.30f, 1.0f);
-const ImVec4 kBlue(0.30f, 0.55f, 0.96f, 1.0f);
-const ImVec4 kAmber(0.88f, 0.64f, 0.23f, 1.0f);
-const ImVec4 kGrey(0.55f, 0.58f, 0.64f, 1.0f);
 
 ImVec4 withAlpha(ImVec4 c, float a) {
     c.w = a;
     return c;
-}
-
-ImVec4 scaled(ImVec4 c, float f) {
-    return ImVec4(std::min(c.x * f, 1.0f), std::min(c.y * f, 1.0f), std::min(c.z * f, 1.0f), c.w);
 }
 
 ImVec4 pnlColor(double v) {
@@ -44,7 +41,7 @@ ImVec4 pnlColor(double v) {
 
 std::string money(double v) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%s$%.2f", v < 0 ? "-" : (v > 0 ? "+" : ""), std::fabs(v));
+    std::snprintf(buf, sizeof(buf), "%s$%.2f", v < -0.005 ? "-" : (v > 0.005 ? "+" : ""), std::fabs(v));
     return buf;
 }
 
@@ -63,34 +60,10 @@ std::string lots(double v) {
 const char* sideName(OrderSide side) { return side == OrderSide::BuyStop ? "BUY" : "SELL"; }
 const char* orderTypeName(OrderSide side) { return side == OrderSide::BuyStop ? "Buy Stop" : "Sell Stop"; }
 
-// A filled button in `color`, the same size/shape as any other button.
-bool coloredButton(const char* label, ImVec4 color, ImVec2 size = ImVec2(0, 0)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, color);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, scaled(color, 1.15f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, scaled(color, 0.85f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    const bool pressed = ImGui::Button(label, size);
-    ImGui::PopStyleColor(4);
-    return pressed;
-}
-
-// A small rounded "chip" with text, for status labels.
-void chip(const char* text, ImVec4 color) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 pad(8.0f, 3.0f);
-    const ImVec2 textSize = ImGui::CalcTextSize(text);
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const ImVec2 end(pos.x + textSize.x + pad.x * 2, pos.y + textSize.y + pad.y * 2);
-    dl->AddRectFilled(pos, end, ImGui::ColorConvertFloat4ToU32(withAlpha(color, 0.18f)), 10.0f);
-    dl->AddRect(pos, end, ImGui::ColorConvertFloat4ToU32(withAlpha(color, 0.65f)), 10.0f);
-    dl->AddText(ImVec2(pos.x + pad.x, pos.y + pad.y), ImGui::ColorConvertFloat4ToU32(color), text);
-    ImGui::Dummy(ImVec2(end.x - pos.x, end.y - pos.y));
-}
-
-void sectionTitle(const char* text, ImFont* bold) {
-    if (bold) ImGui::PushFont(bold);
-    ImGui::TextUnformatted(text);
-    if (bold) ImGui::PopFont();
+void withFont(ImFont* font, const auto& draw) {
+    if (font) ImGui::PushFont(font);
+    draw();
+    if (font) ImGui::PopFont();
 }
 
 struct CycleState {
@@ -100,18 +73,17 @@ struct CycleState {
 
 CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (!connected || !snap) return {"Disconnected", kGrey};
-    if (snap->closeFailed) return {"CLOSE FAILED - needs attention", kRed};
-    if (snap->closingInProgress) return {"Closing basket...", kAmber};
-    if (snap->cooldownRemainingSeconds > 0) return {"Cooldown before next range", kBlue};
+    if (snap->closeFailed) return {"Close failed - needs attention", kRed};
+    if (snap->closingInProgress) return {"Closing basket", kAmber};
+    if (snap->cooldownRemainingSeconds > 0) return {"Cooldown", kBlue};
     switch (snap->status) {
         case EngineStatus::Active:
-            return snap->seeding ? CycleState{"Seeding - waiting for first fill", kAmber}
-                                 : CycleState{"Range active", kGreen};
+            return snap->seeding ? CycleState{"Waiting for first fill", kAmber} : CycleState{"Range active", kGreen};
         case EngineStatus::HaltedByRisk:
             return {"Halted by risk limit", kRed};
         case EngineStatus::Completed:
-            return snap->settings.autoContinue ? CycleState{"Basket booked - next range soon", kBlue}
-                                               : CycleState{"Basket booked - press Open range", kBlue};
+            return snap->settings.autoContinue ? CycleState{"Basket booked - next range soon", kViolet}
+                                               : CycleState{"Basket booked", kViolet};
         case EngineStatus::Idle:
         default:
             return {"Idle - press Open range", kGrey};
@@ -130,19 +102,21 @@ const char* openRangeBlocker(const std::optional<LiveSnapshot>& snap, bool conne
     return nullptr;
 }
 
-// Draws the range as a horizontal price scale: the band between the two
-// boundaries, pending orders as triangles, open positions as dots, and the
-// live bid/ask as a vertical marker.
+double floatingPnl(const LiveSnapshot& snap) {
+    double total = 0.0;
+    for (const auto& p : snap.positions) total += p.floatingPnl;
+    return total;
+}
+
+// The range as a horizontal price scale: the band between the two
+// boundaries, pending orders as triangles (Buy Stop above the track, Sell
+// Stop below), open positions as dots, and the live mid as a marker.
 void drawRangeChart(const LiveSnapshot& snap, float height) {
-    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float width = ImGui::GetContentRegionAvail().x;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float width = avail.x;
     ImGui::Dummy(ImVec2(width, height));
     ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    const ImU32 textCol = ImGui::GetColorU32(ImGuiCol_Text);
-    const ImU32 dimCol = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-    const ImU32 trackCol = ImGui::GetColorU32(ImGuiCol_FrameBg);
+    const glass::Palette& pal = glass::palette();
 
     double lo = snap.rangeLower;
     double hi = snap.rangeUpper;
@@ -164,52 +138,54 @@ void drawRangeChart(const LiveSnapshot& snap, float height) {
     lo -= pad;
     hi += pad;
 
-    // Vertical layout (top to bottom): live price label, Buy Stop markers
-    // (pointing up), the track with range band / positions, Sell Stop
-    // markers (pointing down), boundary price labels.
     const float textH = ImGui::GetTextLineHeight();
     const float left = origin.x + 6.0f;
     const float right = origin.x + width - 6.0f;
     const float trackY = origin.y + textH + 34.0f;
     auto xOf = [&](double p) { return left + static_cast<float>((p - lo) / (hi - lo)) * (right - left); };
 
-    dl->AddRectFilled(ImVec2(left, trackY - 3), ImVec2(right, trackY + 3), trackCol, 3.0f);
+    dl->AddRectFilled(ImVec2(left, trackY - 2), ImVec2(right, trackY + 2),
+                      ImGui::GetColorU32(glass::isDark() ? ImVec4(1, 1, 1, 0.08f) : ImVec4(0, 0, 0, 0.08f)), 2.0f);
 
     if (snap.rangeUpper > snap.rangeLower) {
         const float x0 = xOf(snap.rangeLower);
         const float x1 = xOf(snap.rangeUpper);
-        dl->AddRectFilled(ImVec2(x0, trackY - 12), ImVec2(x1, trackY + 12),
-                          ImGui::ColorConvertFloat4ToU32(withAlpha(kBlue, 0.16f)), 4.0f);
-        dl->AddLine(ImVec2(x0, trackY - 15), ImVec2(x0, trackY + 15), ImGui::ColorConvertFloat4ToU32(kRed), 2.0f);
-        dl->AddLine(ImVec2(x1, trackY - 15), ImVec2(x1, trackY + 15), ImGui::ColorConvertFloat4ToU32(kGreen), 2.0f);
+        dl->AddRectFilledMultiColor(ImVec2(x0, trackY - 12), ImVec2(x1, trackY + 12),
+                                    ImGui::GetColorU32(withAlpha(kRed, 0.16f)), ImGui::GetColorU32(withAlpha(kGreen, 0.16f)),
+                                    ImGui::GetColorU32(withAlpha(kGreen, 0.16f)), ImGui::GetColorU32(withAlpha(kRed, 0.16f)));
+        dl->AddLine(ImVec2(x0, trackY - 16), ImVec2(x0, trackY + 16), ImGui::GetColorU32(kRed), 2.0f);
+        dl->AddLine(ImVec2(x1, trackY - 16), ImVec2(x1, trackY + 16), ImGui::GetColorU32(kGreen), 2.0f);
         const std::string loText = price(snap.rangeLower);
         const std::string hiText = price(snap.rangeUpper);
         const float labelY = trackY + 30.0f;
-        dl->AddText(ImVec2(x0 - ImGui::CalcTextSize(loText.c_str()).x / 2, labelY), dimCol, loText.c_str());
-        dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(hiText.c_str()).x / 2, labelY), dimCol, hiText.c_str());
+        const ImU32 dim = ImGui::GetColorU32(pal.textDim);
+        dl->AddText(ImVec2(x0 - ImGui::CalcTextSize(loText.c_str()).x / 2, labelY), dim, loText.c_str());
+        dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(hiText.c_str()).x / 2, labelY), dim, hiText.c_str());
     }
 
     for (const auto& o : snap.pendingOrders) {
         const float x = xOf(o.price);
         if (o.side == OrderSide::BuyStop) {
-            dl->AddTriangleFilled(ImVec2(x, trackY - 28), ImVec2(x - 6, trackY - 18), ImVec2(x + 6, trackY - 18),
-                                  ImGui::ColorConvertFloat4ToU32(kGreen));
+            dl->AddTriangleFilled(ImVec2(x, trackY - 29), ImVec2(x - 7, trackY - 18), ImVec2(x + 7, trackY - 18),
+                                  ImGui::GetColorU32(kGreen));
         } else {
-            dl->AddTriangleFilled(ImVec2(x, trackY + 28), ImVec2(x + 6, trackY + 18), ImVec2(x - 6, trackY + 18),
-                                  ImGui::ColorConvertFloat4ToU32(kRed));
+            dl->AddTriangleFilled(ImVec2(x, trackY + 29), ImVec2(x + 7, trackY + 18), ImVec2(x - 7, trackY + 18),
+                                  ImGui::GetColorU32(kRed));
         }
     }
     for (const auto& p : snap.positions) {
         const float x = xOf(p.entryPrice);
-        const ImU32 col = ImGui::ColorConvertFloat4ToU32(p.side == OrderSide::BuyStop ? kGreen : kRed);
-        dl->AddCircleFilled(ImVec2(x, trackY), 5.0f, col);
-        dl->AddCircle(ImVec2(x, trackY), 5.0f, textCol, 0, 1.0f);
+        const ImVec4 c = p.side == OrderSide::BuyStop ? kGreen : kRed;
+        dl->AddCircleFilled(ImVec2(x, trackY), 9.0f, ImGui::GetColorU32(withAlpha(c, 0.22f)), 20);
+        dl->AddCircleFilled(ImVec2(x, trackY), 5.0f, ImGui::GetColorU32(c), 16);
     }
 
     if (snap.bid && snap.ask) {
         const double mid = (*snap.bid + *snap.ask) / 2.0;
         const float x = xOf(mid);
-        dl->AddLine(ImVec2(x, origin.y + textH + 2), ImVec2(x, trackY + 12), textCol, 1.5f);
+        const ImU32 textCol = ImGui::GetColorU32(pal.text);
+        dl->AddLine(ImVec2(x, origin.y + textH + 3), ImVec2(x, trackY + 12), textCol, 1.5f);
+        dl->AddCircleFilled(ImVec2(x, trackY), 3.0f, textCol, 12);
         const std::string midText = price(mid);
         const float tw = ImGui::CalcTextSize(midText.c_str()).x;
         const float tx = std::clamp(x - tw / 2, left, right - tw);
@@ -217,20 +193,8 @@ void drawRangeChart(const LiveSnapshot& snap, float height) {
     }
 }
 
-// One KPI card: a small caption, a big value, and an optional sub-line.
-void kpiCard(const char* id, const char* caption, const std::string& value, ImVec4 valueColor, const std::string& sub,
-             ImFont* large, float width, float height) {
-    ImGui::BeginChild(id, ImVec2(width, height), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
-    ImGui::TextDisabled("%s", caption);
-    if (large) ImGui::PushFont(large);
-    ImGui::TextColored(valueColor, "%s", value.c_str());
-    if (large) ImGui::PopFont();
-    if (!sub.empty()) ImGui::TextDisabled("%s", sub.c_str());
-    ImGui::EndChild();
-}
-
-// Numeric settings field; marks `dirty` when edited.
-bool settingDouble(const char* label, const char* help, double* v, double step, const char* fmt, bool* dirty) {
+// Numeric settings row; marks `dirty` when edited.
+void settingDouble(const char* label, const char* help, double* v, double step, const char* fmt, bool* dirty) {
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
@@ -239,13 +203,11 @@ bool settingDouble(const char* label, const char* help, double* v, double step, 
     ImGui::TableNextColumn();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::PushID(label);
-    const bool changed = ImGui::InputDouble("##v", v, step, step * 10.0, fmt);
+    if (ImGui::InputDouble("##v", v, step, step * 10.0, fmt)) *dirty = true;
     ImGui::PopID();
-    if (changed) *dirty = true;
-    return changed;
 }
 
-bool settingInt(const char* label, const char* help, int* v, bool* dirty) {
+void settingInt(const char* label, const char* help, int* v, bool* dirty) {
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
@@ -254,10 +216,8 @@ bool settingInt(const char* label, const char* help, int* v, bool* dirty) {
     ImGui::TableNextColumn();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::PushID(label);
-    const bool changed = ImGui::InputInt("##v", v);
+    if (ImGui::InputInt("##v", v)) *dirty = true;
     ImGui::PopID();
-    if (changed) *dirty = true;
-    return changed;
 }
 
 void clampSettings(LiveSettings& s) {
@@ -281,12 +241,24 @@ DashboardWindow::DashboardWindow() {
         std::copy_n(path.begin(), n, configPathBuffer_.begin());
         configPathBuffer_[n] = '\0';
     }
-    applyTheme();
+    glass::applyTheme(darkMode_);
 }
 
-void DashboardWindow::setFonts(ImFont* bold, ImFont* large) {
+void DashboardWindow::setFonts(ImFont* bold, ImFont* large, ImFont* numbers) {
     boldFont_ = bold;
     largeFont_ = large;
+    numberFont_ = numbers ? numbers : large;
+}
+
+void DashboardWindow::setThemeChangedCallback(std::function<void(bool dark)> callback) {
+    onThemeChanged_ = std::move(callback);
+    if (onThemeChanged_) onThemeChanged_(darkMode_);
+}
+
+void DashboardWindow::setTheme(bool dark) {
+    darkMode_ = dark;
+    glass::applyTheme(dark);
+    if (onThemeChanged_) onThemeChanged_(dark);
 }
 
 void DashboardWindow::flash(const std::string& message) {
@@ -294,70 +266,16 @@ void DashboardWindow::flash(const std::string& message) {
     flashUntil_ = ImGui::GetTime() + 4.0;
 }
 
-void DashboardWindow::applyTheme() const {
-    ImGuiStyle& style = ImGui::GetStyle();
-    if (darkMode_) {
-        ImGui::StyleColorsDark();
-        ImVec4* c = style.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.067f, 0.075f, 0.090f, 1.0f);
-        c[ImGuiCol_ChildBg] = ImVec4(0.090f, 0.102f, 0.125f, 1.0f);
-        c[ImGuiCol_PopupBg] = ImVec4(0.100f, 0.112f, 0.137f, 0.98f);
-        c[ImGuiCol_Border] = ImVec4(0.165f, 0.185f, 0.227f, 1.0f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.122f, 0.137f, 0.169f, 1.0f);
-        c[ImGuiCol_FrameBgHovered] = ImVec4(0.153f, 0.173f, 0.212f, 1.0f);
-        c[ImGuiCol_FrameBgActive] = ImVec4(0.180f, 0.204f, 0.251f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.153f, 0.180f, 0.235f, 1.0f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.196f, 0.235f, 0.310f, 1.0f);
-        c[ImGuiCol_ButtonActive] = ImVec4(0.227f, 0.278f, 0.369f, 1.0f);
-        c[ImGuiCol_Header] = ImVec4(0.141f, 0.188f, 0.267f, 1.0f);
-        c[ImGuiCol_HeaderHovered] = ImVec4(0.180f, 0.235f, 0.333f, 1.0f);
-        c[ImGuiCol_HeaderActive] = ImVec4(0.212f, 0.282f, 0.400f, 1.0f);
-        c[ImGuiCol_Tab] = ImVec4(0.110f, 0.125f, 0.157f, 1.0f);
-        c[ImGuiCol_TabHovered] = ImVec4(0.196f, 0.255f, 0.361f, 1.0f);
-        c[ImGuiCol_TabSelected] = ImVec4(0.161f, 0.212f, 0.302f, 1.0f);
-        c[ImGuiCol_TableHeaderBg] = ImVec4(0.110f, 0.125f, 0.157f, 1.0f);
-        c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.025f);
-        c[ImGuiCol_Text] = ImVec4(0.905f, 0.915f, 0.935f, 1.0f);
-        c[ImGuiCol_TextDisabled] = ImVec4(0.540f, 0.575f, 0.640f, 1.0f);
-        c[ImGuiCol_CheckMark] = kBlue;
-        c[ImGuiCol_PlotHistogram] = kGreen;
-    } else {
-        ImGui::StyleColorsLight();
-        ImVec4* c = style.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.955f, 0.960f, 0.970f, 1.0f);
-        c[ImGuiCol_ChildBg] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-        c[ImGuiCol_Border] = ImVec4(0.840f, 0.855f, 0.880f, 1.0f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.925f, 0.933f, 0.949f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.878f, 0.894f, 0.925f, 1.0f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.820f, 0.847f, 0.898f, 1.0f);
-        c[ImGuiCol_TableRowBgAlt] = ImVec4(0.0f, 0.0f, 0.0f, 0.025f);
-        c[ImGuiCol_Text] = ImVec4(0.110f, 0.125f, 0.157f, 1.0f);
-        c[ImGuiCol_CheckMark] = kBlue;
-        c[ImGuiCol_PlotHistogram] = kGreen;
-    }
-
-    style.WindowRounding = 0.0f;
-    style.ChildRounding = 8.0f;
-    style.FrameRounding = 6.0f;
-    style.PopupRounding = 8.0f;
-    style.GrabRounding = 6.0f;
-    style.TabRounding = 6.0f;
-    style.WindowBorderSize = 0.0f;
-    style.ChildBorderSize = 1.0f;
-    style.WindowPadding = ImVec2(14, 12);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(10, 8);
-    style.CellPadding = ImVec2(8, 5);
-    style.ScrollbarSize = 12.0f;
-}
-
 void DashboardWindow::render(LiveController& controller) {
+    glass::drawBackground();
+
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Muuk", nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground |
+                     ImGuiWindowFlags_NoScrollbar);
 
     const bool running = controller.isRunning();
     const std::optional<LiveSnapshot> snap = controller.snapshot();
@@ -367,9 +285,7 @@ void DashboardWindow::render(LiveController& controller) {
     // reviewed/edited before connecting; while connected (and not being
     // edited), mirror whatever the running bot actually uses.
     if (!settingsLoaded_ && configPathBuffer_[0] != '\0') {
-        if (auto loaded = controller.loadSettings(configPathBuffer_.data())) {
-            editSettings_ = *loaded;
-        }
+        if (auto loaded = controller.loadSettings(configPathBuffer_.data())) editSettings_ = *loaded;
         settingsLoaded_ = true;
     }
     if (connected && !settingsDirty_) {
@@ -377,24 +293,22 @@ void DashboardWindow::render(LiveController& controller) {
         settingsLoaded_ = true;
     }
 
-    renderConnectionBar(controller, running, connected);
-    ImGui::Spacing();
+    renderHeader(controller, running, connected);
     renderKpiCards(snap, connected);
-    ImGui::Spacing();
 
-    const float leftWidth = std::max(360.0f, ImGui::GetContentRegionAvail().x * 0.34f);
-    ImGui::BeginChild("left", ImVec2(leftWidth, 0), ImGuiChildFlags_None);
+    const float leftWidth = std::max(380.0f, ImGui::GetContentRegionAvail().x * 0.35f);
+    ImGui::BeginChild("left", ImVec2(leftWidth, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
     renderRangePanel(controller, snap, connected);
-    ImGui::Spacing();
     renderSettingsPanel(controller, snap, connected);
     ImGui::EndChild();
 
     ImGui::SameLine();
 
-    ImGui::BeginChild("right", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    glass::beginCard("right", ImVec2(0, 0));
     if (ImGui::BeginTabBar("tabs")) {
         const std::string posLabel =
-            "Positions (" + std::to_string(snap ? snap->positions.size() : 0) + ")###positions";
+            "  Positions  " + std::to_string(snap ? snap->positions.size() : 0) + "  ###positions";
         if (ImGui::BeginTabItem(posLabel.c_str())) {
             if (snap) {
                 renderPositionsTab(controller, *snap, connected);
@@ -404,7 +318,7 @@ void DashboardWindow::render(LiveController& controller) {
             ImGui::EndTabItem();
         }
         const std::string ordLabel =
-            "Pending orders (" + std::to_string(snap ? snap->pendingOrders.size() : 0) + ")###orders";
+            "  Pending orders  " + std::to_string(snap ? snap->pendingOrders.size() : 0) + "  ###orders";
         if (ImGui::BeginTabItem(ordLabel.c_str())) {
             if (snap) {
                 renderOrdersTab(controller, *snap, connected);
@@ -413,13 +327,13 @@ void DashboardWindow::render(LiveController& controller) {
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Log")) {
+        if (ImGui::BeginTabItem("  Log  ###log")) {
             renderLogTab(controller);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
-    ImGui::EndChild();
+    glass::endCard();
 
     if (openConfirmRequested_) {
         ImGui::OpenPopup("Please confirm");
@@ -430,58 +344,51 @@ void DashboardWindow::render(LiveController& controller) {
     ImGui::End();
 }
 
-void DashboardWindow::renderConnectionBar(LiveController& controller, bool running, bool connected) {
-    if (largeFont_) ImGui::PushFont(largeFont_);
-    ImGui::TextColored(kBlue, "MUUK");
-    if (largeFont_) ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("XAUUSD range bot");
+void DashboardWindow::renderHeader(LiveController& controller, bool running, bool connected) {
+    glass::beginCard("header", ImVec2(0, 0), true);
 
-    ImGui::SameLine(0.0f, 24.0f);
+    // Row 1: brand, connection pill, theme toggle.
+    withFont(largeFont_, [] { ImGui::TextColored(kBlue, "MUUK"); });
+    ImGui::SameLine(0.0f, 10.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("XAUUSD range bot  |  IC Markets FIX");
+    ImGui::SameLine(0.0f, 20.0f);
     if (connected) {
-        chip("Connected", kGreen);
+        glass::pill("Live", kGreen, true);
     } else if (running) {
-        chip("Connecting...", kAmber);
+        glass::pill("Connecting", kAmber, true);
     } else {
-        chip("Disconnected", kGrey);
+        glass::pill("Offline", kGrey);
     }
 
-    ImGui::SameLine(0.0f, 24.0f);
+    const float themeWidth = 92.0f;
+    ImGui::SameLine(ImGui::GetWindowWidth() - themeWidth - ImGui::GetStyle().WindowPadding.x);
+    if (glass::button(darkMode_ ? "Light mode" : "Dark mode", kViolet, ImVec2(themeWidth, 0))) {
+        setTheme(!darkMode_);
+    }
+
+    // Row 2: config file + connect/disconnect.
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("Config");
+    ImGui::TextDisabled("Config file");
     ImGui::SameLine();
-    const float themeWidth = 90.0f;
-    const float buttonsWidth = 230.0f;
-    ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - buttonsWidth - themeWidth));
+    const float buttonsWidth = 2 * 120.0f + ImGui::GetStyle().ItemSpacing.x * 2;
+    ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x - buttonsWidth));
     ImGui::BeginDisabled(running);
     if (ImGui::InputText("##configpath", configPathBuffer_.data(), configPathBuffer_.size())) {
         settingsLoaded_ = false;  // reload tunables from the newly typed file
         settingsDirty_ = false;
     }
-    ImGui::EndDisabled();
-
     ImGui::SameLine();
-    ImGui::BeginDisabled(running);
-    if (coloredButton("Connect", kGreen, ImVec2(105, 0))) {
+    if (glass::button("Connect", kGreen, ImVec2(120, 0), glass::ButtonKind::Primary)) {
         settingsDirty_ = false;
         controller.start(std::string(configPathBuffer_.data()));
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!running);
-    if (ImGui::Button("Disconnect", ImVec2(105, 0))) {
-        controller.stop();
-    }
+    if (glass::button("Disconnect", glass::palette().neutral, ImVec2(120, 0))) controller.stop();
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Disconnects from the broker. Open positions and pending orders stay at the broker as they are.");
-
-    ImGui::SameLine();
-    bool dark = darkMode_;
-    if (ImGui::Checkbox(dark ? "Dark" : "Light", &dark)) {
-        darkMode_ = dark;
-        applyTheme();
-    }
 
     const std::string err = controller.lastError();
     if (!err.empty()) {
@@ -492,150 +399,156 @@ void DashboardWindow::renderConnectionBar(LiveController& controller, bool runni
     if (!flashMessage_.empty() && ImGui::GetTime() < flashUntil_) {
         ImGui::TextColored(kAmber, "%s", flashMessage_.c_str());
     }
+    glass::endCard();
 }
 
 void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bool connected) {
-    const int count = 6;
+    constexpr int kCount = 6;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float width = (ImGui::GetContentRegionAvail().x - spacing * (count - 1)) / count;
-    const float height = ImGui::GetTextLineHeightWithSpacing() * 3.2f + (largeFont_ ? 8.0f : 0.0f);
+    const float width = (ImGui::GetContentRegionAvail().x - spacing * (kCount - 1)) / kCount;
+    const float numberH = numberFont_ ? numberFont_->FontSize : ImGui::GetTextLineHeight();
+    const float height = ImGui::GetTextLineHeight() * 2.0f + numberH + ImGui::GetStyle().WindowPadding.y * 2 + 10.0f;
 
+    auto card = [&](const char* id, const char* caption, const std::string& value, ImVec4 valueColor,
+                    const std::string& sub, bool last = false) {
+        glass::beginCard(id, ImVec2(width, height), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::TextDisabled("%s", caption);
+        withFont(numberFont_, [&] { ImGui::TextColored(valueColor, "%s", value.c_str()); });
+        if (!sub.empty()) ImGui::TextDisabled("%s", sub.c_str());
+        glass::endCard();
+        if (!last) ImGui::SameLine();
+    };
+
+    const ImVec4 text = glass::palette().text;
     const bool haveQuote = snap && snap->bid && snap->ask;
-
-    kpiCard("k_price", "Bid / Ask",
-            haveQuote ? price(*snap->bid) + " / " + price(*snap->ask) : std::string("--"),
-            ImGui::GetStyleColorVec4(ImGuiCol_Text), snap ? snap->symbolName + "  (id " + snap->symbolId + ")" : "",
-            largeFont_, width, height);
-    ImGui::SameLine();
-
-    kpiCard("k_spread", "Spread", haveQuote ? price(*snap->ask - *snap->bid) : std::string("--"),
-            ImGui::GetStyleColorVec4(ImGuiCol_Text),
-            snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "", largeFont_, width,
-            height);
-    ImGui::SameLine();
-
-    double floating = 0.0;
     double buyLots = 0.0;
     double sellLots = 0.0;
     if (snap) {
-        for (const auto& p : snap->positions) {
-            floating += p.floatingPnl;
-            (p.side == OrderSide::BuyStop ? buyLots : sellLots) += p.lots;
-        }
+        for (const auto& p : snap->positions) (p.side == OrderSide::BuyStop ? buyLots : sellLots) += p.lots;
     }
-    kpiCard("k_float", "Floating P/L", connected ? money(floating) : std::string("--"), pnlColor(floating),
-            snap ? "Target " + money(snap->settings.profitTarget) : "", largeFont_, width, height);
-    ImGui::SameLine();
+    const double floating = connected && snap ? floatingPnl(*snap) : 0.0;
+    const double shownFloating = glass::ease("kpi_floating", static_cast<float>(floating), 12.0f);
+    const double shownBooked = snap ? glass::ease("kpi_booked", static_cast<float>(snap->realizedPnl), 8.0f) : 0.0;
 
-    kpiCard("k_pos", "Open positions", snap ? std::to_string(snap->positions.size()) : std::string("--"),
-            ImGui::GetStyleColorVec4(ImGuiCol_Text),
-            snap ? "Buy " + lots(buyLots) + "  |  Sell " + lots(sellLots) : "", largeFont_, width, height);
-    ImGui::SameLine();
-
-    kpiCard("k_ord", "Pending orders", snap ? std::to_string(snap->pendingOrders.size()) : std::string("--"),
-            ImGui::GetStyleColorVec4(ImGuiCol_Text), cycleState(snap, connected).label, largeFont_, width, height);
-    ImGui::SameLine();
-
-    kpiCard("k_real", "Session booked P/L", snap ? money(snap->realizedPnl) : std::string("--"),
-            snap ? pnlColor(snap->realizedPnl) : kGrey,
-            snap ? std::to_string(snap->basketsClosed) + " basket(s) closed" : "", largeFont_, width, height);
+    card("k_price", "BID / ASK", haveQuote ? price(*snap->bid) + " / " + price(*snap->ask) : std::string("--"), text,
+         snap ? snap->symbolName : "");
+    card("k_spread", "SPREAD", haveQuote ? price(*snap->ask - *snap->bid) : std::string("--"), text,
+         snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "");
+    card("k_float", "FLOATING P/L", connected ? money(shownFloating) : std::string("--"), pnlColor(floating),
+         snap ? "Target " + money(snap->settings.profitTarget) : "");
+    card("k_pos", "OPEN POSITIONS", snap ? std::to_string(snap->positions.size()) : std::string("--"), text,
+         snap ? "Buy " + lots(buyLots) + "  /  Sell " + lots(sellLots) : "");
+    card("k_ord", "PENDING ORDERS", snap ? std::to_string(snap->pendingOrders.size()) : std::string("--"), text,
+         cycleState(snap, connected).label);
+    card("k_real", "BOOKED TODAY", snap ? money(shownBooked) : std::string("--"),
+         snap ? pnlColor(snap->realizedPnl) : kGrey, snap ? std::to_string(snap->basketsClosed) + " basket(s)" : "",
+         true);
 }
 
 void DashboardWindow::renderRangePanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                        bool connected) {
-    ImGui::BeginChild("range_panel", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-    sectionTitle("Range", boldFont_);
+    glass::beginCard("range_panel", ImVec2(0, 0), true);
+
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Range");
+    });
     ImGui::SameLine();
     const CycleState state = cycleState(snap, connected);
-    chip(state.label, state.color);
+    const bool busy = connected && snap && (snap->status == EngineStatus::Active || snap->closingInProgress);
+    glass::pill(state.label, state.color, busy);
     if (snap && snap->cooldownRemainingSeconds > 0) {
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(kBlue, "%ds", snap->cooldownRemainingSeconds);
     }
 
-    const float chartHeight = ImGui::GetTextLineHeight() * 2.0f + 70.0f;
+    const float chartHeight = ImGui::GetTextLineHeight() * 2.0f + 72.0f;
     if (snap && connected) {
         drawRangeChart(*snap, chartHeight);
-        ImGui::TextDisabled("Width $%.2f   |   green = Buy Stop / buy, red = Sell Stop / sell",
-                            snap->rangeUpper - snap->rangeLower);
     } else {
-        ImGui::Dummy(ImVec2(0, chartHeight));
-        ImGui::TextDisabled("Connect to see the live range.");
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x;
+        ImGui::Dummy(ImVec2(w, chartHeight));
+        const char* msg = "Connect to see the live range";
+        const ImVec2 ts = ImGui::CalcTextSize(msg);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (w - ts.x) / 2, p.y + (chartHeight - ts.y) / 2),
+                                            ImGui::GetColorU32(glass::palette().textDim), msg);
     }
 
-    // Progress towards the profit target.
     if (snap && connected && snap->settings.profitTarget > 0.0) {
-        double floating = 0.0;
-        for (const auto& p : snap->positions) floating += p.floatingPnl;
-        const float frac = static_cast<float>(std::clamp(floating / snap->settings.profitTarget, 0.0, 1.0));
-        const std::string overlay = money(floating) + " of " + money(snap->settings.profitTarget) + " target";
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, floating >= 0 ? kGreen : kRed);
-        ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0), overlay.c_str());
-        ImGui::PopStyleColor();
+        const double floating = floatingPnl(*snap);
+        const std::string overlay = money(floating) + "  of  " + money(snap->settings.profitTarget) + " target";
+        glass::progress("target_progress", static_cast<float>(floating / snap->settings.profitTarget),
+                        floating >= 0 ? kGreen : kRed, overlay.c_str());
     }
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
-    const float bigHeight = ImGui::GetFrameHeight() * 1.6f;
+    const float bigHeight = ImGui::GetFrameHeight() * 1.7f;
 
     const char* blocker = openRangeBlocker(snap, connected);
     ImGui::BeginDisabled(blocker != nullptr);
-    if (coloredButton("Open range", kGreen, ImVec2(half, bigHeight))) {
+    if (glass::button("Open range", kGreen, ImVec2(half, bigHeight), glass::ButtonKind::Primary)) {
         if (!controller.openRange()) flash("Could not open a range - see the Log tab for why.");
     }
     ImGui::EndDisabled();
-    if (blocker) ImGui::SetItemTooltip("%s", blocker);
-    else ImGui::SetItemTooltip("Opens a new range centered on the current price.");
+    if (blocker) {
+        ImGui::SetItemTooltip("%s", blocker);
+    } else {
+        ImGui::SetItemTooltip("Opens a new range at the current price.");
+    }
 
     ImGui::SameLine();
     const bool somethingToClose =
         connected && snap &&
         (snap->status == EngineStatus::Active || !snap->positions.empty() || !snap->pendingOrders.empty());
     ImGui::BeginDisabled(!somethingToClose);
-    if (coloredButton("Close range", kRed, ImVec2(half, bigHeight))) {
+    if (glass::button("Close range", kRed, ImVec2(half, bigHeight), glass::ButtonKind::Primary)) {
         confirm_ = Confirm::CloseRange;
         openConfirmRequested_ = true;
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Cancels all pending orders, closes all open positions, and stops the bot until you open a new range.");
+    ImGui::SetItemTooltip("Cancels all pending orders, closes all open positions, and waits until you open a new range.");
 
     ImGui::BeginDisabled(!connected || !snap);
     bool autoContinue = snap ? snap->settings.autoContinue : editSettings_.autoContinue;
     if (ImGui::Checkbox("Auto-open the next range after each basket closes", &autoContinue) && snap) {
-        LiveSettings s = snap->settings;  // only this one field -- other edits wait for Apply
+        LiveSettings s = snap->settings;  // only this field -- other edits wait for Apply
         s.autoContinue = autoContinue;
         controller.applySettings(s);
         editSettings_.autoContinue = autoContinue;
     }
     ImGui::EndDisabled();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("Emergency");
     ImGui::BeginDisabled(!connected || !snap || snap->positions.empty());
-    if (ImGui::Button("Close all positions", ImVec2(half, 0))) {
+    if (glass::button("Close all positions", kRed, ImVec2(half, 0))) {
         confirm_ = Confirm::CloseAllPositions;
         openConfirmRequested_ = true;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!connected || !snap || snap->pendingOrders.empty());
-    if (ImGui::Button("Cancel all pending", ImVec2(half, 0))) {
+    if (glass::button("Cancel all pending", kAmber, ImVec2(half, 0))) {
         confirm_ = Confirm::CancelAllPending;
         openConfirmRequested_ = true;
     }
     ImGui::EndDisabled();
 
-    ImGui::EndChild();
+    glass::endCard();
 }
 
 void DashboardWindow::renderSettingsPanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                           bool connected) {
-    ImGui::BeginChild("settings_panel", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    sectionTitle("Strategy settings", boldFont_);
+    glass::beginCard("settings_panel", ImVec2(0, 0));
+
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Strategy settings");
+    });
     if (settingsDirty_) {
         ImGui::SameLine();
-        chip("edited", kAmber);
+        glass::pill("edited", kAmber);
     }
     ImGui::TextDisabled("Changes apply from the next range - never to a running one.");
 
@@ -644,7 +557,23 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         LiveSettings& s = editSettings_;
-        settingDouble("Range width ($)", "Distance between the Buy Stop (top) and Sell Stop (bottom) boundaries.",
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("First order");
+        ImGui::SetItemTooltip("How each range starts. 'Buy Stop first': only a Buy Stop is placed; the Sell Stop "
+                              "follows once it fills, and so on -- one pending order at a time.");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        const char* startItems[] = {"Buy Stop first", "Sell Stop first", "Both at once"};
+        int startIndex = s.startSide == StartSide::BuyOnly ? 0 : (s.startSide == StartSide::SellOnly ? 1 : 2);
+        if (ImGui::Combo("##startside", &startIndex, startItems, 3)) {
+            s.startSide = startIndex == 0 ? StartSide::BuyOnly : (startIndex == 1 ? StartSide::SellOnly : StartSide::Both);
+            settingsDirty_ = true;
+        }
+
+        settingDouble("Range width ($)", "Distance between the Buy Stop (top) and Sell Stop (bottom) of a range.",
                       &s.rangeWidth, 0.10, "%.2f", &settingsDirty_);
         settingDouble("Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
                       &s.profitTarget, 0.25, "%.2f", &settingsDirty_);
@@ -652,9 +581,9 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &settingsDirty_);
         settingDouble("Lot increment", "Added to the lot size on every following order (0.01 -> 0.02 -> 0.03...).",
                       &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
-        settingDouble("Seed offset ($)",
-                      "How far beyond bid/ask the two starting orders sit. The first to fill anchors the range; "
-                      "0 = place the full range immediately instead.",
+        settingDouble("Entry offset ($)",
+                      "How far beyond the current price the first order sits. Its fill sets the range. "
+                      "0 = place the first order at the range boundary instead.",
                       &s.seedOffset, 0.01, "%.2f", &settingsDirty_);
         settingInt("Cooldown (s)", "Pause after a basket is fully closed before the next range opens.",
                    &s.cooldownSeconds, &settingsDirty_);
@@ -672,7 +601,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     ImGui::Spacing();
     const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
     ImGui::BeginDisabled(!connected || !settingsDirty_);
-    if (coloredButton("Apply", kBlue, ImVec2(third, 0))) {
+    if (glass::button("Apply", kBlue, ImVec2(third, 0), glass::ButtonKind::Primary)) {
         controller.applySettings(editSettings_);
         settingsDirty_ = false;
         flash("Settings applied - they take effect when the next range opens.");
@@ -682,7 +611,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!settingsLoaded_ || configPathBuffer_[0] == '\0');
-    if (ImGui::Button("Save to file", ImVec2(third, 0))) {
+    if (glass::button("Save to file", kBlue, ImVec2(third, 0))) {
         if (controller.saveSettings(configPathBuffer_.data(), editSettings_)) {
             if (connected) controller.applySettings(editSettings_);
             settingsDirty_ = false;
@@ -690,11 +619,11 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         }
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Writes these settings into the config file (credentials are left untouched) and applies them if connected.");
+    ImGui::SetItemTooltip("Writes these settings into the config file (credentials untouched) and applies them if connected.");
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!settingsDirty_);
-    if (ImGui::Button("Revert", ImVec2(third, 0))) {
+    if (glass::button("Revert", glass::palette().neutral, ImVec2(third, 0))) {
         settingsDirty_ = false;
         if (connected && snap) {
             editSettings_ = snap->settings;
@@ -704,7 +633,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     }
     ImGui::EndDisabled();
 
-    ImGui::EndChild();
+    glass::endCard();
 }
 
 void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveSnapshot& snap, bool connected) {
@@ -714,18 +643,18 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
         return;
     }
 
-    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
-                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
-    const float footer = ImGui::GetFrameHeightWithSpacing() * 1.4f;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
+    const float footer = ImGui::GetFrameHeightWithSpacing() * 1.3f;
     if (ImGui::BeginTable("positions", 7, flags, ImVec2(0, -footer))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-        ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
+        ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Entry");
         ImGui::TableSetupColumn("Now");
         ImGui::TableSetupColumn("P/L");
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 84.0f);
         ImGui::TableHeadersRow();
 
         for (const auto& p : snap.positions) {
@@ -750,25 +679,23 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::TextColored(pnlColor(p.floatingPnl), "%s", money(p.floatingPnl).c_str());
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!connected);
-            if (coloredButton("Close", kRed, ImVec2(-FLT_MIN, 0))) controller.closePosition(p.id);
+            if (glass::button("Close", kRed, ImVec2(-1, 0))) controller.closePosition(p.id);
             ImGui::EndDisabled();
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
 
-    double total = 0.0;
     double buyLots = 0.0;
     double sellLots = 0.0;
-    for (const auto& p : snap.positions) {
-        total += p.floatingPnl;
-        (p.side == OrderSide::BuyStop ? buyLots : sellLots) += p.lots;
-    }
+    for (const auto& p : snap.positions) (p.side == OrderSide::BuyStop ? buyLots : sellLots) += p.lots;
+    const double total = floatingPnl(snap);
     ImGui::Separator();
     ImGui::AlignTextToFramePadding();
-    ImGui::Text("Buy %s lots   |   Sell %s lots   |   Total floating", lots(buyLots).c_str(), lots(sellLots).c_str());
+    ImGui::TextDisabled("Buy %s lots   /   Sell %s lots   /   Total floating", lots(buyLots).c_str(),
+                        lots(sellLots).c_str());
     ImGui::SameLine();
-    ImGui::TextColored(pnlColor(total), "%s", money(total).c_str());
+    withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(total), "%s", money(total).c_str()); });
 }
 
 void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnapshot& snap, bool connected) {
@@ -778,16 +705,16 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
         return;
     }
 
-    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
-                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
     if (ImGui::BeginTable("orders", 6, flags)) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 84.0f);
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Price");
         ImGui::TableSetupColumn("Distance");
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 84.0f);
         ImGui::TableHeadersRow();
 
         for (const auto& o : snap.pendingOrders) {
@@ -812,7 +739,7 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
             }
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!connected);
-            if (ImGui::Button("Cancel", ImVec2(-FLT_MIN, 0))) controller.cancelOrder(o.id);
+            if (glass::button("Cancel", kAmber, ImVec2(-1, 0))) controller.cancelOrder(o.id);
             ImGui::EndDisabled();
             ImGui::PopID();
         }
@@ -827,7 +754,7 @@ void DashboardWindow::renderLogTab(LiveController& controller) {
     ImGui::Checkbox("Auto-scroll", &logAutoScroll_);
     ImGui::SameLine();
     const std::vector<std::string> lines = controller.logLines();
-    if (ImGui::Button("Copy")) {
+    if (glass::button("Copy", glass::palette().neutral)) {
         std::string all;
         for (const auto& l : lines) {
             all += l;
@@ -837,7 +764,7 @@ void DashboardWindow::renderLogTab(LiveController& controller) {
         flash("Log copied to clipboard.");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Clear")) controller.clearLog();
+    if (glass::button("Clear", glass::palette().neutral)) controller.clearLog();
 
     std::vector<const std::string*> shown;
     shown.reserve(lines.size());
@@ -852,18 +779,18 @@ void DashboardWindow::renderLogTab(LiveController& controller) {
     while (clipper.Step()) {
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             const std::string& l = *shown[static_cast<std::size_t>(i)];
-            ImVec4 col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            ImVec4 color = glass::palette().text;
             if (l.find("CRITICAL") != std::string::npos || l.find("[error]") != std::string::npos ||
                 l.find("rejected") != std::string::npos) {
-                col = kRed;
+                color = kRed;
             } else if (l.find("[manual]") != std::string::npos || l.find("[settings]") != std::string::npos) {
-                col = kAmber;
+                color = kAmber;
             } else if (l.find("[basket]") != std::string::npos) {
-                col = kBlue;
+                color = kViolet;
             } else if (l.find("[order]") != std::string::npos) {
-                col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+                color = glass::palette().textDim;
             }
-            ImGui::TextColored(col, "%s", l.c_str());
+            ImGui::TextColored(color, "%s", l.c_str());
         }
     }
     if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f) {
@@ -874,7 +801,11 @@ void DashboardWindow::renderLogTab(LiveController& controller) {
 
 void DashboardWindow::renderConfirmPopup(LiveController& controller) {
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::BeginPopupModal("Please confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22, 18));
+    const bool open = ImGui::BeginPopupModal("Please confirm", nullptr,
+                                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+    ImGui::PopStyleVar();
+    if (!open) return;
 
     const char* title = "";
     const char* detail = "";
@@ -902,10 +833,11 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
             return;
     }
 
-    sectionTitle(title, boldFont_);
+    withFont(boldFont_, [&] { ImGui::TextUnformatted(title); });
     ImGui::TextDisabled("%s", detail);
     ImGui::Spacing();
-    if (coloredButton(action, kRed, ImVec2(180, 0))) {
+    ImGui::Spacing();
+    if (glass::button(action, kRed, ImVec2(190, 0), glass::ButtonKind::Primary)) {
         switch (confirm_) {
             case Confirm::CloseRange:
                 controller.closeRange();
@@ -923,7 +855,7 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Keep", ImVec2(100, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    if (glass::button("Keep", glass::palette().neutral, ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         confirm_ = Confirm::None;
         ImGui::CloseCurrentPopup();
     }

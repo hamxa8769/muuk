@@ -1,5 +1,7 @@
 #include "muuk/config_json/strategy_config_json.hpp"
 
+#include <stdexcept>
+
 using namespace muuk::core;
 
 namespace muuk::config_json {
@@ -53,8 +55,28 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
     cfg.maxRejectRetries = j.value("maxRejectRetries", cfg.maxRejectRetries);
     cfg.reArmOnFill = j.value("reArmOnFill", cfg.reArmOnFill);
     cfg.seedOffsetPoints = j.value("seedOffsetPoints", cfg.seedOffsetPoints);
+    cfg.startSide = parseStartSide(j.value("startSide", std::string("both")));
 
     return cfg;
+}
+
+StartSide parseStartSide(const std::string& value) {
+    if (value == "buy") return StartSide::BuyOnly;
+    if (value == "sell") return StartSide::SellOnly;
+    if (value == "both") return StartSide::Both;
+    throw std::runtime_error("strategy.startSide must be \"buy\", \"sell\" or \"both\" (got \"" + value + "\")");
+}
+
+std::string startSideToString(StartSide side) {
+    switch (side) {
+        case StartSide::BuyOnly:
+            return "buy";
+        case StartSide::SellOnly:
+            return "sell";
+        case StartSide::Both:
+        default:
+            return "both";
+    }
 }
 
 }  // namespace muuk::config_json

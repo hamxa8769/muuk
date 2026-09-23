@@ -447,6 +447,71 @@ TEST_CASE("seedOffsetPoints>0: seeds sit outside the spread, so they can't both 
     REQUIRE(sellSeed.volume.toDouble(spec) == Catch::Approx(0.01));
 }
 
+TEST_CASE("startSide=BuyOnly: one Buy Stop, then strictly one order at a time, alternating") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);  // range 4336.00 - 4337.00
+    cfg.startSide = StartSide::BuyOnly;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    REQUIRE(initial.size() == 1);  // no Sell Stop yet
+    const auto& buy1 = placeCmd(initial, 0);
+    REQUIRE(buy1.side == OrderSide::BuyStop);
+    REQUIRE(buy1.price == Price::fromDouble(4337.00, spec));
+    REQUIRE(buy1.volume.toDouble(spec) == Catch::Approx(0.01));
+    REQUIRE(engine.activeOrderCount() == 1);
+
+    // Buy fills -> the Sell Stop (next lot) goes on at the lower boundary.
+    CommandBatch out = engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, Price::fromDouble(4337.00, spec)});
+    REQUIRE(out.size() == 1);
+    const auto& sell = placeCmd(out, 0);
+    REQUIRE(sell.side == OrderSide::SellStop);
+    REQUIRE(sell.price == Price::fromDouble(4336.00, spec));
+    REQUIRE(sell.volume.toDouble(spec) == Catch::Approx(0.02));
+    REQUIRE(engine.activeOrderCount() == 1);
+
+    // Sell fills -> a Buy Stop back at the top, next lot again.
+    out = engine.onOrderConfirmed(OrderConfirmedEvent{sell.id, Price::fromDouble(4336.00, spec)});
+    REQUIRE(out.size() == 1);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::BuyStop);
+    REQUIRE(placeCmd(out, 0).price == Price::fromDouble(4337.00, spec));
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.03));
+    REQUIRE(engine.activeOrderCount() == 1);
+}
+
+TEST_CASE("startSide=BuyOnly with seeding: one Buy seed above the ask; its fill anchors the range") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);  // width 1.00
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.seedOffsetPoints = 0.05;
+    StrategyEngine engine(cfg);
+
+    TickEvent tick;
+    tick.bid = Price::fromDouble(4280.88, spec);
+    tick.ask = Price::fromDouble(4280.99, spec);
+    engine.onTick(tick);
+
+    const CommandBatch initial = engine.start();
+    REQUIRE(initial.size() == 1);
+    const auto& seed = placeCmd(initial, 0);
+    REQUIRE(seed.side == OrderSide::BuyStop);
+    REQUIRE(seed.price == Price::fromDouble(4281.04, spec));  // ask + 0.05
+    REQUIRE(seed.volume.toDouble(spec) == Catch::Approx(0.01));
+    REQUIRE(engine.seeding());
+
+    // Fill at 4281.04: that becomes the top of the range, the Sell Stop goes
+    // one range-width below it, at the next lot -- and nothing is cancelled,
+    // since there was no second seed.
+    const CommandBatch out = engine.onOrderConfirmed(OrderConfirmedEvent{seed.id, Price::fromDouble(4281.04, spec)});
+    REQUIRE(out.size() == 1);
+    const auto& sell = placeCmd(out, 0);
+    REQUIRE(sell.side == OrderSide::SellStop);
+    REQUIRE(sell.price == Price::fromDouble(4280.04, spec));
+    REQUIRE(sell.volume.toDouble(spec) == Catch::Approx(0.02));
+    REQUIRE_FALSE(engine.seeding());
+    REQUIRE(engine.currentRange().upperBound == Price::fromDouble(4281.04, spec));
+}
+
 TEST_CASE("stopCycle() abandons the cycle silently and start() can arm a fresh one with unique ids") {
     const SymbolSpec spec = xauusdSpec();
     StrategyEngine engine(baseConfig(spec));

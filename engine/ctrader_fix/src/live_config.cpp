@@ -79,6 +79,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
     s.autoContinue = config.connection.autoContinue;
+    s.startSide = config.strategy.startSide;
     return s;
 }
 
@@ -98,6 +99,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
+    st.startSide = s.startSide;
 
     config.connection.autoRangeWidthPoints = s.rangeWidth;
     config.connection.basketCooldownSeconds = s.cooldownSeconds;
@@ -121,6 +123,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
 
     auto& st = j["strategy"];
     st["seedOffsetPoints"] = s.seedOffset;
+    st["startSide"] = muuk::config_json::startSideToString(s.startSide);
     st["basketProfitTargetMoney"] = s.profitTarget;
     st["lotProgression"]["initialLot"] = s.initialLot;
     st["lotProgression"]["lotIncrement"] = s.lotIncrement;

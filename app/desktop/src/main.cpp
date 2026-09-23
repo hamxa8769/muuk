@@ -9,10 +9,15 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX  // keep windows.h's min/max macros from breaking std::min/std::max
 #include <windows.h>
+#include <dwmapi.h>
 #endif
 
 #include <GL/gl.h>
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -29,7 +34,26 @@ void glfwErrorCallback(int error, const char* description) {
 ImFont* tryAddFont(const char* path, float size, const ImWchar* ranges) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return nullptr;
-    return ImGui::GetIO().Fonts->AddFontFromFileTTF(path, size, nullptr, ranges);
+    ImFontConfig cfg;
+    cfg.OversampleH = 3;  // smoother glyph edges at small sizes
+    cfg.OversampleV = 2;
+    return ImGui::GetIO().Fonts->AddFontFromFileTTF(path, size, &cfg, ranges);
+}
+
+// Matches the native Windows title bar to the app theme (Windows 10 20H1+;
+// older builds used attribute 19 for the same thing). Harmless no-op elsewhere.
+void setNativeTitleBarDark(GLFWwindow* window, bool dark) {
+#ifdef _WIN32
+    HWND hwnd = glfwGetWin32Window(window);
+    const BOOL value = dark ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &value, sizeof(value)))) {
+        DwmSetWindowAttribute(hwnd, 19, &value, sizeof(value));
+    }
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+#else
+    (void)window;
+    (void)dark;
+#endif
 }
 }  // namespace
 
@@ -68,15 +92,21 @@ int main() {
     const float base = 16.0f * std::max(1.0f, xscale);
     ImFont* regular = tryAddFont("C:/Windows/Fonts/segoeui.ttf", base, kGlyphRanges);
     if (!regular) io.Fonts->AddFontDefault();
-    ImFont* bold = tryAddFont("C:/Windows/Fonts/segoeuib.ttf", base, kGlyphRanges);
-    ImFont* large = tryAddFont("C:/Windows/Fonts/segoeuib.ttf", base * 1.4f, kGlyphRanges);
+    ImFont* bold = tryAddFont("C:/Windows/Fonts/seguisb.ttf", base, kGlyphRanges);  // Segoe UI Semibold
+    if (!bold) bold = tryAddFont("C:/Windows/Fonts/segoeuib.ttf", base, kGlyphRanges);
+    ImFont* large = tryAddFont("C:/Windows/Fonts/segoeuib.ttf", base * 1.45f, kGlyphRanges);
+    // Bahnschrift (Windows 10+) for the big KPI numbers -- a clean, modern
+    // figure style; Segoe UI Semibold if it's missing.
+    ImFont* numbers = tryAddFont("C:/Windows/Fonts/bahnschrift.ttf", base * 1.55f, kGlyphRanges);
+    if (!numbers) numbers = tryAddFont("C:/Windows/Fonts/seguisb.ttf", base * 1.45f, kGlyphRanges);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 
     muuk::desktop::LiveController controller;
     muuk::desktop::DashboardWindow dashboard;
-    dashboard.setFonts(bold, large);
+    dashboard.setFonts(bold, large, numbers);
+    dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
 
     while (!glfwWindowShouldClose(window)) {
         // Wakes immediately on any input, and otherwise at least ~60x/s so
@@ -94,8 +124,7 @@ int main() {
         int displayH = 0;
         glfwGetFramebufferSize(window, &displayW, &displayH);
         glViewport(0, 0, displayW, displayH);
-        const ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
-        glClearColor(bg.x, bg.y, bg.z, 1.0f);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);  // fully covered by the glass backdrop every frame
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
