@@ -110,10 +110,19 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
     server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
 
-    // --- Symbol resolution, then the initial two boundary orders ---
+    // --- Symbol resolution ---
     (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
     server.sendToClient(kTradeConn, buildSecurityListResponse());
 
+    // Quote subscription happens before the engine (and so the initial
+    // orders) is constructed -- see live_runner.cpp's run(): that
+    // ordering is what lets auto-range-centering observe a live tick
+    // first when enabled. autoRangeWidthPoints is 0 in this test's
+    // config, so no tick is required before the engine starts; the
+    // ordering still holds regardless.
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    // --- The initial two boundary orders ---
     const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
     REQUIRE(order1.getString(tag::Symbol) == "1");
     REQUIRE(order1.getInt(tag::Side) == 1);
@@ -129,8 +138,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     REQUIRE(order2.getDouble(tag::StopPx) == Catch::Approx(4336.00));
     REQUIRE(order2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
 
-    // --- Quote subscription, then a harmless in-range tick ---
-    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+    // --- A harmless in-range tick ---
     FixMessage snapshot = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
     snapshot.set(tag::Symbol, std::string("1"));
     snapshot.set(tag::NoMDEntries, int64_t{2});
@@ -192,6 +200,10 @@ TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogH
     (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
     server.sendToClient(kTradeConn, buildSecurityListResponse());
 
+    // Quote subscription happens before the engine (and initial orders)
+    // is constructed -- see the other TEST_CASE's comment on this.
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
     (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // seq1
     (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // seq2
 
@@ -210,6 +222,61 @@ TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogH
                         [](const std::string& l) { return l.find("logged on") != std::string::npos; });
         REQUIRE(sawLogonLine);
     }
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner auto-centers the range on the first live quote when autoRangeWidthPoints is set") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.connection.autoRangeWidthPoints = 0.20;
+    // The configured static range is deliberately far from the tick this
+    // test sends, so passing only proves auto-centering actually
+    // overrode it rather than coincidentally matching.
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    FixMessage snapshot = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    snapshot.set(tag::Symbol, std::string("1"));
+    snapshot.set(tag::NoMDEntries, int64_t{2});
+    snapshot.set(tag::MDEntryType, std::string("0"));
+    snapshot.set(tag::MDEntryPx, std::string("4292.40"));
+    snapshot.set(tag::MDEntryType, std::string("1"));
+    snapshot.set(tag::MDEntryPx, std::string("4292.50"));
+    server.sendToClient(kQuoteConn, snapshot);
+
+    // Mid = 4292.45; a 0.20-wide range centered there is [4292.35, 4292.55].
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(order1.getInt(tag::Side) == 1);
+    REQUIRE(order1.getDouble(tag::StopPx) == Catch::Approx(4292.55));
+
+    const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    REQUIRE(order2.getInt(tag::Side) == 2);
+    REQUIRE(order2.getDouble(tag::StopPx) == Catch::Approx(4292.35));
+
+    const LiveSnapshot snap = runner.snapshot();
+    REQUIRE(snap.rangeLower == Catch::Approx(4292.35));
+    REQUIRE(snap.rangeUpper == Catch::Approx(4292.55));
 
     runner.stop();
     runnerThread.join();

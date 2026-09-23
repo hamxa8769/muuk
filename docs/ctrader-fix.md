@@ -79,6 +79,29 @@ entry); `LiveRunner::resolveSymbol` sends that unfiltered request and
 matches the configured symbol name client-side — see
 `muuk::ctrader_fix::buildSecurityListRequest`/`parseSecurityList`.
 
+## Auto-centered range (`connection.autoRangeWidthPoints`)
+
+Manually re-editing `strategy.range` before every run to match wherever
+the market currently is turned out to be real, recurring friction (the
+market moves; a range set an hour ago can be tens of dollars away by the
+time you next start the bot, causing every pending order to trigger
+immediately and cascade). Setting `connection.autoRangeWidthPoints` to a
+non-zero total width (e.g. `0.20`) makes `LiveRunner` ignore
+`strategy.range`'s configured lower/upper entirely and instead center a
+range of that width around the midpoint of the *first live quote* it
+receives after connecting — see
+`LiveRunner::waitForFirstQuoteAndCenterRange` in `live_runner.cpp`. This
+is why quote subscription now happens *before* the engine (and so the
+initial orders) is constructed: a real tick has to arrive first. Leave it
+at `0` (default) to use `strategy.range` exactly as written — this is
+what the backtester and CLI examples still do, since there's no "live
+price" concept there.
+
+This is still a one-shot centering at startup, not continuous
+re-centering while running (that would be closer to genuine consolidation
+/support-resistance detection — not built, see the plan history) — the
+range is fixed for the lifetime of one `run()` call once set.
+
 ## Who detects a pending order's trigger?
 
 The broker does — that's the point of placing a real Stop order. Unlike

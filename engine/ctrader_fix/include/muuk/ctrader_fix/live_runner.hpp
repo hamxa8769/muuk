@@ -92,7 +92,15 @@ private:
     void onTradeMessage(const FixMessage& msg);
     void handleCommand(const muuk::core::Command& cmd);  // caller must hold engineMutex_
     void resolveSymbol();
-    void maybeEmitTick();  // caller must hold engineMutex_
+    void maybeEmitTick();  // caller must hold engineMutex_; no-op if engine_ isn't constructed yet
+
+    // Blocks until the first live bid+ask arrives, then centers
+    // config_.strategy.range around its midpoint using
+    // connection.autoRangeWidthPoints. Only called when that width is >0.
+    // Must run before engine_ is constructed (see engine_'s comment) —
+    // quote subscription happens before that construction specifically so
+    // this can observe a real tick first.
+    void waitForFirstQuoteAndCenterRange();
 
     LiveConfig config_;
     std::string symbolId_;
@@ -101,13 +109,24 @@ private:
     std::unique_ptr<FixSession> tradeSession_;
 
     mutable std::mutex engineMutex_;
-    muuk::core::StrategyEngine engine_;
+    // Constructed in run() — after symbol resolution and (if
+    // autoRangeWidthPoints>0) range auto-centering are both done, not in
+    // this class's constructor — because StrategyEngine takes a copy of
+    // StrategyConfig once and never re-reads config_.strategy afterward,
+    // so config_.strategy.range must already be final by the time this is
+    // built. Null until then; onQuoteMessage/maybeEmitTick handle that
+    // (ticks may start arriving, for auto-centering, before it exists).
+    std::unique_ptr<muuk::core::StrategyEngine> engine_;
     std::optional<double> latestBid_;
     std::optional<double> latestAsk_;
 
     std::mutex symbolMutex_;
     std::condition_variable symbolCv_;
     bool symbolResolved_ = false;
+
+    std::mutex firstQuoteMutex_;
+    std::condition_variable firstQuoteCv_;
+    bool firstQuoteReceived_ = false;
 
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<bool> running_{false};

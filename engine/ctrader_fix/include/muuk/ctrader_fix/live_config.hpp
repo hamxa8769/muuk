@@ -43,6 +43,15 @@ struct LiveConnectionConfig {
     // resolve it automatically instead.
     std::string symbolId;
 
+    // 0 (default): use strategy.range exactly as configured.
+    // >0: ignore strategy.range's lower/upper and instead center a range
+    // of this total width around the first live quote received after
+    // connecting — e.g. 0.20 with a mid price of 4292.45 gives a range of
+    // [4292.35, 4292.55]. This is what makes "just start it, no need to
+    // look up the current price by hand" possible; see
+    // LiveRunner::waitForFirstQuoteAndCenterRange in live_runner.cpp.
+    double autoRangeWidthPoints = 0.0;
+
     [[nodiscard]] std::string senderCompId() const {
         return environment + "." + brokerUid + "." + traderLogin;
     }

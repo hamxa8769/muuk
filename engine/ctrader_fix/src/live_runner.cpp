@@ -26,7 +26,7 @@ std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId
 }
 }  // namespace
 
-LiveRunner::LiveRunner(LiveConfig config) : config_(std::move(config)), engine_(config_.strategy) {}
+LiveRunner::LiveRunner(LiveConfig config) : config_(std::move(config)) {}
 
 LiveRunner::~LiveRunner() { stop(); }
 
@@ -41,16 +41,20 @@ void LiveRunner::log(const std::string& line) const {
 LiveSnapshot LiveRunner::snapshot() const {
     LiveSnapshot snap;
     snap.symbolName = config_.connection.symbolName;
-    snap.rangeLower = config_.strategy.range.lowerBound.toDouble(config_.strategy.symbol);
-    snap.rangeUpper = config_.strategy.range.upperBound.toDouble(config_.strategy.symbol);
 
     std::scoped_lock lock(engineMutex_);
-    snap.status = engine_.status();
+    // config_.strategy.range may be rewritten by waitForFirstQuoteAndCenterRange()
+    // under this same lock, so it's read here rather than before acquiring it.
+    snap.rangeLower = config_.strategy.range.lowerBound.toDouble(config_.strategy.symbol);
+    snap.rangeUpper = config_.strategy.range.upperBound.toDouble(config_.strategy.symbol);
     snap.symbolId = symbolId_;
-    snap.activeOrderCount = engine_.activeOrderCount();
-    const BasketPnlResult pnl = engine_.lastBasketPnl();
-    snap.lastGrossPnlMoney = pnl.grossPnlMoney;
-    snap.lastNetPnlMoney = pnl.netPnlMoney;
+    if (engine_) {
+        snap.status = engine_->status();
+        snap.activeOrderCount = engine_->activeOrderCount();
+        const BasketPnlResult pnl = engine_->lastBasketPnl();
+        snap.lastGrossPnlMoney = pnl.grossPnlMoney;
+        snap.lastNetPnlMoney = pnl.netPnlMoney;
+    }
     snap.bid = latestBid_;
     snap.ask = latestAsk_;
     return snap;
@@ -121,13 +125,23 @@ void LiveRunner::run() {
         resolveSymbol();
         log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
 
-        {
-            std::scoped_lock lock(engineMutex_);
-            for (const auto& cmd : engine_.start()) handleCommand(cmd);
+        // Subscribed before the engine is constructed: if auto-centering
+        // is enabled, a real tick needs to arrive first so there's a live
+        // price to center on. If it isn't, this ordering is harmless —
+        // onQuoteMessage/maybeEmitTick are no-ops until engine_ exists.
+        quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
+        log("subscribed to quotes");
+
+        if (config_.connection.autoRangeWidthPoints > 0.0) {
+            waitForFirstQuoteAndCenterRange();
         }
 
-        quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
-        log("subscribed to quotes; engine is now active");
+        engine_ = std::make_unique<StrategyEngine>(config_.strategy);
+        {
+            std::scoped_lock lock(engineMutex_);
+            for (const auto& cmd : engine_->start()) handleCommand(cmd);
+        }
+        log("engine is now active");
 
         while (running_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -196,7 +210,8 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             }
             const Price fillPrice = Price::fromDouble(*info.avgPx, config_.strategy.symbol);
             std::scoped_lock lock(engineMutex_);
-            for (const auto& cmd : engine_.onOrderConfirmed(OrderConfirmedEvent{*orderId, fillPrice})) {
+            if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
+            for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{*orderId, fillPrice})) {
                 handleCommand(cmd);
             }
             return;
@@ -208,8 +223,9 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 "): " + info.text.value_or("no reason given"));
             if (!orderId) return;
             std::scoped_lock lock(engineMutex_);
+            if (!engine_) return;
             for (const auto& cmd :
-                 engine_.onOrderRejected(OrderRejectedEvent{*orderId, RejectReason::BrokerRejected})) {
+                 engine_->onOrderRejected(OrderRejectedEvent{*orderId, RejectReason::BrokerRejected})) {
                 handleCommand(cmd);
             }
             return;
@@ -246,15 +262,26 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
 
     if (type == msgtype::MarketDataSnapshotFullRefresh || type == msgtype::MarketDataIncrementalRefresh) {
         const auto entries = parseMarketDataSnapshot(msg);
-        std::scoped_lock lock(engineMutex_);
-        for (const auto& entry : entries) {
-            if (entry.kind == MDEntryKind::Bid) {
-                latestBid_ = entry.price;
-            } else {
-                latestAsk_ = entry.price;
+        bool haveFullQuote = false;
+        {
+            std::scoped_lock lock(engineMutex_);
+            for (const auto& entry : entries) {
+                if (entry.kind == MDEntryKind::Bid) {
+                    latestBid_ = entry.price;
+                } else {
+                    latestAsk_ = entry.price;
+                }
+            }
+            haveFullQuote = latestBid_.has_value() && latestAsk_.has_value();
+            maybeEmitTick();
+        }
+        if (haveFullQuote) {
+            std::scoped_lock lock(firstQuoteMutex_);
+            if (!firstQuoteReceived_) {
+                firstQuoteReceived_ = true;
+                firstQuoteCv_.notify_all();
             }
         }
-        maybeEmitTick();
         return;
     }
 
@@ -267,11 +294,35 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
 }
 
 void LiveRunner::maybeEmitTick() {
-    if (!latestBid_ || !latestAsk_) return;
+    if (!latestBid_ || !latestAsk_ || !engine_) return;
 
     const TickEvent tick{Price::fromDouble(*latestBid_, config_.strategy.symbol),
                           Price::fromDouble(*latestAsk_, config_.strategy.symbol)};
-    for (const auto& cmd : engine_.onTick(tick)) handleCommand(cmd);
+    for (const auto& cmd : engine_->onTick(tick)) handleCommand(cmd);
+}
+
+void LiveRunner::waitForFirstQuoteAndCenterRange() {
+    {
+        std::unique_lock lock(firstQuoteMutex_);
+        const bool settled =
+            firstQuoteCv_.wait_for(lock, std::chrono::seconds(15), [this] { return firstQuoteReceived_; });
+        if (!settled) {
+            throw std::runtime_error("timed out waiting for the first live quote to auto-center the range");
+        }
+    }
+
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const double half = config_.connection.autoRangeWidthPoints / 2.0;
+    RangeConfig newRange;
+    {
+        std::scoped_lock lock(engineMutex_);
+        const double mid = (*latestBid_ + *latestAsk_) / 2.0;
+        newRange = RangeConfig{Price::fromDouble(mid - half, spec), Price::fromDouble(mid + half, spec)};
+        config_.strategy.range = newRange;
+    }
+
+    log("auto-centered range: [" + std::to_string(newRange.lowerBound.toDouble(spec)) + ", " +
+        std::to_string(newRange.upperBound.toDouble(spec)) + "]");
 }
 
 void LiveRunner::handleCommand(const Command& cmd) {

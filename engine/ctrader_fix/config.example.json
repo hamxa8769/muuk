@@ -15,7 +15,8 @@
     "targetCompId": "REPLACE_WITH_TARGETCOMPID_FROM_SETTINGS_e.g._CSERVER_or_cServer",
     "heartBtIntSeconds": 30,
     "symbolName": "XAUUSD",
-    "symbolId": "OPTIONAL_LEAVE_EMPTY_TO_AUTO_RESOLVE_OR_SET_THE_NUMERIC_ID_FROM_SETTINGS"
+    "symbolId": "OPTIONAL_LEAVE_EMPTY_TO_AUTO_RESOLVE_OR_SET_THE_NUMERIC_ID_FROM_SETTINGS",
+    "autoRangeWidthPoints": 0.20
   },
   "strategy": {
     "symbol": {
