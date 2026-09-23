@@ -3,6 +3,11 @@
 #include <chrono>
 #include <ctime>
 #include <exception>
+#include <fstream>
+#include <stdexcept>
+
+#include "muuk/ctrader_fix/basket_history.hpp"
+#include "muuk/ctrader_fix/session_report.hpp"
 
 namespace muuk::desktop {
 
@@ -46,8 +51,17 @@ void LiveController::start(const std::string& configPath) {
     }
 
     appendLog("---- connecting (" + configPath + ") ----");
+    configPath_ = configPath;
+    reloadHistory(configPath);
     runner_ = std::make_unique<LiveRunner>(std::move(config));
     runner_->setLogHandler([this](const std::string& line) { appendLog(line); });
+    const std::filesystem::path historyFile = dataDirectory(configPath) / "muuk_history" / "baskets.jsonl";
+    runner_->setBasketHandler([this, historyFile](const muuk::ctrader_fix::BasketRecord& basket) {
+        muuk::ctrader_fix::appendBasketHistory(historyFile, basket);  // throws on failure -- LiveRunner logs it
+        std::scoped_lock lock(historyMutex_);
+        history_.push_back(basket);
+        ++historyRevision_;
+    });
 
     running_ = true;
     thread_ = std::thread([this] {
@@ -62,9 +76,12 @@ void LiveController::start(const std::string& configPath) {
 }
 
 void LiveController::stop() {
+    const bool wasRunning = runner_ && (running_.load() || thread_.joinable());
     if (runner_) runner_->stop();
     if (thread_.joinable()) thread_.join();
     running_ = false;
+    // Keep a copy of every session's log without anyone having to remember.
+    if (wasRunning && !configPath_.empty()) (void)saveLog(configPath_);
 }
 
 bool LiveController::openRange() { return runner_ && running_.load() && runner_->openRange(); }
@@ -91,6 +108,10 @@ void LiveController::cancelOrder(muuk::core::OrderId id) {
 
 void LiveController::syncPositions() {
     if (runner_ && running_.load()) runner_->syncPositions();
+}
+
+bool LiveController::flattenAndWait(std::chrono::milliseconds timeout) {
+    return runner_ && running_.load() && runner_->flattenAndWait(timeout);
 }
 
 void LiveController::applySettings(const LiveSettings& settings) {
@@ -153,6 +174,106 @@ void LiveController::appendLog(const std::string& line) {
 void LiveController::setError(const std::string& message) {
     std::scoped_lock lock(errorMutex_);
     lastError_ = message;
+}
+
+std::filesystem::path LiveController::dataDirectory(const std::string& configPath) {
+    std::error_code ec;
+    const std::filesystem::path config(configPath);
+    if (!configPath.empty() && config.has_parent_path()) return std::filesystem::absolute(config.parent_path(), ec);
+    return std::filesystem::current_path(ec);
+}
+
+std::string LiveController::fileStamp() {
+    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &local);
+    return buf;
+}
+
+std::vector<muuk::ctrader_fix::BasketRecord> LiveController::history() const {
+    std::scoped_lock lock(historyMutex_);
+    return history_;
+}
+
+void LiveController::reloadHistory(const std::string& configPath) {
+    auto loaded = muuk::ctrader_fix::loadBasketHistory(dataDirectory(configPath) / "muuk_history" / "baskets.jsonl");
+    std::scoped_lock lock(historyMutex_);
+    history_ = std::move(loaded);
+    historyLoadedFor_ = configPath;
+    ++historyRevision_;
+}
+
+std::optional<std::filesystem::path> LiveController::exportReport(const std::string& configPath) {
+    using namespace muuk::ctrader_fix;
+    try {
+        {
+            std::scoped_lock lock(historyMutex_);
+            if (historyLoadedFor_ != configPath) {
+                history_ = loadBasketHistory(dataDirectory(configPath) / "muuk_history" / "baskets.jsonl");
+                historyLoadedFor_ = configPath;
+                ++historyRevision_;
+            }
+        }
+
+        SessionReportInput in;
+        in.generatedAt = localTimestamp();
+        in.allBaskets = history();
+        try {
+            const LiveConfig config = loadLiveConfig(configPath);
+            in.account = config.connection.environment + " " + config.connection.traderLogin;
+            in.symbol = config.connection.symbolName;
+            in.settings = settingsFromConfig(config);
+        } catch (const std::exception&) {
+            // Still produce a report from the history alone.
+        }
+        if (const auto snap = snapshot()) {
+            in.settings = snap->settings;  // what the running bot actually uses
+            in.sessionStartedAt = snap->sessionStartedAt;
+            in.tickDecisionUs = snap->tickDecisionUs;
+            in.fillReactionUs = snap->fillReactionUs;
+            in.brokerRoundTripMs = snap->brokerRoundTripMs;
+            in.ticksProcessed = snap->ticksProcessed;
+            in.sessionBaskets = snap->baskets;
+            in.openPositions = static_cast<int>(snap->positions.size());
+            in.openNet = snap->live.net;
+        }
+
+        const std::filesystem::path file =
+            dataDirectory(configPath) / "muuk_reports" / ("muuk_report_" + fileStamp() + ".pdf");
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot write " + file.string());
+        const std::string pdf = buildSessionReportPdf(in);
+        out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+        appendLog("[report] saved " + file.string());
+        return file;
+    } catch (const std::exception& ex) {
+        setError(std::string("report: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<std::filesystem::path> LiveController::saveLog(const std::string& configPath) {
+    const std::vector<std::string> lines = logLines();
+    try {
+        const std::filesystem::path file = dataDirectory(configPath) / "muuk_logs" / ("muuk_" + fileStamp() + ".log");
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        std::ofstream out(file, std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot write " + file.string());
+        for (const auto& l : lines) out << l << "\n";
+        return file;
+    } catch (const std::exception& ex) {
+        setError(std::string("log: ") + ex.what());
+        return std::nullopt;
+    }
 }
 
 }  // namespace muuk::desktop

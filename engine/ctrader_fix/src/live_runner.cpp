@@ -99,6 +99,13 @@ LiveSnapshot LiveRunner::snapshot() const {
 
     snap.closingInProgress = !pendingCloses_.empty();
     snap.closeFailed = basketCloseFailed_;
+    snap.tickDecisionUs = tickDecisionUs_.summary();
+    snap.fillReactionUs = fillReactionUs_.summary();
+    snap.brokerRoundTripMs = brokerRoundTripMs_.summary();
+    snap.ticksProcessed = ticksProcessed_;
+    snap.sessionStartedAt = sessionStartedAt_;
+    snap.baskets = completedBaskets_;
+    snap.currentBasket = currentBasket_;
     snap.syncingPositions = !activePosReqId_.empty();
     if (cooldownActive_) {
         const auto left = std::chrono::ceil<std::chrono::seconds>(cooldownUntil_ - std::chrono::steady_clock::now());
@@ -162,6 +169,10 @@ void LiveRunner::stop() {
 
 void LiveRunner::run() {
     running_ = true;
+    {
+        std::scoped_lock lock(engineMutex_);
+        sessionStartedAt_ = localTimestamp();
+    }
 
     try {
         FixCredentials quoteCreds;
@@ -242,6 +253,7 @@ void LiveRunner::run() {
                     " position(s) already open at the broker -- no range will open until they're closed "
                     "(Close all positions)");
             } else if (config_.connection.autoContinue) {
+                beginBasket();
                 for (const auto& cmd : engine_->start()) handleCommand(cmd);
                 started = true;
             }
@@ -306,6 +318,16 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
     if (type == msgtype::ExecutionReport) {
         const ExecutionReportInfo info = parseExecutionReport(msg);
 
+        // Broker round trip: order sent -> the broker's first answer about it.
+        if (info.clOrdId) {
+            std::scoped_lock lock(engineMutex_);
+            if (const auto sent = orderSentAt_.find(*info.clOrdId); sent != orderSentAt_.end()) {
+                brokerRoundTripMs_.add(
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sent->second).count());
+                orderSentAt_.erase(sent);
+            }
+        }
+
         if (info.execType == ExecType::Trade && info.commission) {
             // Logged so the configured commission rate can be checked
             // against what the broker actually charges.
@@ -340,9 +362,13 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                         bookedCommission_ += commission;
                         booked = ", booked " + std::to_string(gross - commission) + " net (gross " +
                                  std::to_string(gross) + ", commission " + std::to_string(commission) + ")";
+                        recordLegClosed(leg, exitPrice.toDouble(spec), gross, commission);
+                    } else {
+                        recordLegClosed(leg, 0.0, 0.0, 0.0);
                     }
                     log("[basket] closing trade filled (ClOrdID=" + *info.clOrdId + ")" + booked + ", " +
                         std::to_string(pendingCloses_.size()) + " leg(s) still outstanding");
+                    maybeFinalizeBasket();
                     if (pendingCloses_.empty() && engine_) {
                         log("[basket] all legs flat, next cycle may now start");
                         maybeRestartAfterBasketClose();
@@ -373,6 +399,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 }
                 openLegs_.push_back(filled);
                 placedOrderInfo_.erase(it);
+                recordLegOpened(filled);
             } else if (const auto cit = cancelledOrderInfo_.find(*orderId); cit != cancelledOrderInfo_.end()) {
                 // The cancel lost the race: this order filled anyway after
                 // LiveRunner had already asked the broker to cancel it
@@ -388,12 +415,16 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 log("[order] ClOrdID=" + std::to_string(*orderId) +
                     " filled after its cancel was already sent -- closing this surplus leg immediately");
                 cancelledOrderInfo_.erase(cit);
+                recordLegOpened(surplus);
                 if (tradeSession_) closeLegs({surplus});
             }
             if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
+            const auto reactStart = std::chrono::steady_clock::now();
             for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{*orderId, fillPrice})) {
                 handleCommand(cmd);
             }
+            fillReactionUs_.add(
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - reactStart).count());
             return;
         }
 
@@ -562,7 +593,13 @@ TickEvent LiveRunner::latestTick() const {
 void LiveRunner::maybeEmitTick() {
     if (!latestBid_ || !latestAsk_ || !engine_) return;
 
-    for (const auto& cmd : engine_->onTick(latestTick())) handleCommand(cmd);
+    const TickEvent tick = latestTick();
+    const auto decideStart = std::chrono::steady_clock::now();
+    const CommandBatch commands = engine_->onTick(tick);
+    tickDecisionUs_.add(
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - decideStart).count());
+    ++ticksProcessed_;
+    for (const auto& cmd : commands) handleCommand(cmd);
     maybeRestartAfterBasketClose();
 }
 
@@ -619,6 +656,8 @@ void LiveRunner::maybeRestartAfterBasketClose() {
     cooldownActive_ = false;
     prepareNextCycle(config_.connection.autoRangeWidthPoints > 0.0);
     log("basket closed; starting the next cycle");
+    closeReason_.clear();
+    beginBasket();
     for (const auto& cmd : engine_->restart()) handleCommand(cmd);
 }
 
@@ -661,6 +700,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
             << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")";
         log(oss.str());
         placedOrderInfo_[place->id] = OpenLeg{place->id, place->side, place->volume, place->price, place->price};
+        orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
         tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
@@ -677,6 +717,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
         log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney) + ", " +
             std::to_string(openLegs_.size()) + " leg(s) to flatten");
         ++basketsClosed_;  // booked P/L itself comes from the real closing fills (see onTradeMessage)
+        setCloseReason("profit target");
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
@@ -716,6 +757,7 @@ void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
         log("[basket] closing position " + leg.positionId + ": side=" + std::to_string(side) +
             " lots=" + std::to_string(lots) + " (ClOrdID=" + closeClOrdId + ")");
         pendingCloses_.insert({closeClOrdId, leg});
+        orderSentAt_[closeClOrdId] = std::chrono::steady_clock::now();
         tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty, leg.positionId));
     }
 }
@@ -853,6 +895,8 @@ bool LiveRunner::openRange() {
     cooldownActive_ = false;
     prepareNextCycle(true);
     log("[manual] opening a new range around " + std::to_string((*latestBid_ + *latestAsk_) / 2.0));
+    closeReason_.clear();
+    beginBasket();
     for (const auto& cmd : engine_->start()) handleCommand(cmd);
     return true;
 }
@@ -861,26 +905,154 @@ void LiveRunner::closeRange() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
     log("[manual] operator requested: close range");
+    setCloseReason("manual: close range");
     cancelPendingLocked();
     closePositionsLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    maybeFinalizeBasket();
 }
 
 void LiveRunner::closeAllPositions() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
+    setCloseReason("manual: close all positions");
     closePositionsLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    maybeFinalizeBasket();
 }
 
 void LiveRunner::cancelAllPendingOrders() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
+    setCloseReason("manual: cancel all pending");
     cancelPendingLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    maybeFinalizeBasket();
+}
+
+bool LiveRunner::flattenAndWait(std::chrono::milliseconds timeout) {
+    {
+        std::scoped_lock lock(engineMutex_);
+        if (!engine_ || !tradeSession_ || !running_) return accountFlat();
+        const bool flat = accountFlat();
+        if (!flat) {
+            log("[guard] shutting down with open trades -- closing everything first");
+            setCloseReason("guard: app closing");
+            cancelPendingLocked();
+            closePositionsLocked();
+        }
+        engine_->stopCycle();  // also keeps a cooldown from opening a new range meanwhile
+        cooldownActive_ = false;
+        maybeFinalizeBasket();
+        if (flat) return true;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock lock(engineMutex_);
+            if (accountFlat()) {
+                log("[guard] all positions closed and orders cancelled");
+                return true;
+            }
+            if (basketCloseFailed_ || !running_) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    log("[guard] WARNING: could not confirm the account is flat -- check cTrader for open positions/orders");
+    return false;
+}
+
+void LiveRunner::beginBasket() {
+    BasketRecord b;
+    b.number = ++basketCounter_;
+    b.session = sessionStartedAt_;
+    b.symbol = config_.connection.symbolName;
+    b.startedAt = localTimestamp();
+    const RangeConfig range = engine_ ? engine_->currentRange() : config_.strategy.range;
+    b.rangeLower = range.lowerBound.toDouble(config_.strategy.symbol);
+    b.rangeUpper = range.upperBound.toDouble(config_.strategy.symbol);
+    currentBasket_ = std::move(b);
+    currentBasketStart_ = std::chrono::steady_clock::now();
+}
+
+void LiveRunner::recordLegOpened(const OpenLeg& leg) {
+    if (!currentBasket_) beginBasket();
+    const SymbolSpec& spec = config_.strategy.symbol;
+    BasketLegRecord r;
+    r.id = leg.id;
+    r.positionId = leg.positionId;
+    r.buy = leg.side == OrderSide::BuyStop;
+    r.lots = leg.volume.toDouble(spec);
+    r.requestedPrice = leg.requestedPrice.toDouble(spec);
+    r.entryPrice = leg.price.toDouble(spec);
+    r.openedAt = leg.adopted ? std::string() : localTimestamp();
+    r.adopted = leg.adopted;
+    currentBasket_->legs.push_back(r);
+    // Seed mode re-anchors the range on the first fill -- keep the record current.
+    if (engine_) {
+        const RangeConfig range = engine_->currentRange();
+        currentBasket_->rangeLower = range.lowerBound.toDouble(spec);
+        currentBasket_->rangeUpper = range.upperBound.toDouble(spec);
+    }
+}
+
+void LiveRunner::recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission) {
+    if (!currentBasket_) {
+        // Closing something outside any recorded range (e.g. an adopted
+        // position): record it as its own basket.
+        beginBasket();
+        currentBasket_->rangeLower = currentBasket_->rangeUpper = 0.0;
+    }
+    auto& legs = currentBasket_->legs;
+    auto it = std::find_if(legs.begin(), legs.end(), [&](const BasketLegRecord& r) { return r.id == leg.id; });
+    if (it == legs.end()) {
+        recordLegOpened(leg);
+        it = std::prev(legs.end());
+    }
+    it->exitPrice = exitPrice;
+    it->gross = gross;
+    it->commission = commission;
+    it->net = gross - commission;
+    it->closedAt = localTimestamp();
+}
+
+void LiveRunner::setCloseReason(const std::string& reason) {
+    if (closeReason_.empty()) closeReason_ = reason;
+}
+
+void LiveRunner::maybeFinalizeBasket() {
+    if (!currentBasket_) return;
+    if (engine_ && engine_->status() == EngineStatus::Active) return;  // range still running
+    if (!openLegs_.empty() || !pendingCloses_.empty()) return;          // something still open at the broker
+
+    BasketRecord b = std::move(*currentBasket_);
+    currentBasket_.reset();
+    if (b.legs.empty()) {
+        closeReason_.clear();  // range closed before anything filled -- nothing to record
+        return;
+    }
+    b.closedAt = localTimestamp();
+    b.durationSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - currentBasketStart_).count();
+    b.closeReason = closeReason_.empty() ? "closed" : closeReason_;
+    closeReason_.clear();
+    for (const auto& l : b.legs) {
+        b.gross += l.gross;
+        b.commission += l.commission;
+        b.net += l.net;
+    }
+    log("[history] basket #" + std::to_string(b.number) + " saved: " + std::to_string(b.legs.size()) +
+        " position(s), net " + std::to_string(b.net) + " (" + b.closeReason + ")");
+    completedBaskets_.push_back(b);
+    if (basketHandler_) {
+        try {
+            basketHandler_(b);
+        } catch (const std::exception& ex) {
+            log(std::string("[history] could not save basket: ") + ex.what());
+        }
+    }
 }
 
 LiveSettings LiveRunner::settings() const {
@@ -903,6 +1075,9 @@ void LiveRunner::closePosition(OrderId id) {
     const auto it = std::find_if(openLegs_.begin(), openLegs_.end(), [id](const OpenLeg& l) { return l.id == id; });
     if (it == openLegs_.end()) return;
     log("[manual] operator requested: close position id=" + std::to_string(id));
+    // Only names the basket's ending if no range is running -- otherwise the
+    // basket carries on and ends however it ends.
+    if (!engine_ || engine_->status() != EngineStatus::Active) setCloseReason("manual: close position");
     const OpenLeg leg = *it;
     openLegs_.erase(it);
     closeLegs({leg});

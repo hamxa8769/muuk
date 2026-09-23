@@ -37,3 +37,9 @@ imgui.ini
 # real values; both patterns are ignored everywhere in the repo.
 *.local.json
 secrets/
+
+# Trading records written next to the config file by muuk-desktop:
+# basket history, PDF reports and saved logs (account data -- keep local).
+muuk_history/
+muuk_reports/
+muuk_logs/

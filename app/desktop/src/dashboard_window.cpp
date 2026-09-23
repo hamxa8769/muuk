@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -11,12 +12,15 @@
 
 #include "config_discovery.hpp"
 #include "glass_ui.hpp"
+#include "open_path.hpp"
 
 namespace muuk::desktop {
 
 using muuk::core::EngineStatus;
 using muuk::core::OrderSide;
 using muuk::core::StartSide;
+using muuk::ctrader_fix::BasketRecord;
+using muuk::ctrader_fix::LatencySummary;
 using muuk::ctrader_fix::LiveSettings;
 using muuk::ctrader_fix::LiveSnapshot;
 using glass::kAmber;
@@ -257,6 +261,114 @@ void clampSettings(LiveSettings& s) {
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
 }
 
+
+// "12.3 us" / "4.1 ms" (with a real micro sign), or "--" before the first sample.
+std::string latency(double v, const LatencySummary& s, bool micro) {
+    if (s.samples == 0) return "--";
+    char buf[32];
+    if (micro && v >= 1000.0) {
+        std::snprintf(buf, sizeof(buf), "%.2f ms", v / 1000.0);
+    } else {
+        std::snprintf(buf, sizeof(buf), micro ? "%.1f \xc2\xb5s" : "%.1f ms", v);
+    }
+    return buf;
+}
+
+// "2026-09-24 14:03:11" -> "14:03:11"
+std::string timeOf(const std::string& stamp) {
+    const std::size_t space = stamp.find(' ');
+    return space == std::string::npos ? stamp : stamp.substr(space + 1);
+}
+
+std::string duration(double seconds) {
+    char buf[32];
+    const long long s = static_cast<long long>(seconds + 0.5);
+    if (s >= 3600) {
+        std::snprintf(buf, sizeof(buf), "%lldh %02lldm", s / 3600, (s % 3600) / 60);
+    } else if (s >= 60) {
+        std::snprintf(buf, sizeof(buf), "%lldm %02llds", s / 60, s % 60);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%llds", s);
+    }
+    return buf;
+}
+
+// The trunk-and-branch connector drawn in the first column of a basket's
+// leg table, so the legs read as a tree hanging off the basket above them.
+void treeConnector(bool buy, bool last) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = ImGui::GetTextLineHeight();
+    const float padY = ImGui::GetStyle().CellPadding.y;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 lineCol = ImGui::GetColorU32(glass::palette().textDim);
+    const float x = p.x + 8.0f;
+    const float mid = p.y + h * 0.5f;
+    dl->AddLine(ImVec2(x, p.y - padY - 1.0f), ImVec2(x, last ? mid : p.y + h + padY + 1.0f), lineCol, 1.5f);
+    dl->AddLine(ImVec2(x, mid), ImVec2(x + 11.0f, mid), lineCol, 1.5f);
+    dl->AddCircleFilled(ImVec2(x + 16.0f, mid), 4.5f, ImGui::GetColorU32(buy ? kGreen : kRed), 14);
+    ImGui::Dummy(ImVec2(26.0f, h));
+}
+
+// One basket's legs, in the order they opened.
+void basketLegsTable(const BasketRecord& b, bool inProgress) {
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX;
+    if (!ImGui::BeginTable("legs", 9, flags)) return;
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+    ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 46.0f);
+    ImGui::TableSetupColumn("Lots");
+    ImGui::TableSetupColumn("Stop at");
+    ImGui::TableSetupColumn("Filled");
+    ImGui::TableSetupColumn("Closed");
+    ImGui::TableSetupColumn("Gross");
+    ImGui::TableSetupColumn("Net");
+    ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+    ImGui::TableHeadersRow();
+    for (std::size_t i = 0; i < b.legs.size(); ++i) {
+        const auto& leg = b.legs[i];
+        const bool open = leg.closedAt.empty();
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        treeConnector(leg.buy, i + 1 == b.legs.size());
+        ImGui::TableNextColumn();
+        ImGui::TextColored(leg.buy ? kGreen : kRed, "%s", leg.buy ? "BUY" : "SELL");
+        if (leg.adopted) ImGui::SetItemTooltip("Opened before this session; adopted by a position sync.");
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(lots(leg.lots).c_str());
+        ImGui::TableNextColumn();
+        if (leg.requestedPrice > 0.0) {
+            ImGui::TextDisabled("%s", price(leg.requestedPrice).c_str());
+        } else {
+            ImGui::TextDisabled("--");
+        }
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(price(leg.entryPrice).c_str());
+        ImGui::TableNextColumn();
+        if (open) {
+            ImGui::TextColored(inProgress ? kAmber : kRed, "%s", inProgress ? "open" : "not closed");
+        } else {
+            ImGui::TextUnformatted(price(leg.exitPrice).c_str());
+        }
+        ImGui::TableNextColumn();
+        if (open) {
+            ImGui::TextDisabled("--");
+        } else {
+            ImGui::TextColored(pnlColor(leg.gross), "%s", money(leg.gross).c_str());
+        }
+        ImGui::TableNextColumn();
+        if (open) {
+            ImGui::TextDisabled("--");
+        } else {
+            ImGui::TextColored(pnlColor(leg.net), "%s", money(leg.net).c_str());
+            ImGui::SetItemTooltip("Gross %s - commission $%.2f", money(leg.gross).c_str(), leg.commission);
+        }
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%s%s%s", timeOf(leg.openedAt).c_str(), open ? "" : "  -  ",
+                            open ? "" : timeOf(leg.closedAt).c_str());
+        if (!leg.positionId.empty()) ImGui::SetItemTooltip("Broker position id: %s", leg.positionId.c_str());
+    }
+    ImGui::EndTable();
+}
 }  // namespace
 
 DashboardWindow::DashboardWindow() {
@@ -267,6 +379,14 @@ DashboardWindow::DashboardWindow() {
         configPathBuffer_[n] = '\0';
     }
     glass::applyTheme(darkMode_);
+}
+
+void DashboardWindow::setConfigPath(const std::string& path) {
+    const std::size_t n = std::min(path.size(), configPathBuffer_.size() - 1);
+    std::copy_n(path.begin(), n, configPathBuffer_.begin());
+    configPathBuffer_[n] = '\0';
+    settingsLoaded_ = false;
+    settingsDirty_ = false;
 }
 
 void DashboardWindow::setFonts(ImFont* bold, ImFont* large, ImFont* numbers) {
@@ -318,6 +438,19 @@ void DashboardWindow::render(LiveController& controller) {
         settingsLoaded_ = true;
     }
 
+    // Basket history: (re)load it from the file next to the config when the
+    // path changes (while connected, start() already loaded it), and copy
+    // the controller's list only when it actually changed.
+    const std::string configPath(configPathBuffer_.data());
+    if (historyPath_ != configPath) {
+        if (!running) controller.reloadHistory(configPath);
+        historyPath_ = configPath;
+    }
+    if (controller.historyRevision() != historyRevision_) {
+        historyRevision_ = controller.historyRevision();
+        history_ = controller.history();
+    }
+
     renderHeader(controller, running, connected);
     renderKpiCards(snap, connected);
 
@@ -351,6 +484,12 @@ void DashboardWindow::render(LiveController& controller) {
             }
             ImGui::EndTabItem();
         }
+        const std::string histLabel =
+            "  History  " + std::to_string(history_.size()) + "  ###history";
+        if (ImGui::BeginTabItem(histLabel.c_str())) {
+            renderHistoryTab(controller, snap);
+            ImGui::EndTabItem();
+        }
         const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
         if (ImGui::BeginTabItem(settingsLabel.c_str())) {
             renderSettingsPanel(controller, snap, connected);
@@ -369,6 +508,12 @@ void DashboardWindow::render(LiveController& controller) {
         openConfirmRequested_ = false;
     }
     renderConfirmPopup(controller);
+
+    if (openExitRequested_) {
+        ImGui::OpenPopup("Exit guard");
+        openExitRequested_ = false;
+    }
+    renderExitPopup(controller, snap);
 
     ImGui::End();
 }
@@ -602,6 +747,8 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         openConfirmRequested_ = true;
     }
     ImGui::EndDisabled();
+
+    if (snap && connected) renderSpeed(*snap);
 
     glass::endCard();
 }
@@ -865,6 +1012,23 @@ void DashboardWindow::renderLogTab(LiveController& controller) {
         flash("Log copied to clipboard.");
     }
     ImGui::SameLine();
+    if (glass::button("Save logs", kBlue, ImVec2(0, 0), glass::ButtonKind::Primary)) {
+        if (const auto file = controller.saveLog(configPathBuffer_.data())) {
+            flash("Log saved: " + file->string());
+        } else {
+            flash("Could not save the log - see the error above.");
+        }
+    }
+    ImGui::SetItemTooltip("Writes the whole log to a .log file in the muuk_logs folder next to your config.\n"
+                          "(The log is also saved there automatically every time you disconnect.)");
+    ImGui::SameLine();
+    if (glass::button("Logs folder", glass::palette().neutral)) {
+        const std::filesystem::path dir = LiveController::dataDirectory(configPathBuffer_.data()) / "muuk_logs";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (!openPath(dir)) flash("Could not open " + dir.string());
+    }
+    ImGui::SameLine();
     if (glass::button("Clear", glass::palette().neutral)) controller.clearLog();
 
     std::vector<const std::string*> shown;
@@ -959,6 +1123,259 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
     if (glass::button("Keep", glass::palette().neutral, ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         confirm_ = Confirm::None;
         ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+
+void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("System speed"); });
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%llu quotes processed)", static_cast<unsigned long long>(snap.ticksProcessed));
+    if (!ImGui::BeginTable("speed", 5, ImGuiTableFlags_SizingStretchProp)) return;
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.7f);
+    ImGui::TableSetupColumn("Live");
+    ImGui::TableSetupColumn("Avg");
+    ImGui::TableSetupColumn("p99");
+    ImGui::TableSetupColumn("Max");
+    ImGui::TableHeadersRow();
+    auto row = [&](const char* label, const char* help, const LatencySummary& s, bool micro) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%s", label);
+        ImGui::SetItemTooltip("%s\n%llu samples (p99 over the most recent 2048)", help,
+                              static_cast<unsigned long long>(s.samples));
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(latency(s.last, s, micro).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(latency(s.avg, s, micro).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(latency(s.p99, s, micro).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%s", latency(s.max, s, micro).c_str());
+    };
+    row("Quote -> decision", "The bot's own time from a price update arriving to the strategy's decision.",
+        snap.tickDecisionUs, true);
+    row("Fill -> next order", "The bot's own time from a fill report arriving to its reaction being sent.",
+        snap.fillReactionUs, true);
+    row("Broker round trip", "Order sent -> the broker's first answer (network + broker), in milliseconds.",
+        snap.brokerRoundTripMs, false);
+    ImGui::EndTable();
+}
+
+void DashboardWindow::renderHistoryTab(LiveController& controller, const std::optional<LiveSnapshot>& snap) {
+    const std::string configPath(configPathBuffer_.data());
+
+    // Summary across every saved basket.
+    int wins = 0;
+    double net = 0.0;
+    double commission = 0.0;
+    double best = 0.0;
+    double worst = 0.0;
+    std::size_t legCount = 0;
+    for (const auto& b : history_) {
+        wins += b.net > 0.005 ? 1 : 0;
+        net += b.net;
+        commission += b.commission;
+        best = std::max(best, b.net);
+        worst = std::min(worst, b.net);
+        legCount += b.legs.size();
+    }
+
+    if (glass::button("Export PDF report", kViolet, ImVec2(0, 0), glass::ButtonKind::Primary)) {
+        if (const auto file = controller.exportReport(configPath)) {
+            flash("Report saved: " + file->string());
+            if (!openPath(*file)) flash("Report saved (no PDF viewer found): " + file->string());
+        } else {
+            flash("Could not create the report - see the error above.");
+        }
+    }
+    ImGui::SetItemTooltip("Creates a PDF with the overview, system speed, settings, P/L charts, every basket and its "
+                          "position tree, and opens it.");
+    ImGui::SameLine();
+    if (glass::button("Reports folder", glass::palette().neutral)) {
+        const std::filesystem::path dir = LiveController::dataDirectory(configPath) / "muuk_reports";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (!openPath(dir)) flash("Could not open " + dir.string());
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(controller.isRunning());
+    if (glass::button("Reload", glass::palette().neutral)) controller.reloadHistory(configPath);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Re-reads muuk_history/baskets.jsonl next to the config file.");
+
+    ImGui::Spacing();
+    if (ImGui::BeginTable("hist_summary", 5, ImGuiTableFlags_SizingStretchSame)) {
+        auto stat = [&](const char* caption, const std::string& value, ImVec4 color) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", caption);
+            withFont(boldFont_, [&] { ImGui::TextColored(color, "%s", value.c_str()); });
+        };
+        const ImVec4 text = glass::palette().text;
+        char winRate[48];
+        std::snprintf(winRate, sizeof(winRate), "%d / %d  (%.0f%%)", wins, static_cast<int>(history_.size()),
+                      history_.empty() ? 0.0 : 100.0 * wins / static_cast<double>(history_.size()));
+        stat("BASKETS (ALL TIME)", std::to_string(history_.size()) + "  |  " + std::to_string(legCount) + " positions",
+             text);
+        stat("IN PROFIT", winRate, text);
+        stat("NET P/L (ALL TIME)", money(net), pnlColor(net));
+        stat("COMMISSION PAID", "$" + price(commission), commission > 0.005 ? kAmber : text);
+        stat("BEST / WORST", money(best) + "  /  " + money(worst), text);
+        ImGui::EndTable();
+    }
+    if (snap) {
+        ImGui::TextDisabled("This session (since %s): %zu basket(s), booked net %s",
+                            snap->sessionStartedAt.empty() ? "--" : snap->sessionStartedAt.c_str(),
+                            snap->baskets.size(), money(snap->realizedPnl).c_str());
+    }
+    ImGui::Separator();
+
+    ImGui::BeginChild("history_list", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    if (snap && snap->currentBasket && !snap->currentBasket->legs.empty()) {
+        const BasketRecord& b = *snap->currentBasket;
+        ImGui::PushID("current");
+        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth,
+                                            "Basket #%d", b.number);
+        ImGui::SameLine(150.0f);
+        glass::pill("in progress", kAmber, true);
+        ImGui::SameLine();
+        ImGui::TextColored(pnlColor(snap->live.net), "%s", money(snap->live.net).c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("net now  |  %zu position(s)  |  range %s - %s  |  started %s", b.legs.size(),
+                            price(b.rangeLower).c_str(), price(b.rangeUpper).c_str(), timeOf(b.startedAt).c_str());
+        if (open) {
+            basketLegsTable(b, true);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    if (history_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("No closed baskets yet. Each basket is saved here (and to muuk_history/baskets.jsonl next "
+                            "to your config) the moment it closes.");
+    }
+
+    // Newest first. Only the most recent ones are listed -- the PDF report
+    // and the history file have all of them.
+    constexpr std::size_t kMaxShown = 500;
+    const std::size_t shown = std::min(history_.size(), kMaxShown);
+    std::string lastSession;
+    for (std::size_t k = 0; k < shown; ++k) {
+        const std::size_t i = history_.size() - 1 - k;
+        const BasketRecord& b = history_[i];
+        if (k == 0 || b.session != lastSession) {
+            ImGui::Spacing();
+            ImGui::TextColored(kBlue, "Session started %s", b.session.empty() ? "(unknown)" : b.session.c_str());
+            lastSession = b.session;
+        }
+        ImGui::PushID(static_cast<int>(i));
+        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_SpanAvailWidth, "Basket #%d", b.number);
+        ImGui::SameLine(150.0f);
+        withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });
+        ImGui::SameLine(240.0f);
+        ImGui::TextDisabled("%zu position(s)  |  %s  |  %s  |  closed %s", b.legs.size(), b.closeReason.c_str(),
+                            duration(b.durationSeconds).c_str(), b.closedAt.c_str());
+        if (open) {
+            ImGui::TextDisabled("Range %s - %s   |   gross %s   commission $%.2f   net %s", price(b.rangeLower).c_str(),
+                                price(b.rangeUpper).c_str(), money(b.gross).c_str(), b.commission,
+                                money(b.net).c_str());
+            basketLegsTable(b, false);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (history_.size() > shown) {
+        ImGui::TextDisabled("... %zu older basket(s) - see the PDF report or the history file.", history_.size() - shown);
+    }
+    ImGui::EndChild();
+}
+
+void DashboardWindow::requestExit(LiveController& controller) {
+    if (exitApproved_) return;
+    const std::optional<LiveSnapshot> snap = controller.snapshot();
+    const bool exposure = snap && (!snap->positions.empty() || !snap->pendingOrders.empty());
+    if (!exposure) {
+        exitApproved_ = true;
+        return;
+    }
+    openExitRequested_ = true;  // opened next frame, inside the main window
+}
+
+void DashboardWindow::renderExitPopup(LiveController& controller, const std::optional<LiveSnapshot>& snap) {
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22, 18));
+    const bool open = ImGui::BeginPopupModal("Exit guard", nullptr,
+                                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+    ImGui::PopStyleVar();
+    if (!open) return;
+
+    const bool running = controller.isRunning();
+    const bool connected = running && snap && snap->connected;
+    const std::size_t positions = snap ? snap->positions.size() : 0;
+    const std::size_t pending = snap ? snap->pendingOrders.size() : 0;
+    const bool flat = snap && positions == 0 && pending == 0 && !snap->closingInProgress;
+
+    auto finish = [&](bool approve) {
+        exitClosing_ = false;
+        if (approve) exitApproved_ = true;
+        ImGui::CloseCurrentPopup();
+    };
+
+    if (exitClosing_) {
+        const double waited = ImGui::GetTime() - exitClosingSince_;
+        withFont(boldFont_, [] { ImGui::TextUnformatted("Closing everything before exit..."); });
+        ImGui::TextDisabled("%zu position(s) and %zu pending order(s) left   (%.0fs)", positions, pending, waited);
+        if (flat) {
+            finish(true);
+        } else {
+            const char* problem = nullptr;
+            if (!connected) {
+                problem = "The connection to the broker is gone - nothing more can be closed from here.";
+            } else if (snap && snap->closeFailed) {
+                problem = "The broker rejected a close. Check cTrader and close what is left there.";
+            } else if (waited > 30.0) {
+                problem = "Still not flat after 30 seconds. Check cTrader.";
+            }
+            if (problem) {
+                ImGui::Spacing();
+                ImGui::TextColored(kRed, "%s", problem);
+            }
+            ImGui::Spacing();
+            if (glass::button("Exit anyway", kRed, ImVec2(160, 0))) finish(true);
+            ImGui::SetItemTooltip("Whatever is still open stays open at the broker.");
+            ImGui::SameLine();
+            if (glass::button("Back to the app", glass::palette().neutral, ImVec2(160, 0))) finish(false);
+        }
+        ImGui::EndPopup();
+        return;
+    }
+
+    withFont(boldFont_, [] { ImGui::TextUnformatted("Trades are still open at the broker"); });
+    const std::string netNow = connected ? ", net now " + money(snap->live.net) : std::string();
+    ImGui::TextDisabled("%zu open position(s) and %zu pending order(s)%s.", positions, pending, netNow.c_str());
+    ImGui::TextDisabled("If Muuk closes now, nothing manages them: no profit target, no next order,\n"
+                        "no risk limit - they stay open until you close them in cTrader.");
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    ImGui::BeginDisabled(!connected);
+    if (glass::button("Close everything & exit", kRed, ImVec2(210, 0), glass::ButtonKind::Primary)) {
+        controller.closeRange();
+        exitClosing_ = true;
+        exitClosingSince_ = ImGui::GetTime();
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("%s", connected ? "Cancels every pending order, closes every position at market, waits for "
+                                            "the broker to confirm, then exits."
+                                          : "Not connected - nothing can be closed from here.");
+    ImGui::SameLine();
+    if (glass::button("Exit, keep them open", kAmber, ImVec2(180, 0))) finish(true);
+    ImGui::SameLine();
+    if (glass::button("Cancel", glass::palette().neutral, ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        finish(false);
     }
     ImGui::EndPopup();
 }

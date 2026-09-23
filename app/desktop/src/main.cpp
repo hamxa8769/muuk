@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <string>
 
 #ifdef _WIN32
 // Prevents windows.h from pulling in the legacy winsock.h, which conflicts
@@ -55,9 +57,46 @@ void setNativeTitleBarDark(GLFWwindow* window, bool dark) {
     (void)dark;
 #endif
 }
+#ifdef _WIN32
+// Exit guard for Windows logoff/shutdown/restart (e.g. a VPS applying
+// updates): the window gets WM_QUERYENDSESSION instead of a normal close,
+// and there's no time for a dialog. With trades open, close them all right
+// here -- showing "Muuk is closing open positions" on the shutdown screen
+// while it waits -- before letting Windows continue.
+muuk::desktop::LiveController* g_controller = nullptr;
+WNDPROC g_prevWndProc = nullptr;
+
+LRESULT CALLBACK guardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_QUERYENDSESSION && g_controller && g_controller->isRunning()) {
+        const auto snap = g_controller->snapshot();
+        if (snap && (!snap->positions.empty() || !snap->pendingOrders.empty())) {
+            ShutdownBlockReasonCreate(hwnd, L"Muuk is closing open positions and pending orders");
+            (void)g_controller->flattenAndWait(std::chrono::seconds(8));
+            ShutdownBlockReasonDestroy(hwnd);
+        }
+    }
+    if (msg == WM_ENDSESSION && wParam && g_controller) {
+        g_controller->stop();  // the process ends right after this -- disconnect cleanly and save the log
+    }
+    return CallWindowProcW(g_prevWndProc, hwnd, msg, wParam, lParam);
+}
+#endif
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Optional: --config <file> picks the config; --connect connects on
+    // launch (for an unattended VPS that restarts the app on boot).
+    std::string configArg;
+    bool connectOnLaunch = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            configArg = argv[++i];
+        } else if (arg == "--connect") {
+            connectOnLaunch = true;
+        }
+    }
+
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
         return 1;
@@ -107,11 +146,30 @@ int main() {
     muuk::desktop::DashboardWindow dashboard;
     dashboard.setFonts(bold, large, numbers);
     dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
+    if (!configArg.empty()) dashboard.setConfigPath(configArg);
+    if (connectOnLaunch && !dashboard.configPath().empty()) controller.start(dashboard.configPath());
 
-    while (!glfwWindowShouldClose(window)) {
+#ifdef _WIN32
+    // Installed after ImGui's backend (which subclasses the window too) and
+    // removed before it shuts down, so the chain unwinds in order.
+    g_controller = &controller;
+    HWND hwnd = glfwGetWin32Window(window);
+    g_prevWndProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&guardWndProc)));
+#endif
+
+    while (!dashboard.exitApproved()) {
         // Wakes immediately on any input, and otherwise at least ~60x/s so
         // live prices/P&L keep moving -- smooth without spinning a core.
         glfwWaitEventsTimeout(1.0 / 60.0);
+
+        // Exit guard: the close button (or Alt+F4) only *asks* to exit; with
+        // trades still open the dashboard shows a dialog first.
+        if (glfwWindowShouldClose(window)) {
+            glfwSetWindowShouldClose(window, GLFW_FALSE);
+            dashboard.requestExit(controller);
+            if (dashboard.exitApproved()) break;
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -132,6 +190,11 @@ int main() {
     }
 
     controller.stop();
+
+#ifdef _WIN32
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_prevWndProc));
+    g_controller = nullptr;
+#endif
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

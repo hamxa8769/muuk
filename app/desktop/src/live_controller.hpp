@@ -1,7 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -47,6 +50,11 @@ public:
     void cancelOrder(muuk::core::OrderId id);
     void syncPositions();
 
+    // Exit guard (see LiveRunner::flattenAndWait): closes everything and
+    // blocks until the account is flat. false if not connected or not
+    // confirmed within `timeout`.
+    bool flattenAndWait(std::chrono::milliseconds timeout);
+
     // Applies `settings` to the running bot (from its next range on).
     // No-op if not running.
     void applySettings(const muuk::ctrader_fix::LiveSettings& settings);
@@ -68,9 +76,36 @@ public:
     [[nodiscard]] std::string lastError() const;
     void clearError();
 
+    // --- History, reports, logs -------------------------------------------
+    // Everything is stored next to the config file:
+    //   muuk_history/baskets.jsonl   every closed basket (appended as it closes)
+    //   muuk_reports/*.pdf           exported reports
+    //   muuk_logs/*.log              saved logs (also written automatically on disconnect)
+    [[nodiscard]] static std::filesystem::path dataDirectory(const std::string& configPath);
+
+    // All saved baskets for this config (loaded on start / reloadHistory,
+    // plus every basket closed since), oldest first.
+    [[nodiscard]] std::vector<muuk::ctrader_fix::BasketRecord> history() const;
+    // Bumped whenever history() changes, so the UI only copies it when needed.
+    [[nodiscard]] uint64_t historyRevision() const { return historyRevision_.load(); }
+    void reloadHistory(const std::string& configPath);
+
+    // Writes the PDF report; returns its path, or nullopt (see lastError()).
+    std::optional<std::filesystem::path> exportReport(const std::string& configPath);
+    // Writes the current log; returns its path, or nullopt.
+    std::optional<std::filesystem::path> saveLog(const std::string& configPath);
+
 private:
     void appendLog(const std::string& line);
     void setError(const std::string& message);
+    [[nodiscard]] static std::string fileStamp();
+
+    std::string configPath_;  // of the current/last connection
+
+    mutable std::mutex historyMutex_;
+    std::vector<muuk::ctrader_fix::BasketRecord> history_;
+    std::string historyLoadedFor_;
+    std::atomic<uint64_t> historyRevision_{0};
 
     std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
     std::thread thread_;

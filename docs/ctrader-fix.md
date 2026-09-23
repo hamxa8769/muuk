@@ -166,6 +166,35 @@ broker rejects the cancel, the order goes back on the pending list.
   cooldown, risk limits, auto-continue; cycle-shaping values take effect
   from the next range. `saveLiveSettings()` writes them back into the
   config file without touching the credentials.
+- `flattenAndWait(timeout)` -- the exit guard: does what `closeRange()`
+  does, then blocks until the broker has confirmed every close (returns
+  true), or a close is rejected / the connection drops / the timeout
+  passes (returns false and logs a warning). Used by:
+  - `muuk-live` on Ctrl+C, Ctrl+Break, closing the console window, logoff
+    and shutdown (skip with `--keep-open-on-exit`);
+  - `muuk-desktop` on Windows logoff/shutdown/restart (it holds the
+    shutdown with "Muuk is closing open positions" for up to 8 s). The
+    window's close button instead asks: *Close everything & exit*, *Exit,
+    keep them open*, or *Cancel*.
+
+  Nothing on the client side can protect against a crash, a killed
+  process, or the machine losing power or network -- open positions then
+  stay at the broker unmanaged. See `docs/vps.md`.
+
+## Basket history, reports and logs
+
+Every basket is written, the moment it closes, as one JSON line to
+`muuk_history/baskets.jsonl` next to the config file: start/close time,
+range, close reason, and each position (side, lots, Stop price, real entry
+and exit fills, gross, commission, net, broker position id). The desktop
+app's **History** tab shows them as a tree (basket -> positions), and
+**Export PDF report** writes `muuk_reports/muuk_report_<time>.pdf`:
+overview (all-time and this session), system speed (quote -> decision and
+fill -> next order in microseconds, broker round trip in milliseconds;
+live/avg/p50/p99/max), settings, per-basket and cumulative P/L charts, a
+table of every basket, and every basket's position tree. **Save logs**
+writes `muuk_logs/muuk_<time>.log`; the log is also saved there
+automatically on every disconnect.
 
 ## Who detects a pending order's trigger?
 

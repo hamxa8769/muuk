@@ -93,11 +93,16 @@ status/control panel over the same `LiveRunner` the CLI uses:
 build\app\desktop\Release\muuk-desktop.exe
 ```
 
-Paste the path to your local credentials file (same one as `muuk-live`,
-see above) into the "Credentials file" field and click **Start**. It shows
-symbol, strategy status, range, active order count, live bid/ask/spread,
-and basket gross/net P/L, plus a scrolling log of the same events
-`muuk-live` prints to stderr. **Stop** disconnects cleanly.
+Put the path to your local credentials file (same one as `muuk-live`,
+see above) into the "Config file" field and click **Connect**. The app
+shows live prices, the range, every open position and pending order (each
+with its own Close/Cancel button), costs and net P/L after costs, system
+speed, the log (with **Save logs**), a **History** tab with every basket
+and its positions as a tree, and **Export PDF report**. Settings can be
+edited and saved back to the config file. Closing the window while trades
+are open asks whether to close everything first; see
+`docs/ctrader-fix.md` ("Operator controls") and `docs/vps.md` for running
+it around the clock.
 
 ## Layout
 

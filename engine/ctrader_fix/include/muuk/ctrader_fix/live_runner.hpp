@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "muuk/core/strategy_engine.hpp"
+#include "muuk/ctrader_fix/basket_history.hpp"
 #include "muuk/ctrader_fix/fix_session.hpp"
+#include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
 
@@ -106,6 +108,18 @@ struct LiveSnapshot {
     double bookedCommission = 0.0;
     double realizedPnl = 0.0;        // booked net
     LiveSettings settings;
+
+    // Speed. tickDecision / fillReaction are the bot's own processing time
+    // in microseconds (quote in -> engine decided; fill in -> reaction sent);
+    // brokerRoundTrip is order sent -> broker's first answer, in ms.
+    LatencySummary tickDecisionUs;
+    LatencySummary fillReactionUs;
+    LatencySummary brokerRoundTripMs;
+    uint64_t ticksProcessed = 0;
+
+    std::string sessionStartedAt;
+    std::vector<BasketRecord> baskets;           // completed this session, oldest first
+    std::optional<BasketRecord> currentBasket;   // the basket in progress, if any
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -139,6 +153,14 @@ public:
     // setDisconnectHandler, it is read without synchronization once
     // running.
     void setLogHandler(LogHandler handler) { logHandler_ = std::move(handler); }
+
+    // Called once for every basket as soon as it's completely closed (every
+    // position's closing fill confirmed) -- e.g. to append it to a history
+    // file. Runs on a session thread while LiveRunner's lock is held, so
+    // keep it short and don't call back into LiveRunner. Same "set before
+    // run()" rule as setLogHandler.
+    using BasketHandler = std::function<void(const BasketRecord&)>;
+    void setBasketHandler(BasketHandler handler) { basketHandler_ = std::move(handler); }
 
     // Thread-safe point-in-time read of the current state, for a UI to
     // poll. Safe to call from any thread, including while run() is active
@@ -212,6 +234,14 @@ public:
     // hand) are dropped. Asynchronous; no-op if one is already in flight.
     void syncPositions();
 
+    // Exit guard: cancels every pending order, closes every open position
+    // (like closeRange(), so no new range opens afterwards either) and then
+    // blocks until the broker has confirmed the account is flat, a close is
+    // rejected, the connection drops, or `timeout` passes. Returns true only
+    // once the account is confirmed flat (immediately if it already is).
+    // Call from any thread other than the one running run().
+    bool flattenAndWait(std::chrono::milliseconds timeout);
+
 private:
     // Per-leg position tracking. engine/core deliberately only keeps a
     // running (side, volume) *aggregate* per side (see SideAggregate in
@@ -248,6 +278,18 @@ private:
     // Applies a complete set of Position Reports (see syncPositions()).
     // Caller must hold engineMutex_.
     void finishPositionSync(const std::vector<PositionReportInfo>& reports);
+
+    // Basket recording (all: caller must hold engineMutex_).
+    // beginBasket: a new range has just been armed.
+    // recordLegOpened/Closed: a position of the current basket opened/closed.
+    // maybeFinalizeBasket: once nothing of the basket is left open at the
+    // broker and no range is running, stamps it closed, keeps it in
+    // completedBaskets_ and hands it to basketHandler_.
+    void beginBasket();
+    void recordLegOpened(const OpenLeg& leg);
+    void recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission);
+    void setCloseReason(const std::string& reason);
+    void maybeFinalizeBasket();
 
     // Live breakdown for one open leg at the latest quote. Caller must hold
     // engineMutex_ and a quote must have arrived.
@@ -387,6 +429,22 @@ private:
     std::mutex posSyncMutex_;
     std::condition_variable posSyncCv_;
     bool posSyncDone_ = false;
+
+    // Basket history.
+    std::string sessionStartedAt_;
+    int basketCounter_ = 0;
+    std::optional<BasketRecord> currentBasket_;
+    std::chrono::steady_clock::time_point currentBasketStart_;
+    std::string closeReason_;
+    std::vector<BasketRecord> completedBaskets_;
+    BasketHandler basketHandler_;
+
+    // Speed.
+    LatencyTracker tickDecisionUs_;
+    LatencyTracker fillReactionUs_;
+    LatencyTracker brokerRoundTripMs_;
+    uint64_t ticksProcessed_ = 0;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> orderSentAt_;  // by ClOrdID
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};
