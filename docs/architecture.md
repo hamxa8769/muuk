@@ -32,11 +32,16 @@ commands get executed.
 
 - `start()` arms the two boundary pending orders (Buy Stop at the range's
   upper bound, Sell Stop at the lower bound), per proposal §3.
-- On `onOrderConfirmed`, the side that just filled is immediately re-armed
-  with the next lot in the global progression `L(n) = L0 + (n-1)*deltaL`;
-  the opposite side's pending order is left untouched. This reproduces the
-  worked example in proposal §3 exactly (see
-  `engine/core/tests/test_strategy_engine.cpp`).
+- On `onOrderConfirmed`, when `StrategyConfig::reArmOnFill` is true
+  (default), the side that just filled is immediately re-armed with the
+  next lot in the global progression `L(n) = L0 + (n-1)*deltaL`; the
+  opposite side's pending order is left untouched either way. This
+  reproduces the worked example in proposal §3 exactly (see
+  `engine/core/tests/test_strategy_engine.cpp`). Setting
+  `reArmOnFill=false` takes the single fill and stops re-arming that side
+  — a single-shot breakout variant instead of pyramiding into the trend —
+  while the opposite side stays armed and the basket-close/risk logic
+  below is unaffected.
 - On `onOrderRejected`, the engine retries the same order (same price, same
   lot) up to `StrategyConfig::maxRejectRetries` times before giving up on
   that side for the current cycle (proposal §4: "controlled retry logic").

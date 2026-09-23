@@ -164,7 +164,7 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
     agg.totalVolumeSteps += armed.order.volume.steps;
     agg.sumEntryPriceTicksVolume += event.fillPrice.ticks * armed.order.volume.steps;
 
-    if (status_ == EngineStatus::HaltedByRisk) {
+    if (status_ == EngineStatus::HaltedByRisk || !config_.reArmOnFill) {
         return out;
     }
 

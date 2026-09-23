@@ -219,3 +219,29 @@ TEST_CASE("rejected orders retry up to the configured limit, then give up") {
     // Only the untouched seq2 (Sell Stop) order remains armed.
     REQUIRE(engine.activeOrderCount() == initialCount - 1);
 }
+
+TEST_CASE("reArmOnFill=false takes a single fill and does not re-arm that side") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.reArmOnFill = false;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    REQUIRE(initial.size() == 2);
+    const OrderId seq1Id = placeCmd(initial, 0).id;  // BuyStop
+    const OrderId seq2Id = placeCmd(initial, 1).id;  // SellStop
+    REQUIRE(engine.activeOrderCount() == 2);
+
+    // seq1 (Buy Stop) fills: no re-arm, seq2 (Sell Stop) stays untouched.
+    const CommandBatch afterFill =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
+    REQUIRE(afterFill.empty());
+    REQUIRE(engine.activeOrderCount() == 1);
+    REQUIRE(engine.status() == EngineStatus::Active);
+
+    // The opposite side can still trigger independently.
+    const CommandBatch afterSecondFill =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seq2Id, Price::fromDouble(4336.00, spec)});
+    REQUIRE(afterSecondFill.empty());
+    REQUIRE(engine.activeOrderCount() == 0);
+}

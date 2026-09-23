@@ -25,6 +25,13 @@ struct StrategyConfig {
     CostInputs costs;
     double basketProfitTargetMoney = 0.0;
     int maxRejectRetries = 3;
+    // true (default): proposal §4 behavior — on fill, immediately re-arm
+    // the triggering side with the next lot in the progression
+    // (pyramiding into a confirmed breakout direction).
+    // false: take the single fill and stop — do not re-arm that side.
+    // The opposite side's still-pending order is untouched either way; a
+    // breach of the basket profit target still closes everything as usual.
+    bool reArmOnFill = true;
 };
 
 // Deterministic, I/O-free strategy state machine implementing the
@@ -32,9 +39,11 @@ struct StrategyConfig {
 //   - two boundary pending orders (Buy Stop at range.upperBound,
 //     Sell Stop at range.lowerBound), lot size from the global
 //     progression L(n) = L0 + (n-1)*deltaL (proposal §3)
-//   - on fill, the opposite pending order is left untouched and a new
-//     pending order is immediately re-armed on the side that just
-//     triggered, using the next lot in the sequence (proposal §4)
+//   - on fill, the opposite pending order is always left untouched; by
+//     default (StrategyConfig::reArmOnFill) a new pending order is
+//     immediately re-armed on the side that just triggered, using the
+//     next lot in the sequence (proposal §4) — set reArmOnFill=false for
+//     a single-shot variant that takes the one fill and waits
 //   - basket P/L is evaluated on every tick; once the net P/L target is
 //     reached the whole basket is closed and remaining orders cancelled
 //     (proposal §6)
@@ -66,7 +75,8 @@ public:
     CommandBatch onTick(const TickEvent& tick);
 
     // A previously placed order was filled by the broker at `fillPrice`.
-    // Re-arms the triggering side with the next lot in the sequence.
+    // Re-arms the triggering side with the next lot in the sequence, unless
+    // StrategyConfig::reArmOnFill is false.
     CommandBatch onOrderConfirmed(const OrderConfirmedEvent& event);
 
     // A previously placed order was rejected. Retries a bounded number of

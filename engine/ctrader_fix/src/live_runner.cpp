@@ -173,6 +173,14 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         return;
     }
 
+    if (type == msgtype::BusinessMessageReject) {
+        std::cerr << "[trade] BusinessMessageReject: refMsgType="
+                   << msg.getOptionalString(tag::RefMsgType).value_or("?")
+                   << " reason=" << msg.getOptionalString(tag::BusinessRejectReason).value_or("?")
+                   << " text=" << msg.getOptionalString(tag::Text).value_or("no reason given") << "\n";
+        return;
+    }
+
     std::cerr << "[trade] unhandled message type: " << type << "\n";
 }
 
