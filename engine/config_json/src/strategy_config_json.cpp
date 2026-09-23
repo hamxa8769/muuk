@@ -52,6 +52,7 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
     cfg.basketProfitTargetMoney = j.value("basketProfitTargetMoney", 0.0);
     cfg.maxRejectRetries = j.value("maxRejectRetries", cfg.maxRejectRetries);
     cfg.reArmOnFill = j.value("reArmOnFill", cfg.reArmOnFill);
+    cfg.seedOffsetPoints = j.value("seedOffsetPoints", cfg.seedOffsetPoints);
 
     return cfg;
 }

@@ -299,6 +299,17 @@ void LiveRunner::maybeEmitTick() {
     const TickEvent tick{Price::fromDouble(*latestBid_, config_.strategy.symbol),
                           Price::fromDouble(*latestAsk_, config_.strategy.symbol)};
     for (const auto& cmd : engine_->onTick(tick)) handleCommand(cmd);
+
+    // Keep the strategy running continuously: once a basket closes (profit
+    // target hit), immediately start the next cycle rather than sitting
+    // idle. With seedOffsetPoints>0 this re-seeds around the tick that
+    // just triggered the close (see armInitialOrders' comment on
+    // lastTick_), so each new cycle re-anchors to live price instead of
+    // drifting away from a now-closed cycle's range.
+    if (engine_->status() == EngineStatus::Completed) {
+        log("basket closed; starting the next cycle");
+        for (const auto& cmd : engine_->restart()) handleCommand(cmd);
+    }
 }
 
 void LiveRunner::waitForFirstQuoteAndCenterRange() {

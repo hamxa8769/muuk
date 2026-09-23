@@ -31,7 +31,13 @@ commands get executed.
 ```
 
 - `start()` arms the two boundary pending orders (Buy Stop at the range's
-  upper bound, Sell Stop at the lower bound), per proposal §3.
+  upper bound, Sell Stop at the lower bound), per proposal §3 — unless
+  `StrategyConfig::seedOffsetPoints > 0`, in which case it arms two tiny
+  seed orders around the range's midpoint instead, and the real two-sided
+  range is only established once one of them actually fills (see "Seed
+  anchor mode" below). `restart()` (called after a basket closes, e.g. by
+  `LiveRunner::maybeEmitTick` to keep the strategy running continuously)
+  goes through the exact same logic for a new cycle.
 - On `onOrderConfirmed`, when `StrategyConfig::reArmOnFill` is true
   (default), the side that just filled is immediately re-armed with the
   next lot in the global progression `L(n) = L0 + (n-1)*deltaL`; the
@@ -45,6 +51,26 @@ commands get executed.
 - On `onOrderRejected`, the engine retries the same order (same price, same
   lot) up to `StrategyConfig::maxRejectRetries` times before giving up on
   that side for the current cycle (proposal §4: "controlled retry logic").
+
+**Seed anchor mode** (`StrategyConfig::seedOffsetPoints > 0`) exists
+because a pre-computed range can already be stale by the time it's armed
+— even one just centered on a live quote a moment ago, if the market is
+moving fast. Instead of committing to both full-width boundaries up
+front, `armInitialOrders()` arms two tiny orders (`seedOffsetPoints` price
+units above/below the reference midpoint) and sets an internal `seeding_`
+flag. Whichever one a real fill confirms first proves an actually-
+tradeable price *right now*; `onOrderConfirmed` then cancels the other
+seed and re-derives the full range from that confirmed fill (the filled
+side's own price becomes one boundary, the opposite boundary is
+`fillPrice ± the originally configured total width`), before re-arming
+both sides normally. The reference midpoint itself prefers `lastTick_`
+(the engine's own most recently processed tick, which persists across
+`resetCycleState()`) over `range`'s configured midpoint whenever one
+exists — so a `restart()` after a closed basket re-anchors to the tick
+that *just* triggered the close, not to the previous (now stale) cycle's
+range. Only `range`'s midpoint is used before the very first tick ever
+(the caller — e.g. a live driver — is expected to have set it from
+whatever it knew at construction time).
 - On every `onTick`, the basket's net P/L is re-evaluated; once it reaches
   `basketProfitTargetMoney` the basket is closed and all remaining pending
   orders are cancelled (proposal §6).

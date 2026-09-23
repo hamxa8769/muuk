@@ -19,9 +19,11 @@ void StrategyEngine::resetCycleState() {
     slippageMoneyAccrued_ = 0.0;
     swapMoneyAccrued_ = 0.0;
     lastBasketPnl_ = BasketPnlResult{};
+    seeding_ = false;
 }
 
-void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount) {
+void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount,
+                                  std::optional<Price> priceOverride) {
     const Volume lot = computeSequenceLot(config_.lotProgression, seqIndex, config_.symbol);
 
     RiskCheckInput riskInput;
@@ -47,7 +49,7 @@ void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex
         return;
     }
 
-    const Price price = boundaryPriceForSide(side);
+    const Price price = priceOverride.value_or(boundaryPriceForSide(side));
     PendingOrder order{allocateOrderId(), seqIndex, side, price, lot, OrderState::Pending};
     pendingOrders_.push_back(ArmedOrder{order, retryCount});
     out.push_back(PlaceOrderCommand{order.id, seqIndex, side, price, lot});
@@ -57,12 +59,41 @@ CommandBatch StrategyEngine::armInitialOrders() {
     resetCycleState();
     CommandBatch out;
 
-    tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
-    ++nextSequenceIndex_;
+    if (config_.seedOffsetPoints > 0.0) {
+        // See StrategyConfig::seedOffsetPoints: arm two tiny seed orders
+        // around a reference midpoint instead of the full boundaries —
+        // the first one to fill anchors the real range in
+        // onOrderConfirmed. The reference is the last tick this engine
+        // has actually seen (lastTick_ persists across resetCycleState(),
+        // so on restart() after a basket close it's the very tick that
+        // triggered the close — always fresh) when one exists; before the
+        // very first tick ever (the first start() call), there is none
+        // yet, so config_.range's midpoint — set by the caller from
+        // whatever it knew at construction time (e.g. a live driver's own
+        // most recent quote) — is used instead.
+        seeding_ = true;
+        const bool haveTick = lastTick_.bid.ticks != 0 || lastTick_.ask.ticks != 0;
+        const Price mid = haveTick ? Price{(lastTick_.bid.ticks + lastTick_.ask.ticks) / 2}
+                                    : Price{(config_.range.lowerBound.ticks + config_.range.upperBound.ticks) / 2};
+        const int64_t offsetTicks =
+            std::max<int64_t>(1, Price::fromDouble(config_.seedOffsetPoints, config_.symbol).ticks);
+        const Price seedUpper{mid.ticks + offsetTicks};
+        const Price seedLower{mid.ticks - offsetTicks};
 
-    if (status_ != EngineStatus::HaltedByRisk) {
-        tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_);
+        tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_, 0, seedUpper);
         ++nextSequenceIndex_;
+        if (status_ != EngineStatus::HaltedByRisk) {
+            tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_, 0, seedLower);
+            ++nextSequenceIndex_;
+        }
+    } else {
+        tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
+        ++nextSequenceIndex_;
+
+        if (status_ != EngineStatus::HaltedByRisk) {
+            tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_);
+            ++nextSequenceIndex_;
+        }
     }
 
     if (status_ != EngineStatus::HaltedByRisk) {
@@ -164,7 +195,48 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
     agg.totalVolumeSteps += armed.order.volume.steps;
     agg.sumEntryPriceTicksVolume += event.fillPrice.ticks * armed.order.volume.steps;
 
-    if (status_ == EngineStatus::HaltedByRisk || !config_.reArmOnFill) {
+    if (status_ == EngineStatus::HaltedByRisk) {
+        return out;
+    }
+
+    if (seeding_) {
+        // This is the first-ever fill of the cycle in seed-anchor mode:
+        // whichever seed just filled wins. Cancel the other one (if risk
+        // let it get armed and it's still pending) and re-derive the real
+        // range from this confirmed fill, keeping the originally
+        // configured total width.
+        seeding_ = false;
+        for (const auto& other : pendingOrders_) {
+            out.push_back(CancelOrderCommand{other.order.id});
+        }
+        pendingOrders_.clear();
+
+        const int64_t width = config_.range.upperBound.ticks - config_.range.lowerBound.ticks;
+        if (armed.order.side == OrderSide::BuyStop) {
+            config_.range.upperBound = event.fillPrice;
+            config_.range.lowerBound = Price{event.fillPrice.ticks - width};
+        } else {
+            config_.range.lowerBound = event.fillPrice;
+            config_.range.upperBound = Price{event.fillPrice.ticks + width};
+        }
+
+        // Re-arm both sides at the newly anchored boundaries: the side
+        // that just filled gets a fresh order back at its own (now
+        // confirmed) level, and the opposite side gets its first order at
+        // the derived boundary — both using the next lots in the
+        // sequence, exactly like any other re-arm.
+        const int seq1 = nextSequenceIndex_++;
+        tryArmOrder(out, armed.order.side, seq1);
+        if (status_ != EngineStatus::HaltedByRisk) {
+            const OrderSide opposite = (armed.order.side == OrderSide::BuyStop) ? OrderSide::SellStop
+                                                                                 : OrderSide::BuyStop;
+            const int seq2 = nextSequenceIndex_++;
+            tryArmOrder(out, opposite, seq2);
+        }
+        return out;
+    }
+
+    if (!config_.reArmOnFill) {
         return out;
     }
 

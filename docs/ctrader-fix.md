@@ -97,10 +97,40 @@ at `0` (default) to use `strategy.range` exactly as written — this is
 what the backtester and CLI examples still do, since there's no "live
 price" concept there.
 
-This is still a one-shot centering at startup, not continuous
-re-centering while running (that would be closer to genuine consolidation
-/support-resistance detection — not built, see the plan history) — the
-range is fixed for the lifetime of one `run()` call once set.
+This centers the range once, at startup. It is *not* consolidation/
+support-resistance detection (not built) — it does not pick where a range
+"should" be, only where the market already is right now.
+
+## Continuous operation across cycles
+
+Two things combine to keep the strategy following live price for the
+whole time it runs, not just at startup:
+
+- `StrategyConfig::seedOffsetPoints` (`engine/core`, see
+  `docs/architecture.md` "Seed anchor mode") re-derives the range from a
+  real confirmed fill every time `armInitialOrders()` runs — including on
+  `restart()` after a basket closes, using the tick that just triggered
+  that close as the reference, not the (by then closed and possibly
+  stale) previous cycle's range.
+- `LiveRunner::maybeEmitTick` calls `engine_->restart()` itself as soon as
+  it sees `EngineStatus::Completed`, so a closed basket immediately starts
+  the next cycle rather than sitting idle until the process is restarted
+  by hand.
+
+Together, `autoRangeWidthPoints` (LiveRunner, startup only) +
+`seedOffsetPoints` (StrategyEngine, every cycle) is the combination meant
+for unattended, continuous operation: the very first range comes from
+whatever quote arrives right after connecting, and every range after that
+comes from a real fill rather than a stale guess.
+
+One known gap: if the *other*, still-pending seed order happens to fill
+on the broker's side in the brief window between `onOrderConfirmed`
+deciding to cancel it and that `OrderCancelRequest` actually reaching the
+broker, the engine's internal state (which already treated it as
+cancelled) and the broker's real position can disagree. `LiveRunner`
+already logs `OrderCancelReject` if the broker refuses the cancel, but
+does not yet reconcile the engine's state from it — the same class of
+gap as the other Phase-1 simplifications in `docs/architecture.md`.
 
 ## Who detects a pending order's trigger?
 

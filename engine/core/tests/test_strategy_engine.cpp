@@ -220,6 +220,162 @@ TEST_CASE("rejected orders retry up to the configured limit, then give up") {
     REQUIRE(engine.activeOrderCount() == initialCount - 1);
 }
 
+TEST_CASE("seedOffsetPoints>0 arms two tiny seed orders around the range midpoint, not the full boundaries") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;  // range is 4336.00-4337.00, mid = 4336.50
+    StrategyEngine engine(cfg);
+
+    const CommandBatch out = engine.start();
+    REQUIRE(out.size() == 2);
+
+    const auto& seed1 = placeCmd(out, 0);
+    REQUIRE(seed1.side == OrderSide::BuyStop);
+    REQUIRE(seed1.price == Price::fromDouble(4336.55, spec));
+
+    const auto& seed2 = placeCmd(out, 1);
+    REQUIRE(seed2.side == OrderSide::SellStop);
+    REQUIRE(seed2.price == Price::fromDouble(4336.45, spec));
+
+    REQUIRE(engine.status() == EngineStatus::Active);
+}
+
+TEST_CASE("seedOffsetPoints>0: the Buy seed filling first anchors the upper boundary there") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    const OrderId seedBuyId = placeCmd(initial, 0).id;   // BuyStop @ 4336.55
+    const OrderId seedSellId = placeCmd(initial, 1).id;  // SellStop @ 4336.45
+
+    const CommandBatch out =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seedBuyId, Price::fromDouble(4336.55, spec)});
+
+    bool sawCancel = false;
+    bool sawNewBuy = false;
+    bool sawNewSell = false;
+    for (const auto& cmd : out) {
+        if (std::holds_alternative<CancelOrderCommand>(cmd)) {
+            REQUIRE(std::get<CancelOrderCommand>(cmd).id == seedSellId);
+            sawCancel = true;
+        } else if (std::holds_alternative<PlaceOrderCommand>(cmd)) {
+            const auto& p = std::get<PlaceOrderCommand>(cmd);
+            if (p.side == OrderSide::BuyStop) {
+                REQUIRE(p.price == Price::fromDouble(4336.55, spec));  // anchored at the fill
+                sawNewBuy = true;
+            } else {
+                // Original width (4337.00-4336.00 = 1.00) preserved below the anchor.
+                REQUIRE(p.price == Price::fromDouble(4335.55, spec));
+                sawNewSell = true;
+            }
+        }
+    }
+    REQUIRE(sawCancel);
+    REQUIRE(sawNewBuy);
+    REQUIRE(sawNewSell);
+    REQUIRE(engine.activeOrderCount() == 2);
+}
+
+TEST_CASE("seedOffsetPoints>0: the Sell seed filling first anchors the lower boundary there") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    const OrderId seedBuyId = placeCmd(initial, 0).id;   // BuyStop @ 4336.55
+    const OrderId seedSellId = placeCmd(initial, 1).id;  // SellStop @ 4336.45
+
+    const CommandBatch out =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seedSellId, Price::fromDouble(4336.45, spec)});
+
+    bool sawCancel = false;
+    bool sawNewBuy = false;
+    bool sawNewSell = false;
+    for (const auto& cmd : out) {
+        if (std::holds_alternative<CancelOrderCommand>(cmd)) {
+            REQUIRE(std::get<CancelOrderCommand>(cmd).id == seedBuyId);
+            sawCancel = true;
+        } else if (std::holds_alternative<PlaceOrderCommand>(cmd)) {
+            const auto& p = std::get<PlaceOrderCommand>(cmd);
+            if (p.side == OrderSide::SellStop) {
+                REQUIRE(p.price == Price::fromDouble(4336.45, spec));  // anchored at the fill
+                sawNewSell = true;
+            } else {
+                REQUIRE(p.price == Price::fromDouble(4337.45, spec));  // anchor + original width
+                sawNewBuy = true;
+            }
+        }
+    }
+    REQUIRE(sawCancel);
+    REQUIRE(sawNewBuy);
+    REQUIRE(sawNewSell);
+    REQUIRE(engine.activeOrderCount() == 2);
+}
+
+TEST_CASE("seedOffsetPoints>0: after anchoring, later fills pyramid normally (seeding doesn't re-trigger)") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    const OrderId seedBuyId = placeCmd(initial, 0).id;
+
+    const CommandBatch afterAnchor =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seedBuyId, Price::fromDouble(4336.55, spec)});
+    OrderId anchoredBuyId = kInvalidOrderId;
+    for (const auto& cmd : afterAnchor) {
+        if (const auto* p = std::get_if<PlaceOrderCommand>(&cmd); p && p->side == OrderSide::BuyStop) {
+            anchoredBuyId = p->id;
+        }
+    }
+    REQUIRE(anchoredBuyId != kInvalidOrderId);
+
+    // A further fill of the (now normal) Buy side should just re-arm it —
+    // no seed/anchor bookkeeping should fire a second time.
+    const CommandBatch afterSecondFill =
+        engine.onOrderConfirmed(OrderConfirmedEvent{anchoredBuyId, Price::fromDouble(4336.55, spec)});
+    REQUIRE(afterSecondFill.size() == 1);
+    REQUIRE(std::holds_alternative<PlaceOrderCommand>(afterSecondFill[0]));
+    REQUIRE(std::get<PlaceOrderCommand>(afterSecondFill[0]).side == OrderSide::BuyStop);
+    REQUIRE(std::get<PlaceOrderCommand>(afterSecondFill[0]).price == Price::fromDouble(4336.55, spec));
+}
+
+TEST_CASE("seedOffsetPoints>0: restart() re-seeds around the tick that triggered the close, not the stale prior range") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;
+    cfg.basketProfitTargetMoney = 0.05;  // low bar, comfortably cleared below
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    const OrderId seedBuyId = placeCmd(initial, 0).id;  // BuyStop @ 4336.55 (mid 4336.50 + 0.05)
+
+    // Anchor: the Buy seed fills at 4336.55 -> range becomes [4335.55, 4336.55].
+    engine.onOrderConfirmed(OrderConfirmedEvent{seedBuyId, Price::fromDouble(4336.55, spec)});
+
+    // Price rallies well away from that anchor, clearing the profit target.
+    TickEvent tick;
+    tick.bid = Price::fromDouble(4349.99, spec);
+    tick.ask = Price::fromDouble(4350.01, spec);
+    engine.onTick(tick);
+    REQUIRE(engine.status() == EngineStatus::Completed);
+
+    // The new cycle's seeds must be centered on this tick's mid (~4350.00)
+    // -- not the now-stale anchored range from before (~4336.05) -- so the
+    // strategy keeps following live price across cycles rather than
+    // arming orders tens of dollars away from the market.
+    const CommandBatch restartOut = engine.restart();
+    REQUIRE(restartOut.size() == 2);
+    REQUIRE(placeCmd(restartOut, 0).side == OrderSide::BuyStop);
+    REQUIRE(placeCmd(restartOut, 0).price == Price::fromDouble(4350.05, spec));
+    REQUIRE(placeCmd(restartOut, 1).side == OrderSide::SellStop);
+    REQUIRE(placeCmd(restartOut, 1).price == Price::fromDouble(4349.95, spec));
+}
+
 TEST_CASE("reArmOnFill=false takes a single fill and does not re-arm that side") {
     const SymbolSpec spec = xauusdSpec();
     StrategyConfig cfg = baseConfig(spec);

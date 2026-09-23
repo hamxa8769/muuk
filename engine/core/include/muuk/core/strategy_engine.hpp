@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "muuk/core/events.hpp"
 #include "muuk/core/fixed_vector.hpp"
 #include "muuk/core/lot_progression.hpp"
@@ -32,6 +34,22 @@ struct StrategyConfig {
     // The opposite side's still-pending order is untouched either way; a
     // breach of the basket profit target still closes everything as usual.
     bool reArmOnFill = true;
+
+    // 0 (default): start()/restart() arm both full-width boundary orders
+    // immediately, at range.upperBound/lowerBound exactly as configured.
+    //
+    // >0: "seed anchor" mode. `range` may already be stale by the time
+    // both boundary orders would be armed (e.g. it was centered on a
+    // quote a moment ago and price has since moved) — instead,
+    // start()/restart() first arm two tiny seed orders this many price
+    // units above/below range's midpoint. Whichever fills first proves a
+    // real, currently-tradeable price; the other seed is cancelled, and
+    // the real two-sided range (same total width as configured) is then
+    // anchored to that confirmed fill — the filled side's own price
+    // becomes one boundary, and a fresh order is armed on the opposite
+    // side at fillPrice +/- the configured width. From that point on,
+    // behavior is identical to the seedOffsetPoints=0 case.
+    double seedOffsetPoints = 0.0;
 };
 
 // Deterministic, I/O-free strategy state machine implementing the
@@ -117,7 +135,11 @@ private:
     // Attempts to arm a new pending order for `side` at sequence `seqIndex`.
     // Runs the risk check first; on breach, emits a RiskAlertCommand,
     // transitions to HaltedByRisk, and returns without arming anything.
-    void tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount = 0);
+    // `priceOverride`, when set, is used instead of
+    // boundaryPriceForSide(side) — only seed orders (see seedOffsetPoints)
+    // need this; every normal call omits it.
+    void tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount = 0,
+                      std::optional<Price> priceOverride = std::nullopt);
 
     BasketPnlResult evaluateBasketPnl(const TickEvent& tick) const;
 
@@ -130,6 +152,7 @@ private:
 
     int nextSequenceIndex_ = 1;
     OrderId nextOrderId_ = 1;
+    bool seeding_ = false;  // true between armInitialOrders() arming seeds and the first fill anchoring the range
     TickEvent lastTick_{};
     double slippageMoneyAccrued_ = 0.0;
     double swapMoneyAccrued_ = 0.0;
