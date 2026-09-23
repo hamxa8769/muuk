@@ -137,6 +137,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     REQUIRE(order2.getInt(tag::Side) == 2);
     REQUIRE(order2.getDouble(tag::StopPx) == Catch::Approx(4336.00));
     REQUIRE(order2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    const std::string order2ClOrdId = order2.getString(tag::ClOrdID);
 
     // --- A harmless in-range tick ---
     FixMessage snapshot = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
@@ -148,17 +149,39 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     snapshot.set(tag::MDEntryPx, std::string("4336.52"));
     server.sendToClient(kQuoteConn, snapshot);
 
-    // --- Broker fills the first (Buy Stop) order; engine should re-arm it ---
-    FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);
-    fill.set(tag::OrderID, std::string("9001"));
-    fill.set(tag::ClOrdID, order1ClOrdId);
-    fill.set(tag::ExecType, std::string("F"));
-    fill.set(tag::OrdStatus, std::string("2"));
-    fill.set(tag::AvgPx, std::string("4337.00"));
-    fill.set(tag::LastQty, std::string("0.01"));
-    fill.set(tag::CumQty, std::string("0.01"));
-    fill.set(tag::LeavesQty, std::string("0"));
-    server.sendToClient(kTradeConn, fill);
+    // --- Broker fills the first (Buy Stop) order. Its opposite (order2,
+    // Sell Stop) is already pending, so nothing new should be armed yet —
+    // confirmed via snapshot() rather than waiting for a NewOrderSingle
+    // that (correctly) never arrives. ---
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().activeOrderCount == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().activeOrderCount == 1);  // only order2 remains pending
+
+    // --- The second (Sell Stop) order now fills. Its opposite (Buy) has
+    // nothing pending, so a fresh Buy Stop (order3) is armed. ---
+    FixMessage fill2 = serverHeaderMessage(msgtype::ExecutionReport, 4);
+    fill2.set(tag::OrderID, std::string("9002"));
+    fill2.set(tag::ClOrdID, order2ClOrdId);
+    fill2.set(tag::ExecType, std::string("F"));
+    fill2.set(tag::OrdStatus, std::string("2"));
+    fill2.set(tag::AvgPx, std::string("4336.00"));
+    fill2.set(tag::LastQty, std::string("0.02"));
+    fill2.set(tag::CumQty, std::string("0.02"));
+    fill2.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill2);
 
     const FixMessage order3 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(order3.getInt(tag::Side) == 1);

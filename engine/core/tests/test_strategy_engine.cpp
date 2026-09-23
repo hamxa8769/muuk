@@ -68,46 +68,73 @@ TEST_CASE("fill sequence reproduces the full proposal table (sequences 1-6)") {
     StrategyEngine engine(baseConfig(spec));
 
     const CommandBatch initial = engine.start();
-    const OrderId seq1Id = placeCmd(initial, 0).id;
-    const OrderId seq2Id = placeCmd(initial, 1).id;
+    const OrderId seq1Id = placeCmd(initial, 0).id;  // Buy Stop @4337, 0.01
+    const OrderId seq2Id = placeCmd(initial, 1).id;  // Sell Stop @4336, 0.02
 
-    struct Expected {
-        int sequenceIndex;
-        OrderSide side;
-        double price;
-        double lot;
-    };
-    const Expected expectedTable[] = {
-        {3, OrderSide::BuyStop, 4337.00, 0.03},
-        {4, OrderSide::SellStop, 4336.00, 0.04},
-        {5, OrderSide::BuyStop, 4337.00, 0.05},
-        {6, OrderSide::SellStop, 4336.00, 0.06},
-    };
-
-    // seq1 (Buy Stop) triggers -> re-arms seq3 (Buy Stop again).
+    // seq1 (Buy Stop) fills: the opposite side (seq2, Sell Stop) is
+    // already pending from the initial pair, so nothing new is armed yet.
     CommandBatch out = engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
-    REQUIRE(out.size() == 1);
-    REQUIRE(placeCmd(out, 0).sequenceIndex == expectedTable[0].sequenceIndex);
-    REQUIRE(placeCmd(out, 0).side == expectedTable[0].side);
-    REQUIRE(placeCmd(out, 0).price == Price::fromDouble(expectedTable[0].price, spec));
-    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(expectedTable[0].lot));
-    const OrderId seq3Id = placeCmd(out, 0).id;
+    REQUIRE(out.empty());
 
-    // seq2 (Sell Stop) triggers -> re-arms seq4 (Sell Stop again).
+    // seq2 (Sell Stop) fills: NOW the Buy side has nothing pending, so a
+    // fresh Buy Stop (seq3) is armed -- matching the table's seq3 exactly.
     out = engine.onOrderConfirmed(OrderConfirmedEvent{seq2Id, Price::fromDouble(4336.00, spec)});
     REQUIRE(out.size() == 1);
-    REQUIRE(placeCmd(out, 0).sequenceIndex == expectedTable[1].sequenceIndex);
-    REQUIRE(placeCmd(out, 0).side == expectedTable[1].side);
-    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(expectedTable[1].lot));
+    REQUIRE(placeCmd(out, 0).sequenceIndex == 3);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::BuyStop);
+    REQUIRE(placeCmd(out, 0).price == Price::fromDouble(4337.00, spec));
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.03));
+    const OrderId seq3Id = placeCmd(out, 0).id;
+
+    // seq3 (Buy Stop) fills -> Sell Stop (seq4) armed.
+    out = engine.onOrderConfirmed(OrderConfirmedEvent{seq3Id, Price::fromDouble(4337.00, spec)});
+    REQUIRE(out.size() == 1);
+    REQUIRE(placeCmd(out, 0).sequenceIndex == 4);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::SellStop);
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.04));
     const OrderId seq4Id = placeCmd(out, 0).id;
 
-    out = engine.onOrderConfirmed(OrderConfirmedEvent{seq3Id, Price::fromDouble(4337.00, spec)});
-    REQUIRE(placeCmd(out, 0).sequenceIndex == expectedTable[2].sequenceIndex);
-    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(expectedTable[2].lot));
-
+    // seq4 (Sell Stop) fills -> Buy Stop (seq5) armed.
     out = engine.onOrderConfirmed(OrderConfirmedEvent{seq4Id, Price::fromDouble(4336.00, spec)});
-    REQUIRE(placeCmd(out, 0).sequenceIndex == expectedTable[3].sequenceIndex);
-    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(expectedTable[3].lot));
+    REQUIRE(out.size() == 1);
+    REQUIRE(placeCmd(out, 0).sequenceIndex == 5);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::BuyStop);
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.05));
+    const OrderId seq5Id = placeCmd(out, 0).id;
+
+    // seq5 (Buy Stop) fills -> Sell Stop (seq6) armed.
+    out = engine.onOrderConfirmed(OrderConfirmedEvent{seq5Id, Price::fromDouble(4337.00, spec)});
+    REQUIRE(out.size() == 1);
+    REQUIRE(placeCmd(out, 0).sequenceIndex == 6);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::SellStop);
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.06));
+}
+
+TEST_CASE("the same side never gets a duplicate pending order while its own is still outstanding") {
+    // Regression test: an earlier version re-armed the side that just
+    // filled instead of the opposite side, which let one side accumulate
+    // unbounded fills whenever price kept moving one direction (caught
+    // via live testing as "bulk orders on one side"). The corrected
+    // design makes this structurally impossible: at most one order is
+    // ever pending, and a fill always arms the opposite of whichever side
+    // just triggered -- never the same one.
+    const SymbolSpec spec = xauusdSpec();
+    StrategyEngine engine(baseConfig(spec));
+
+    const CommandBatch initial = engine.start();
+    const OrderId seq1Id = placeCmd(initial, 0).id;  // Buy Stop @4337
+    const OrderId seq2Id = placeCmd(initial, 1).id;  // Sell Stop @4336
+
+    // Buy fills first: opposite (Sell) already pending, nothing new armed.
+    REQUIRE(engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)}).empty());
+    REQUIRE(engine.activeOrderCount() == 1);  // only seq2 remains
+
+    // Sell fills: opposite (Buy) now has nothing pending, so a fresh Buy
+    // Stop is armed -- never another Sell Stop.
+    const CommandBatch out = engine.onOrderConfirmed(OrderConfirmedEvent{seq2Id, Price::fromDouble(4336.00, spec)});
+    REQUIRE(out.size() == 1);
+    REQUIRE(placeCmd(out, 0).side == OrderSide::BuyStop);
+    REQUIRE(engine.activeOrderCount() == 1);
 }
 
 TEST_CASE("onOrderConfirmed for an unknown/duplicate id is a no-op") {
@@ -115,16 +142,26 @@ TEST_CASE("onOrderConfirmed for an unknown/duplicate id is a no-op") {
     StrategyEngine engine(baseConfig(spec));
     const CommandBatch initial = engine.start();
     const OrderId seq1Id = placeCmd(initial, 0).id;
+    const OrderId seq2Id = placeCmd(initial, 1).id;
 
     const CommandBatch bogus = engine.onOrderConfirmed(OrderConfirmedEvent{99999, Price::fromDouble(4337.00, spec)});
     REQUIRE(bogus.empty());
 
-    const CommandBatch first = engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
+    // seq1 (Buy) fills: opposite (Sell/seq2) already pending, nothing new.
+    REQUIRE(engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)}).empty());
+
+    // seq2 (Sell) fills: now a fresh order is armed on the opposite side.
+    const CommandBatch first = engine.onOrderConfirmed(OrderConfirmedEvent{seq2Id, Price::fromDouble(4336.00, spec)});
     REQUIRE_FALSE(first.empty());
 
-    // Replaying the same confirmation must not re-trigger re-arming.
-    const CommandBatch replay = engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
+    // Replaying that same confirmation must not re-trigger re-arming.
+    const CommandBatch replay = engine.onOrderConfirmed(OrderConfirmedEvent{seq2Id, Price::fromDouble(4336.00, spec)});
     REQUIRE(replay.empty());
+
+    // Replaying the earlier (seq1) confirmation, now stale too, is also a no-op.
+    const CommandBatch replaySeq1 =
+        engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
+    REQUIRE(replaySeq1.empty());
 }
 
 TEST_CASE("basket closes and cancels remaining orders once the profit target is reached") {
@@ -138,9 +175,11 @@ TEST_CASE("basket closes and cancels remaining orders once the profit target is 
     const OrderId seq2Id = placeCmd(initial, 1).id;
 
     // Buy Stop seq1 fills exactly at its requested price (no slippage).
+    // The opposite side (Sell Stop, seq2) is already pending, so nothing
+    // new is armed yet.
     const CommandBatch afterFill =
         engine.onOrderConfirmed(OrderConfirmedEvent{seq1Id, Price::fromDouble(4337.00, spec)});
-    REQUIRE_FALSE(afterFill.empty()); // re-armed seq3
+    REQUIRE(afterFill.empty());
 
     // Price rallies 5.00 -> long leg is comfortably in the money.
     TickEvent tick;
@@ -160,9 +199,8 @@ TEST_CASE("basket closes and cancels remaining orders once the profit target is 
         }
     }
     REQUIRE(sawClose);
-    // seq2 (never filled) and the seq3 re-arm from the fill above are both
-    // still pending and must be cancelled.
-    REQUIRE(cancelCount == 2);
+    // seq2 (never filled) is the sole still-pending order and must be cancelled.
+    REQUIRE(cancelCount == 1);
     REQUIRE(engine.activeOrderCount() == 0);
     (void)seq2Id;
 }
@@ -253,29 +291,26 @@ TEST_CASE("seedOffsetPoints>0: the Buy seed filling first anchors the upper boun
     const CommandBatch out =
         engine.onOrderConfirmed(OrderConfirmedEvent{seedBuyId, Price::fromDouble(4336.55, spec)});
 
+    // The other seed is cancelled, and the *only* new order armed is the
+    // opposite side (Sell Stop) at the derived lower boundary -- the Buy
+    // side isn't re-armed until this Sell Stop eventually fills too.
+    REQUIRE(out.size() == 2);
     bool sawCancel = false;
-    bool sawNewBuy = false;
     bool sawNewSell = false;
     for (const auto& cmd : out) {
         if (std::holds_alternative<CancelOrderCommand>(cmd)) {
             REQUIRE(std::get<CancelOrderCommand>(cmd).id == seedSellId);
             sawCancel = true;
-        } else if (std::holds_alternative<PlaceOrderCommand>(cmd)) {
-            const auto& p = std::get<PlaceOrderCommand>(cmd);
-            if (p.side == OrderSide::BuyStop) {
-                REQUIRE(p.price == Price::fromDouble(4336.55, spec));  // anchored at the fill
-                sawNewBuy = true;
-            } else {
-                // Original width (4337.00-4336.00 = 1.00) preserved below the anchor.
-                REQUIRE(p.price == Price::fromDouble(4335.55, spec));
-                sawNewSell = true;
-            }
+        } else if (const auto* p = std::get_if<PlaceOrderCommand>(&cmd)) {
+            REQUIRE(p->side == OrderSide::SellStop);
+            // Original width (4337.00-4336.00 = 1.00) preserved below the anchor.
+            REQUIRE(p->price == Price::fromDouble(4335.55, spec));
+            sawNewSell = true;
         }
     }
     REQUIRE(sawCancel);
-    REQUIRE(sawNewBuy);
     REQUIRE(sawNewSell);
-    REQUIRE(engine.activeOrderCount() == 2);
+    REQUIRE(engine.activeOrderCount() == 1);
 }
 
 TEST_CASE("seedOffsetPoints>0: the Sell seed filling first anchors the lower boundary there") {
@@ -291,57 +326,58 @@ TEST_CASE("seedOffsetPoints>0: the Sell seed filling first anchors the lower bou
     const CommandBatch out =
         engine.onOrderConfirmed(OrderConfirmedEvent{seedSellId, Price::fromDouble(4336.45, spec)});
 
+    // Symmetric: only the opposite side (Buy Stop) gets a fresh order.
+    REQUIRE(out.size() == 2);
     bool sawCancel = false;
     bool sawNewBuy = false;
-    bool sawNewSell = false;
     for (const auto& cmd : out) {
         if (std::holds_alternative<CancelOrderCommand>(cmd)) {
             REQUIRE(std::get<CancelOrderCommand>(cmd).id == seedBuyId);
             sawCancel = true;
-        } else if (std::holds_alternative<PlaceOrderCommand>(cmd)) {
-            const auto& p = std::get<PlaceOrderCommand>(cmd);
-            if (p.side == OrderSide::SellStop) {
-                REQUIRE(p.price == Price::fromDouble(4336.45, spec));  // anchored at the fill
-                sawNewSell = true;
-            } else {
-                REQUIRE(p.price == Price::fromDouble(4337.45, spec));  // anchor + original width
-                sawNewBuy = true;
-            }
+        } else if (const auto* p = std::get_if<PlaceOrderCommand>(&cmd)) {
+            REQUIRE(p->side == OrderSide::BuyStop);
+            REQUIRE(p->price == Price::fromDouble(4337.45, spec));  // anchor + original width
+            sawNewBuy = true;
         }
     }
     REQUIRE(sawCancel);
     REQUIRE(sawNewBuy);
-    REQUIRE(sawNewSell);
-    REQUIRE(engine.activeOrderCount() == 2);
+    REQUIRE(engine.activeOrderCount() == 1);
 }
 
-TEST_CASE("seedOffsetPoints>0: after anchoring, later fills pyramid normally (seeding doesn't re-trigger)") {
+TEST_CASE("seedOffsetPoints>0: after anchoring, the opposite-side alternation continues correctly") {
     const SymbolSpec spec = xauusdSpec();
     StrategyConfig cfg = baseConfig(spec);
     cfg.seedOffsetPoints = 0.05;
     StrategyEngine engine(cfg);
 
     const CommandBatch initial = engine.start();
-    const OrderId seedBuyId = placeCmd(initial, 0).id;
+    const OrderId seedBuyId = placeCmd(initial, 0).id;  // BuyStop @ 4336.55
 
+    // Anchor: the Buy seed fills -> a Sell Stop is armed at the derived
+    // lower boundary (4335.55); the Buy side itself is NOT re-armed yet.
     const CommandBatch afterAnchor =
         engine.onOrderConfirmed(OrderConfirmedEvent{seedBuyId, Price::fromDouble(4336.55, spec)});
-    OrderId anchoredBuyId = kInvalidOrderId;
+    OrderId anchoredSellId = kInvalidOrderId;
     for (const auto& cmd : afterAnchor) {
-        if (const auto* p = std::get_if<PlaceOrderCommand>(&cmd); p && p->side == OrderSide::BuyStop) {
-            anchoredBuyId = p->id;
+        if (const auto* p = std::get_if<PlaceOrderCommand>(&cmd); p && p->side == OrderSide::SellStop) {
+            anchoredSellId = p->id;
         }
     }
-    REQUIRE(anchoredBuyId != kInvalidOrderId);
+    REQUIRE(anchoredSellId != kInvalidOrderId);
+    REQUIRE(engine.activeOrderCount() == 1);
 
-    // A further fill of the (now normal) Buy side should just re-arm it —
-    // no seed/anchor bookkeeping should fire a second time.
+    // That Sell Stop fills -> the Buy side now has nothing pending, so a
+    // fresh Buy Stop is armed back at the anchor level (4336.55) -- and
+    // seeding must not fire a second time here.
     const CommandBatch afterSecondFill =
-        engine.onOrderConfirmed(OrderConfirmedEvent{anchoredBuyId, Price::fromDouble(4336.55, spec)});
+        engine.onOrderConfirmed(OrderConfirmedEvent{anchoredSellId, Price::fromDouble(4335.55, spec)});
     REQUIRE(afterSecondFill.size() == 1);
     REQUIRE(std::holds_alternative<PlaceOrderCommand>(afterSecondFill[0]));
-    REQUIRE(std::get<PlaceOrderCommand>(afterSecondFill[0]).side == OrderSide::BuyStop);
-    REQUIRE(std::get<PlaceOrderCommand>(afterSecondFill[0]).price == Price::fromDouble(4336.55, spec));
+    const auto& newBuy = std::get<PlaceOrderCommand>(afterSecondFill[0]);
+    REQUIRE(newBuy.side == OrderSide::BuyStop);
+    REQUIRE(newBuy.price == Price::fromDouble(4336.55, spec));
+    REQUIRE(newBuy.volume.toDouble(spec) == Catch::Approx(0.04));  // L(4): seq1,seq2 seeds, seq3 the anchor re-arm
 }
 
 TEST_CASE("seedOffsetPoints>0: restart() re-seeds around the tick that triggered the close, not the stale prior range") {

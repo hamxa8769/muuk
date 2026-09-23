@@ -39,15 +39,23 @@ commands get executed.
   `LiveRunner::maybeEmitTick` to keep the strategy running continuously)
   goes through the exact same logic for a new cycle.
 - On `onOrderConfirmed`, when `StrategyConfig::reArmOnFill` is true
-  (default), the side that just filled is immediately re-armed with the
-  next lot in the global progression `L(n) = L0 + (n-1)*deltaL`; the
-  opposite side's pending order is left untouched either way. This
-  reproduces the worked example in proposal §3 exactly (see
-  `engine/core/tests/test_strategy_engine.cpp`). Setting
-  `reArmOnFill=false` takes the single fill and stops re-arming that side
-  — a single-shot breakout variant instead of pyramiding into the trend —
-  while the opposite side stays armed and the basket-close/risk logic
-  below is unaffected.
+  (default), a fill immediately arms a new order — next lot in the global
+  progression `L(n) = L0 + (n-1)*deltaL` — on the **opposite** side, never
+  re-arming the side that just filled, and only if that opposite side
+  doesn't already have one pending (right after the initial pair it does:
+  the untouched one already covers it). Net effect: exactly one order
+  pending at a time in steady state, alternating sides every fill — Buy
+  Stop fills, the already-pending Sell Stop is left alone, *that* fills,
+  Buy Stop gets a fresh order, and so on. This reproduces the worked
+  example in proposal §3 exactly (see
+  `engine/core/tests/test_strategy_engine.cpp`). An earlier version of
+  this re-armed the *same* side that filled instead — which let one side
+  accumulate unbounded fills whenever price kept moving one direction,
+  since it never needed the other side to fill first; live testing
+  surfaced this as "bulk orders on one side" before it was corrected.
+  Setting `reArmOnFill=false` takes whichever fill(s) happen and stops
+  there instead of continuing the alternating sequence; the basket-close/
+  risk logic below is unaffected either way.
 - On `onOrderRejected`, the engine retries the same order (same price, same
   lot) up to `StrategyConfig::maxRejectRetries` times before giving up on
   that side for the current cycle (proposal §4: "controlled retry logic").
@@ -62,8 +70,11 @@ flag. Whichever one a real fill confirms first proves an actually-
 tradeable price *right now*; `onOrderConfirmed` then cancels the other
 seed and re-derives the full range from that confirmed fill (the filled
 side's own price becomes one boundary, the opposite boundary is
-`fillPrice ± the originally configured total width`), before re-arming
-both sides normally. The reference midpoint itself prefers `lastTick_`
+`fillPrice ± the originally configured total width`), then falls through
+to the normal re-arm rule above — so only the opposite side gets a fresh
+order at this point, exactly as any other fill would produce; the seed's
+own side isn't re-armed until its opposite eventually fills too. The
+reference midpoint itself prefers `lastTick_`
 (the engine's own most recently processed tick, which persists across
 `resetCycleState()`) over `range`'s configured midpoint whenever one
 exists — so a `restart()` after a closed basket re-anchors to the tick

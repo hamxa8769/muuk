@@ -59,8 +59,9 @@ TEST_CASE("BacktestRunner drives the full 6-order sequence from the proposal wor
 
     REQUIRE(report.ticksProcessed == 7);
     REQUIRE(report.ordersFilled == 6);
-    // 2 initial orders + 1 re-arm per fill = 8.
-    REQUIRE(report.ordersPlaced == 8);
+    // 2 initial orders; the first fill's opposite is already pending (no
+    // new order), then one re-arm per fill for the remaining 5 fills = 7.
+    REQUIRE(report.ordersPlaced == 7);
     REQUIRE(report.basketsClosed == 0);
     REQUIRE(report.riskHalts == 0);
 }

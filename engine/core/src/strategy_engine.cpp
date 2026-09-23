@@ -204,7 +204,9 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
         // whichever seed just filled wins. Cancel the other one (if risk
         // let it get armed and it's still pending) and re-derive the real
         // range from this confirmed fill, keeping the originally
-        // configured total width.
+        // configured total width. Falls through to the normal re-arm
+        // logic below — no special-casing of *which* side gets armed
+        // next; that's the same rule either way.
         seeding_ = false;
         for (const auto& other : pendingOrders_) {
             out.push_back(CancelOrderCommand{other.order.id});
@@ -219,29 +221,34 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
             config_.range.lowerBound = event.fillPrice;
             config_.range.upperBound = Price{event.fillPrice.ticks + width};
         }
-
-        // Re-arm both sides at the newly anchored boundaries: the side
-        // that just filled gets a fresh order back at its own (now
-        // confirmed) level, and the opposite side gets its first order at
-        // the derived boundary — both using the next lots in the
-        // sequence, exactly like any other re-arm.
-        const int seq1 = nextSequenceIndex_++;
-        tryArmOrder(out, armed.order.side, seq1);
-        if (status_ != EngineStatus::HaltedByRisk) {
-            const OrderSide opposite = (armed.order.side == OrderSide::BuyStop) ? OrderSide::SellStop
-                                                                                 : OrderSide::BuyStop;
-            const int seq2 = nextSequenceIndex_++;
-            tryArmOrder(out, opposite, seq2);
-        }
-        return out;
     }
 
     if (!config_.reArmOnFill) {
         return out;
     }
 
+    // Proposal §3/§4: a fill arms the *opposite* side's next order (never
+    // the side that just filled again) — e.g. Buy Stop fills, Sell Stop
+    // (already pending from the initial pair) is left alone; only once
+    // *that* fills does a fresh Buy Stop get armed, and so on,
+    // alternating one pending order at a time. Re-arming the same side
+    // instead (an earlier version of this code did) lets one side
+    // accumulate unbounded fills whenever price keeps moving the same
+    // direction, since it never needs the other side to fill first.
+    const OrderSide opposite = (armed.order.side == OrderSide::BuyStop) ? OrderSide::SellStop : OrderSide::BuyStop;
+    bool oppositeAlreadyPending = false;
+    for (const auto& p : pendingOrders_) {
+        if (p.order.side == opposite) {
+            oppositeAlreadyPending = true;
+            break;
+        }
+    }
+    if (oppositeAlreadyPending) {
+        return out;
+    }
+
     const int seq = nextSequenceIndex_++;
-    tryArmOrder(out, armed.order.side, seq);
+    tryArmOrder(out, opposite, seq);
     return out;
 }
 

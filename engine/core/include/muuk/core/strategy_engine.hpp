@@ -46,9 +46,9 @@ struct StrategyConfig {
     // real, currently-tradeable price; the other seed is cancelled, and
     // the real two-sided range (same total width as configured) is then
     // anchored to that confirmed fill — the filled side's own price
-    // becomes one boundary, and a fresh order is armed on the opposite
-    // side at fillPrice +/- the configured width. From that point on,
-    // behavior is identical to the seedOffsetPoints=0 case.
+    // becomes one boundary, the opposite boundary is fillPrice +/- the
+    // configured width — before falling through to the normal re-arm rule
+    // below (StrategyConfig::reArmOnFill) exactly as any other fill would.
     double seedOffsetPoints = 0.0;
 };
 
@@ -57,11 +57,18 @@ struct StrategyConfig {
 //   - two boundary pending orders (Buy Stop at range.upperBound,
 //     Sell Stop at range.lowerBound), lot size from the global
 //     progression L(n) = L0 + (n-1)*deltaL (proposal §3)
-//   - on fill, the opposite pending order is always left untouched; by
-//     default (StrategyConfig::reArmOnFill) a new pending order is
-//     immediately re-armed on the side that just triggered, using the
-//     next lot in the sequence (proposal §4) — set reArmOnFill=false for
-//     a single-shot variant that takes the one fill and waits
+//   - by default (StrategyConfig::reArmOnFill), a fill immediately arms a
+//     new pending order — using the next lot in the global sequence
+//     L(n) — on the *opposite* side, never re-arming the side that just
+//     filled, and only if that opposite side doesn't already have one
+//     pending (right after the initial pair, it does: the untouched one
+//     already satisfies this). This keeps exactly one order pending at a
+//     time in steady state, alternating sides on every fill, and
+//     reproduces the worked example in proposal §3 exactly (Buy Stop
+//     fills -> the already-pending Sell Stop is left alone -> *that*
+//     fills -> Buy Stop gets a fresh order -> ...). Set reArmOnFill=false
+//     to take the one fill (or two, if both sides of the initial pair
+//     happen to fill) and stop there instead of continuing the sequence
 //   - basket P/L is evaluated on every tick; once the net P/L target is
 //     reached the whole basket is closed and remaining orders cancelled
 //     (proposal §6)
@@ -93,8 +100,10 @@ public:
     CommandBatch onTick(const TickEvent& tick);
 
     // A previously placed order was filled by the broker at `fillPrice`.
-    // Re-arms the triggering side with the next lot in the sequence, unless
-    // StrategyConfig::reArmOnFill is false.
+    // Arms the *opposite* side with the next lot in the sequence — unless
+    // it already has an order pending, or StrategyConfig::reArmOnFill is
+    // false. See the class comment for why it's the opposite side, not
+    // the one that just filled.
     CommandBatch onOrderConfirmed(const OrderConfirmedEvent& event);
 
     // A previously placed order was rejected. Retries a bounded number of
