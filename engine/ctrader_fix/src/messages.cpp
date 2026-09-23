@@ -116,21 +116,21 @@ FixMessage buildNewOrderSingle(const std::string& clOrdId, const std::string& sy
 }
 
 FixMessage buildMarketOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
-                                   double orderQty) {
+                                   double orderQty, const std::string& positionId) {
     FixMessage msg(msgtype::NewOrderSingle);
     msg.set(tag::ClOrdID, clOrdId);
     msg.set(tag::Symbol, symbolId);
     msg.set(tag::Side, int64_t{side});
     msg.set(tag::TransactTime, nowUtcTimestamp());
     msg.set(tag::OrderQty, orderQty, 2);
-    msg.set(tag::OrdType, int64_t{1});  // Market
-    // Unlike the Stop orders above, a Market order is meaningless left
-    // open/working -- it must execute immediately or not at all.
-    // TimeInForce(59)=3 (IOC) says exactly that; several FIX venues
-    // silently reject or park a Market order lacking TimeInForce
-    // altogether, which was suspected as the reason live-tested closing
-    // orders weren't actually flattening positions.
-    msg.set(tag::TimeInForce, std::string("3"));
+    msg.set(tag::OrdType, int64_t{1});  // Market -- cTrader always executes it Immediate-or-Cancel
+    if (!positionId.empty()) msg.set(tag::PosMaintRptID, positionId);
+    return msg;
+}
+
+FixMessage buildRequestForPositions(const std::string& posReqId) {
+    FixMessage msg(msgtype::RequestForPositions);
+    msg.set(tag::PosReqID, posReqId);
     return msg;
 }
 
@@ -195,6 +195,7 @@ ExecutionReportInfo parseExecutionReport(const FixMessage& msg) {
     info.text = msg.getOptionalString(tag::Text);
     info.commission = optionalDouble(msg.getOptionalString(tag::Commission));
     info.commType = msg.getOptionalString(tag::CommType);
+    info.positionId = msg.getOptionalString(tag::PosMaintRptID);
     return info;
 }
 
@@ -205,6 +206,19 @@ OrderCancelRejectInfo parseOrderCancelReject(const FixMessage& msg) {
     info.origClOrdId = msg.getOptionalString(tag::OrigClOrdID);
     info.ordStatus = parseOrdStatus(msg.getOptionalString(tag::OrdStatus));
     info.text = msg.getOptionalString(tag::Text);
+    return info;
+}
+
+PositionReportInfo parsePositionReport(const FixMessage& msg) {
+    PositionReportInfo info;
+    info.posReqId = msg.getOptionalString(tag::PosReqID).value_or("");
+    info.anyPositions = msg.getOptionalString(tag::PosReqResult).value_or("2") == "0";
+    info.totalReports = static_cast<int>(optionalDouble(msg.getOptionalString(tag::TotalNumPosReports)).value_or(0.0));
+    info.positionId = msg.getOptionalString(tag::PosMaintRptID);
+    info.symbolId = msg.getOptionalString(tag::Symbol);
+    info.longQty = optionalDouble(msg.getOptionalString(tag::LongQty)).value_or(0.0);
+    info.shortQty = optionalDouble(msg.getOptionalString(tag::ShortQty)).value_or(0.0);
+    info.settlPrice = optionalDouble(msg.getOptionalString(tag::SettlPrice));
     return info;
 }
 

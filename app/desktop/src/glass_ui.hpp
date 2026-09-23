@@ -58,6 +58,12 @@ void pill(const char* text, ImVec4 color, bool pulse = false);
 // Rounded, animated progress bar (the fill eases towards `fraction`).
 void progress(const char* id, float fraction, ImVec4 color, const char* overlay, float height = 0.0f);
 
+// A bar centred on zero: a positive `value` fills green to the right (full
+// at `posScale`), a negative one fills red to the left (full at
+// `negScale`). Eased, so it glides as P/L moves.
+void balanceBar(const char* id, float value, float negScale, float posScale, const char* overlay,
+                float height = 0.0f);
+
 // Eases a displayed value towards `target` (per-id), for smooth numbers.
 [[nodiscard]] float ease(const char* id, float target, float speed = 10.0f);
 

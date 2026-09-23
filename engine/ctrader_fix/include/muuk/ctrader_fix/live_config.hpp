@@ -67,6 +67,13 @@ struct LiveConnectionConfig {
     // false: only open a range when the operator asks (LiveRunner::openRange).
     bool autoContinue = true;
 
+    // true (default): right after connecting, ask the broker for every open
+    // position (Request For Positions) and show/track the ones on this
+    // symbol -- including positions left over from an earlier run -- so
+    // they can be closed from the app, and so a new range never opens on
+    // top of them. Waits up to a few seconds for the answer.
+    bool syncPositionsOnConnect = true;
+
     [[nodiscard]] std::string senderCompId() const {
         return environment + "." + brokerUid + "." + traderLogin;
     }

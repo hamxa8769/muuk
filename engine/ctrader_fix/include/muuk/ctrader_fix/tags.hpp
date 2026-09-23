@@ -88,6 +88,15 @@ inline constexpr int SecurityRequestResult = 560;
 inline constexpr int SymbolName = 1007;
 inline constexpr int SymbolDigits = 1008;
 
+// Request For Positions (AN) / Position Report (AP).
+inline constexpr int PosReqID = 710;
+inline constexpr int TotalNumPosReports = 727;
+inline constexpr int PosReqResult = 728;
+inline constexpr int NoPositions = 702;
+inline constexpr int LongQty = 704;
+inline constexpr int ShortQty = 705;
+inline constexpr int SettlPrice = 730;
+
 }  // namespace muuk::ctrader_fix::tag
 
 // MsgType(35) string values.
@@ -114,5 +123,7 @@ inline constexpr const char* SecurityListRequest = "x";
 inline constexpr const char* SecurityList = "y";
 inline constexpr const char* BusinessMessageReject = "j";
 inline constexpr const char* OrderMassStatusRequest = "AF";
+inline constexpr const char* RequestForPositions = "AN";
+inline constexpr const char* PositionReport = "AP";
 
 }  // namespace muuk::ctrader_fix::msgtype

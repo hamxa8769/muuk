@@ -70,6 +70,28 @@ conversion is applied only at the wire-encoding boundary in
 `LiveRunner::handleCommand` (`engine/ctrader_fix/src/live_runner.cpp`),
 not baked into `engine/core`.
 
+**Closing a position on a hedging account needs `PosMaintRptID(721)`.**
+From the spec (NewOrderSingle): *"A position ID where this order should be
+placed. If not set, a new position will be created and its ID will be
+returned in the Execution Report message. It can be specified only for
+hedged accounts."* So an opposite-side Market order **without** 721 opens
+a second position instead of closing the first -- which is exactly what
+the bot's close buttons did until this was fixed. `LiveRunner` now keeps
+each fill's 721 (the ExecutionReport carries it) and sends it on every
+closing order (`buildMarketOrderSingle(..., positionId)`); a position whose
+id is unknown is never "closed" blindly. `TimeInForce(59)` is documented as
+*"Deprecated, this value will be ignored"* -- Market orders are always IOC.
+
+**Position sync.** `Request For Positions (35=AN)` without 721 returns one
+`Position Report (35=AP)` per open position (`PosMaintRptID`, `Symbol`,
+`LongQty`/`ShortQty` in the same units as `OrderQty`, `SettlPrice` = average
+price), or a single report with `PosReqResult(728)=2` if there are none.
+`LiveRunner` does this on connect (`connection.syncPositionsOnConnect`,
+default on) and on demand (`syncPositions()`, the app's **Sync from
+broker**), adopting positions it didn't open this session so they can be
+closed from the app, and never opening a range while any are open.
+Confirmed against the IC Markets demo server.
+
 ## Symbol resolution
 
 `Symbol (55)` is a **broker-assigned numeric id**, not a string like

@@ -53,6 +53,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.autoRangeWidthPoints = conn.value("autoRangeWidthPoints", 0.0);
     cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
+    cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
     requireNonEmpty(cfg.connection.brokerUid, "connection.brokerUid");
     requireNonEmpty(cfg.connection.traderLogin, "connection.traderLogin");

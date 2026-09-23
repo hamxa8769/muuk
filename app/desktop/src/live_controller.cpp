@@ -89,6 +89,10 @@ void LiveController::cancelOrder(muuk::core::OrderId id) {
     if (runner_ && running_.load()) runner_->cancelOrder(id);
 }
 
+void LiveController::syncPositions() {
+    if (runner_ && running_.load()) runner_->syncPositions();
+}
+
 void LiveController::applySettings(const LiveSettings& settings) {
     if (runner_ && running_.load()) runner_->applySettings(settings);
 }

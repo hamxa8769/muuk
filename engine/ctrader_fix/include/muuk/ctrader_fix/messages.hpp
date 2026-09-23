@@ -58,11 +58,36 @@ struct SecurityListEntry {
 [[nodiscard]] FixMessage buildNewOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
                                               double orderQty, double stopPx);
 
-// A Market order (OrdType=1) — used only to flatten a basket's net open
-// exposure once it closes (LiveRunner::handleCommand on CloseBasketCommand);
-// the strategy's own entries are always the Stop orders above.
+// A Market order (OrdType=1), used only to close an open position; the
+// strategy's own entries are always the Stop orders above.
+//
+// `positionId` goes in PosMaintRptID(721): per the cTrader FIX spec, "a
+// position ID where this order should be placed. If not set, a new
+// position will be created." On a hedging account an opposite-side order
+// *without* it therefore opens a brand-new position instead of closing
+// anything -- it must carry the id of the position being closed (taken
+// from tag 721 of the ExecutionReport that opened it, or from a Position
+// Report). Empty = omit the tag (only correct on a netting account).
 [[nodiscard]] FixMessage buildMarketOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
-                                                 double orderQty);
+                                                 double orderQty, const std::string& positionId = {});
+
+// Request For Positions (35=AN) without PosMaintRptID: asks for every
+// open position on the account. Answered by one Position Report per
+// position (or a single "none found" report).
+[[nodiscard]] FixMessage buildRequestForPositions(const std::string& posReqId);
+
+struct PositionReportInfo {
+    std::string posReqId;
+    bool anyPositions = false;          // PosReqResult(728) == 0
+    int totalReports = 0;               // TotalNumPosReports(727)
+    std::optional<std::string> positionId;
+    std::optional<std::string> symbolId;
+    double longQty = 0.0;               // wire units, same as OrderQty
+    double shortQty = 0.0;
+    std::optional<double> settlPrice;   // average open price
+};
+
+[[nodiscard]] PositionReportInfo parsePositionReport(const FixMessage& msg);
 
 [[nodiscard]] FixMessage buildOrderCancelRequest(const std::string& clOrdId, const std::string& origClOrdId,
                                                   std::optional<std::string> orderId = std::nullopt);
@@ -101,6 +126,10 @@ struct ExecutionReportInfo {
     // configured rate is used); logged so the two can be compared.
     std::optional<double> commission;
     std::optional<std::string> commType;
+    // PosMaintRptID(721): the id of the position this fill opened (or
+    // closed). Needed to close that exact position later on a hedging
+    // account -- see buildMarketOrderSingle.
+    std::optional<std::string> positionId;
 };
 
 [[nodiscard]] ExecutionReportInfo parseExecutionReport(const FixMessage& msg);

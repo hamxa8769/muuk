@@ -45,6 +45,7 @@ public:
     void cancelAllPendingOrders();
     void closePosition(muuk::core::OrderId id);
     void cancelOrder(muuk::core::OrderId id);
+    void syncPositions();
 
     // Applies `settings` to the running bot (from its next range on).
     // No-op if not running.

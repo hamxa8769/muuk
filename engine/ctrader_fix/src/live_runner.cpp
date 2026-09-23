@@ -15,6 +15,12 @@ using namespace muuk::core;
 namespace muuk::ctrader_fix {
 
 namespace {
+// cTrader's FIX OrderQty(38) (and a Position Report's LongQty/ShortQty) is
+// in "lot hundredths", not raw lots -- confirmed empirically: OrderQty=2/3
+// opened 0.02/0.03-lot positions. engine/core stays in real lots
+// throughout; this conversion happens only at the wire boundary.
+constexpr double kWireQtyPerLot = 100.0;
+
 std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId) {
     if (!clOrdId) return std::nullopt;
     try {
@@ -70,6 +76,8 @@ LiveSnapshot LiveRunner::snapshot() const {
     for (const auto& leg : openLegs_) {
         PositionInfo info;
         info.id = leg.id;
+        info.positionId = leg.positionId;
+        info.adopted = leg.adopted;
         info.side = leg.side;
         info.lots = leg.volume.toDouble(spec);
         info.requestedPrice = leg.requestedPrice.toDouble(spec);
@@ -91,6 +99,7 @@ LiveSnapshot LiveRunner::snapshot() const {
 
     snap.closingInProgress = !pendingCloses_.empty();
     snap.closeFailed = basketCloseFailed_;
+    snap.syncingPositions = !activePosReqId_.empty();
     if (cooldownActive_) {
         const auto left = std::chrono::ceil<std::chrono::seconds>(cooldownUntil_ - std::chrono::steady_clock::now());
         snap.cooldownRemainingSeconds = static_cast<int>(std::max<std::chrono::seconds::rep>(0, left.count()));
@@ -198,6 +207,21 @@ void LiveRunner::run() {
         quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
         log("subscribed to quotes");
 
+        if (config_.connection.syncPositionsOnConnect) {
+            {
+                std::scoped_lock lock(posSyncMutex_);
+                posSyncDone_ = false;
+            }
+            syncPositions();
+            std::unique_lock lock(posSyncMutex_);
+            if (!posSyncCv_.wait_for(lock, std::chrono::seconds(8), [this] { return posSyncDone_; })) {
+                lock.unlock();
+                std::scoped_lock engineLock(engineMutex_);
+                activePosReqId_.clear();
+                log("[sync] the broker didn't answer the position request -- continuing without it");
+            }
+        }
+
         const bool autoRange = config_.connection.autoRangeWidthPoints > 0.0;
         if (autoRange || config_.strategy.seedOffsetPoints > 0.0) {
             waitForFirstQuote();
@@ -213,7 +237,11 @@ void LiveRunner::run() {
             // that tick's bid/ask, and without it they'd fall back to the
             // range midpoint and could land inside the spread.
             if (latestBid_ && latestAsk_) (void)engine_->onTick(latestTick());
-            if (config_.connection.autoContinue) {
+            if (!openLegs_.empty()) {
+                log("[sync] " + std::to_string(openLegs_.size()) +
+                    " position(s) already open at the broker -- no range will open until they're closed "
+                    "(Close all positions)");
+            } else if (config_.connection.autoContinue) {
                 for (const auto& cmd : engine_->start()) handleCommand(cmd);
                 started = true;
             }
@@ -296,6 +324,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 if (const auto cit = pendingCloses_.find(*info.clOrdId); cit != pendingCloses_.end()) {
                     const OpenLeg leg = cit->second;
                     pendingCloses_.erase(cit);
+                    closedPositionIds_.insert(leg.positionId);
 
                     // Book the real result: actual entry fill -> actual exit fill.
                     const SymbolSpec& spec = config_.strategy.symbol;
@@ -336,6 +365,12 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             if (const auto it = placedOrderInfo_.find(*orderId); it != placedOrderInfo_.end()) {
                 OpenLeg filled = it->second;
                 filled.price = fillPrice;
+                filled.positionId = info.positionId.value_or("");
+                if (filled.positionId.empty()) {
+                    log("[trade] WARNING: fill for ClOrdID=" + std::to_string(*orderId) +
+                        " carried no position id (tag 721) -- the bot can't close this position itself; "
+                        "close it in cTrader if needed");
+                }
                 openLegs_.push_back(filled);
                 placedOrderInfo_.erase(it);
             } else if (const auto cit = cancelledOrderInfo_.find(*orderId); cit != cancelledOrderInfo_.end()) {
@@ -349,6 +384,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 // positions when the range started."
                 OpenLeg surplus = cit->second;
                 surplus.price = fillPrice;
+                surplus.positionId = info.positionId.value_or("");
                 log("[order] ClOrdID=" + std::to_string(*orderId) +
                     " filled after its cancel was already sent -- closing this surplus leg immediately");
                 cancelledOrderInfo_.erase(cit);
@@ -432,6 +468,22 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 ", ExecType=" + msg.getOptionalString(tag::ExecType).value_or("?") +
                 ", LeavesQty=" + msg.getOptionalString(tag::LeavesQty).value_or("?") +
                 ", CumQty=" + msg.getOptionalString(tag::CumQty).value_or("?") + ")");
+        }
+        return;
+    }
+
+    if (type == msgtype::PositionReport) {
+        const PositionReportInfo info = parsePositionReport(msg);
+        std::scoped_lock lock(engineMutex_);
+        if (activePosReqId_.empty() || info.posReqId != activePosReqId_) return;  // stale or unsolicited
+        if (!info.anyPositions) {
+            finishPositionSync({});
+            return;
+        }
+        posReports_.push_back(info);
+        if (static_cast<int>(posReports_.size()) >= std::max(1, info.totalReports)) {
+            const std::vector<PositionReportInfo> reports = std::exchange(posReports_, {});
+            finishPositionSync(reports);
         }
         return;
     }
@@ -602,7 +654,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
         // stay in real lots throughout (P&L, risk checks); this scaling
         // is purely a wire-format detail of this one broker/dialect, so it
         // belongs here rather than in engine/core.
-        const double qty = lots * 100.0;
+        const double qty = lots * kWireQtyPerLot;
         const double stopPx = place->price.toDouble(config_.strategy.symbol);
         std::ostringstream oss;
         oss << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
@@ -633,30 +685,120 @@ void LiveRunner::handleCommand(const Command& cmd) {
 }
 
 void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
-    // Closes every leg individually, each with its own opposite-direction
-    // Market order sized to exactly that leg's volume -- see openLegs_'s
-    // comment on why a single net-sized order isn't enough on a
-    // hedging-enabled account (this demo account is one: cTrader kept
-    // several same-symbol fills as separate positions even when their net
-    // exposure was zero). Shared by the automatic CloseBasketCommand path
-    // and the manual closeAllPositions() control. Caller must hold
-    // engineMutex_ and must have already moved/cleared its own copy of
-    // whatever list it passes in (this only sends orders and tracks their
-    // ClOrdIDs -- it never mutates openLegs_ itself).
+    // Closes every leg individually: an opposite-direction Market order of
+    // exactly that leg's volume, aimed at that leg's own position via
+    // PosMaintRptID(721). On a hedging account (this one is) the 721 part
+    // is what makes it a close at all -- per the cTrader FIX spec, an order
+    // without it "creates a new position", which is exactly what the close
+    // buttons used to do. Shared by the automatic CloseBasketCommand path
+    // and every manual close control. Caller must hold engineMutex_ and
+    // must have already removed `legs` from openLegs_; any leg that can't
+    // be closed is put back there.
     if (legs.empty()) {
         log("[basket] already flat -- nothing to close");
         return;
     }
     for (const auto& leg : legs) {
+        if (leg.positionId.empty()) {
+            // Sending it anyway would open a *new* opposite position.
+            log("[basket] CRITICAL: can't close a " + std::string(leg.side == OrderSide::BuyStop ? "buy" : "sell") +
+                " " + std::to_string(leg.volume.toDouble(config_.strategy.symbol)) +
+                " lot position: the broker never told us its position id. Close it in cTrader, then press "
+                "Sync from broker.");
+            basketCloseFailed_ = true;
+            openLegs_.push_back(leg);
+            continue;
+        }
         const int side = (leg.side == OrderSide::BuyStop) ? 2 : 1;  // opposite of the open leg
         const double lots = leg.volume.toDouble(config_.strategy.symbol);
-        const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
+        const double qty = lots * kWireQtyPerLot;
         const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
-        log("[basket] flattening leg: side=" + std::to_string(side) + " lots=" + std::to_string(lots) +
-            " (ClOrdID=" + closeClOrdId + ")");
+        log("[basket] closing position " + leg.positionId + ": side=" + std::to_string(side) +
+            " lots=" + std::to_string(lots) + " (ClOrdID=" + closeClOrdId + ")");
         pendingCloses_.insert({closeClOrdId, leg});
-        tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
+        tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty, leg.positionId));
     }
+}
+
+void LiveRunner::syncPositions() {
+    std::scoped_lock lock(engineMutex_);
+    if (!tradeSession_ || !activePosReqId_.empty()) return;
+    activePosReqId_ = "pos-" + std::to_string(nextPosReqId_++);
+    posReports_.clear();
+    knownAtPosRequest_.clear();
+    for (const auto& leg : openLegs_) {
+        if (!leg.positionId.empty()) knownAtPosRequest_.insert(leg.positionId);
+    }
+    log("[sync] requesting open positions from the broker");
+    tradeSession_->send(buildRequestForPositions(activePosReqId_));
+}
+
+void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& reports) {
+    const SymbolSpec& spec = config_.strategy.symbol;
+
+    std::unordered_set<std::string> atBroker;
+    int otherSymbols = 0;
+    for (const auto& r : reports) {
+        if (!r.positionId) continue;
+        if (r.symbolId && *r.symbolId != symbolId_) {
+            ++otherSymbols;
+            continue;
+        }
+        atBroker.insert(*r.positionId);
+    }
+
+    // Tracked positions the broker no longer has were closed outside the bot.
+    // Only positions already known when the request went out are judged --
+    // anything that filled since then simply isn't in this (older) answer.
+    const auto before = openLegs_.size();
+    std::erase_if(openLegs_, [&](const OpenLeg& leg) {
+        return !leg.positionId.empty() && knownAtPosRequest_.count(leg.positionId) > 0 &&
+               atBroker.count(leg.positionId) == 0;
+    });
+    if (openLegs_.size() != before) {
+        log("[sync] " + std::to_string(before - openLegs_.size()) + " position(s) were closed outside the bot");
+    }
+
+    // Positions the broker has that the bot doesn't track: adopt them.
+    std::unordered_set<std::string> tracked;
+    for (const auto& leg : openLegs_) tracked.insert(leg.positionId);
+    for (const auto& [clOrdId, leg] : pendingCloses_) tracked.insert(leg.positionId);
+    int adopted = 0;
+    for (const auto& r : reports) {
+        if (!r.positionId || (r.symbolId && *r.symbolId != symbolId_)) continue;
+        if (tracked.count(*r.positionId) > 0 || closedPositionIds_.count(*r.positionId) > 0) continue;
+        const bool buy = r.longQty > 0.0;
+        const double qty = buy ? r.longQty : r.shortQty;
+        if (qty <= 0.0) continue;
+        OpenLeg leg;
+        leg.id = nextAdoptedId_++;
+        leg.side = buy ? OrderSide::BuyStop : OrderSide::SellStop;
+        leg.volume = Volume::fromDouble(qty / kWireQtyPerLot, spec);
+        leg.price = Price::fromDouble(r.settlPrice.value_or(0.0), spec);
+        leg.requestedPrice = leg.price;
+        leg.positionId = *r.positionId;
+        leg.adopted = true;
+        openLegs_.push_back(leg);
+        ++adopted;
+        log("[sync] found open " + std::string(buy ? "BUY" : "SELL") + " " + std::to_string(qty / kWireQtyPerLot) +
+            " lot @ " + std::to_string(leg.price.toDouble(spec)) + " (position " + leg.positionId + ")");
+    }
+
+    log("[sync] done: " + std::to_string(atBroker.size()) + " open position(s) on " + config_.connection.symbolName +
+        (adopted > 0 ? ", " + std::to_string(adopted) + " newly listed" : "") +
+        (otherSymbols > 0 ? ", " + std::to_string(otherSymbols) + " on other symbols (ignored)" : ""));
+
+    if (basketCloseFailed_ && openLegs_.empty() && pendingCloses_.empty()) {
+        basketCloseFailed_ = false;
+        log("[sync] account is flat again -- ranges can be opened");
+    }
+
+    activePosReqId_.clear();
+    {
+        std::scoped_lock lock(posSyncMutex_);
+        posSyncDone_ = true;
+    }
+    posSyncCv_.notify_all();
 }
 
 void LiveRunner::closePositionsLocked() {

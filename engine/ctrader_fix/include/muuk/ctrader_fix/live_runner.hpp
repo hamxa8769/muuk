@@ -15,6 +15,7 @@
 #include "muuk/core/strategy_engine.hpp"
 #include "muuk/ctrader_fix/fix_session.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
+#include "muuk/ctrader_fix/messages.hpp"
 
 namespace muuk::ctrader_fix {
 
@@ -51,7 +52,9 @@ struct PnlBreakdown {
 };
 
 struct PositionInfo {
-    muuk::core::OrderId id = muuk::core::kInvalidOrderId;
+    muuk::core::OrderId id = muuk::core::kInvalidOrderId;  // LiveRunner's handle for closePosition()
+    std::string positionId;  // the broker's position id (tag 721); empty = unknown, can't be closed by the bot
+    bool adopted = false;    // found at the broker by a position sync, not opened by this session
     muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
     double lots = 0.0;
     double requestedPrice = 0.0;  // the Stop price the order was placed at
@@ -90,6 +93,7 @@ struct LiveSnapshot {
     bool seeding = false;            // seed orders armed, real range not anchored yet
     bool closingInProgress = false;  // closing orders sent, fills not all confirmed yet
     bool closeFailed = false;        // a closing order was rejected -- needs the operator
+    bool syncingPositions = false;   // a Request For Positions is in flight
     int cooldownRemainingSeconds = 0;
     int basketsClosed = 0;           // this session
 
@@ -200,6 +204,14 @@ public:
     void closePosition(muuk::core::OrderId id);
     void cancelOrder(muuk::core::OrderId id);
 
+    // Asks the broker for every open position (Request For Positions) and,
+    // when the answer arrives, reconciles the tracked positions with it:
+    // positions on this symbol that the bot didn't know about (e.g. left
+    // from an earlier run) are adopted so they can be closed from here, and
+    // tracked positions the broker no longer has (closed in cTrader by
+    // hand) are dropped. Asynchronous; no-op if one is already in flight.
+    void syncPositions();
+
 private:
     // Per-leg position tracking. engine/core deliberately only keeps a
     // running (side, volume) *aggregate* per side (see SideAggregate in
@@ -227,7 +239,15 @@ private:
         muuk::core::Price price;
         // Always the requested boundary price (for slippage).
         muuk::core::Price requestedPrice;
+        // The broker's position id (tag 721 of the opening fill). Closing
+        // orders must carry it -- see buildMarketOrderSingle.
+        std::string positionId;
+        bool adopted = false;  // found by a position sync rather than opened this session
     };
+
+    // Applies a complete set of Position Reports (see syncPositions()).
+    // Caller must hold engineMutex_.
+    void finishPositionSync(const std::vector<PositionReportInfo>& reports);
 
     // Live breakdown for one open leg at the latest quote. Caller must hold
     // engineMutex_ and a quote must have arrived.
@@ -356,6 +376,17 @@ private:
     int basketsClosed_ = 0;
     double bookedGross_ = 0.0;
     double bookedCommission_ = 0.0;
+
+    // Position sync (Request For Positions / Position Report) state.
+    std::string activePosReqId_;  // non-empty while a request is in flight
+    uint64_t nextPosReqId_ = 1;
+    std::vector<PositionReportInfo> posReports_;
+    std::unordered_set<std::string> knownAtPosRequest_;  // position ids tracked when the request was sent
+    std::unordered_set<std::string> closedPositionIds_;  // closed by the bot -- never re-adopt from a stale report
+    muuk::core::OrderId nextAdoptedId_ = 1'000'000'000;  // handles for adopted positions, far from engine order ids
+    std::mutex posSyncMutex_;
+    std::condition_variable posSyncCv_;
+    bool posSyncDone_ = false;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};

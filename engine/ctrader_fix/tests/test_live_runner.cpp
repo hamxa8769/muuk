@@ -56,6 +56,7 @@ LiveConfig testConfig(const MockFixServer& server) {
     cfg.strategy.riskLimits.maxOrders = 100;
     cfg.strategy.riskLimits.maxLot = Volume::fromDouble(10.0, spec);
     cfg.strategy.basketProfitTargetMoney = 0.0;  // disabled: keep this test focused on order flow
+    cfg.connection.syncPositionsOnConnect = false;  // the mock broker only answers it in the sync test
     return cfg;
 }
 
@@ -158,6 +159,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));
@@ -177,6 +179,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     FixMessage fill2 = serverHeaderMessage(msgtype::ExecutionReport, 4);
     fill2.set(tag::OrderID, std::string("9002"));
     fill2.set(tag::ClOrdID, order2ClOrdId);
+    fill2.set(tag::PosMaintRptID, "P" + std::string(order2ClOrdId));
     fill2.set(tag::ExecType, std::string("F"));
     fill2.set(tag::OrdStatus, std::string("2"));
     fill2.set(tag::AvgPx, std::string("4336.00"));
@@ -234,6 +237,7 @@ TEST_CASE("LiveRunner flattens the net position with a market order on basket cl
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));
@@ -265,6 +269,9 @@ TEST_CASE("LiveRunner flattens the net position with a market order on basket cl
     const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(closeOrder.getInt(tag::OrdType) == 1);  // Market, not Stop
     REQUIRE(closeOrder.getInt(tag::Side) == 2);      // net long -> flatten with a Sell
+    // Aimed at that exact position -- without PosMaintRptID a hedging
+    // account opens a new position instead of closing this one.
+    REQUIRE(closeOrder.getString(tag::PosMaintRptID) == "P" + order1ClOrdId);
     REQUIRE(closeOrder.getDouble(tag::OrderQty) == Catch::Approx(1.0));
     const std::string closeClOrdId = closeOrder.getString(tag::ClOrdID);
 
@@ -347,6 +354,7 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
         FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, seqNum);
         fill.set(tag::OrderID, std::to_string(9000 + seqNum));
         fill.set(tag::ClOrdID, clOrdId);
+        fill.set(tag::PosMaintRptID, "P" + std::string(clOrdId));
         fill.set(tag::ExecType, std::string("F"));
         fill.set(tag::OrdStatus, std::string("2"));
         fill.set(tag::AvgPx, px);
@@ -390,16 +398,19 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     REQUIRE(close1.getInt(tag::OrdType) == 1);
     REQUIRE(close1.getInt(tag::Side) == 2);  // closes the Buy .01 leg
     REQUIRE(close1.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    REQUIRE(close1.getString(tag::PosMaintRptID) == "P" + order1ClOrdId);
 
     const FixMessage close2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close2.getInt(tag::OrdType) == 1);
     REQUIRE(close2.getInt(tag::Side) == 1);  // closes the Sell .02 leg
     REQUIRE(close2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    REQUIRE(close2.getString(tag::PosMaintRptID) == "P" + order2ClOrdId);
 
     const FixMessage close3 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close3.getInt(tag::OrdType) == 1);
     REQUIRE(close3.getInt(tag::Side) == 2);  // closes the Buy .03 leg
     REQUIRE(close3.getDouble(tag::OrderQty) == Catch::Approx(3.0));
+    REQUIRE(close3.getString(tag::PosMaintRptID) == "P" + order3ClOrdId);
 
     // Not one of these three closing orders has been confirmed filled yet
     // -- the next cycle must still be blocked.
@@ -466,6 +477,7 @@ TEST_CASE("LiveRunner closes a cancelled order's fill immediately if it wins the
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));
@@ -498,6 +510,7 @@ TEST_CASE("LiveRunner closes a cancelled order's fill immediately if it wins the
     FixMessage fill2 = serverHeaderMessage(msgtype::ExecutionReport, 5);
     fill2.set(tag::OrderID, std::string("9002"));
     fill2.set(tag::ClOrdID, order2ClOrdId);
+    fill2.set(tag::PosMaintRptID, "P" + std::string(order2ClOrdId));
     fill2.set(tag::ExecType, std::string("F"));
     fill2.set(tag::OrdStatus, std::string("2"));
     fill2.set(tag::AvgPx, std::string("4336.00"));
@@ -550,6 +563,7 @@ TEST_CASE("LiveRunner::closePosition and cancelOrder act on a single row without
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));
@@ -628,6 +642,7 @@ TEST_CASE("LiveRunner snapshot shows every cost and a live net P/L; booked P/L c
     FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill.set(tag::OrderID, std::string("9001"));
     fill.set(tag::ClOrdID, order1ClOrdId);
+    fill.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill.set(tag::ExecType, std::string("F"));
     fill.set(tag::OrdStatus, std::string("2"));
     fill.set(tag::AvgPx, std::string("4337.10"));
@@ -685,6 +700,137 @@ TEST_CASE("LiveRunner snapshot shows every cost and a live net P/L; booked P/L c
     REQUIRE(after.bookedGross == Catch::Approx(0.85));       // real fills: 4337.10 -> 4337.95
     REQUIRE(after.bookedCommission == Catch::Approx(0.07));
     REQUIRE(after.realizedPnl == Catch::Approx(0.78));
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner never sends a close for a position whose id the broker didn't give it") {
+    // On a hedging account an opposite order without PosMaintRptID opens a
+    // *new* position -- so a leg with no known position id must not be
+    // "closed" blindly.
+    MockFixServer server;
+    LiveRunner runner(testConfig(server));
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+
+    FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);  // deliberately no tag 721
+    fill.set(tag::OrderID, std::string("9001"));
+    fill.set(tag::ClOrdID, order1.getString(tag::ClOrdID));
+    fill.set(tag::ExecType, std::string("F"));
+    fill.set(tag::OrdStatus, std::string("2"));
+    fill.set(tag::AvgPx, std::string("4337.00"));
+    fill.set(tag::LastQty, std::string("0.01"));
+    fill.set(tag::CumQty, std::string("0.01"));
+    fill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().positions.size() == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    const OrderId handle = runner.snapshot().positions.at(0).id;
+
+    runner.closePosition(handle);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 400ms), std::runtime_error);
+    const LiveSnapshot snap = runner.snapshot();
+    REQUIRE(snap.positions.size() == 1);  // still listed -- it's still open at the broker
+    REQUIRE(snap.closeFailed);            // and flagged, so no new range opens on top of it
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner syncs open positions from the broker on connect and can close them by position id") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.connection.syncPositionsOnConnect = true;
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    // Two XAUUSD positions left over from an earlier run, plus one on another symbol.
+    const FixMessage request = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 3s);
+    const std::string posReqId = request.getString(tag::PosReqID);
+    auto report = [&](int seq, const char* positionId, const char* symbol, const char* longQty, const char* shortQty,
+                      const char* price) {
+        FixMessage r = serverHeaderMessage(msgtype::PositionReport, seq);
+        r.set(tag::PosReqID, posReqId);
+        r.set(tag::PosMaintRptID, std::string(positionId));
+        r.set(tag::TotalNumPosReports, int64_t{3});
+        r.set(tag::PosReqResult, std::string("0"));
+        r.set(tag::Symbol, std::string(symbol));
+        r.set(tag::NoPositions, int64_t{1});
+        r.set(tag::LongQty, std::string(longQty));
+        r.set(tag::ShortQty, std::string(shortQty));
+        r.set(tag::SettlPrice, std::string(price));
+        server.sendToClient(kTradeConn, r);
+    };
+    report(3, "P100", "1", "3", "0", "4280.00");  // BUY 0.03 lot
+    report(4, "P200", "1", "0", "2", "4281.00");  // SELL 0.02 lot
+    report(5, "P900", "2", "100000", "0", "1.10");  // EURUSD -- not ours, ignored
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().connected) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    LiveSnapshot snap = runner.snapshot();
+    REQUIRE(snap.positions.size() == 2);
+    REQUIRE(snap.positions[0].adopted);
+    REQUIRE(snap.positions[0].positionId == "P100");
+    REQUIRE(snap.positions[0].side == OrderSide::BuyStop);
+    REQUIRE(snap.positions[0].lots == Catch::Approx(0.03));
+    REQUIRE(snap.positions[0].entryPrice == Catch::Approx(4280.00));
+    REQUIRE(snap.positions[1].positionId == "P200");
+    REQUIRE(snap.positions[1].side == OrderSide::SellStop);
+    // autoContinue is on, but the account isn't flat -- no range opens.
+    REQUIRE(snap.status == EngineStatus::Idle);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 400ms), std::runtime_error);
+
+    runner.closeAllPositions();
+    const FixMessage c1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const FixMessage c2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(c1.getInt(tag::OrdType) == 1);
+    REQUIRE(c1.getString(tag::PosMaintRptID) == "P100");
+    REQUIRE(c1.getInt(tag::Side) == 2);
+    REQUIRE(c1.getDouble(tag::OrderQty) == Catch::Approx(3.0));
+    REQUIRE(c2.getString(tag::PosMaintRptID) == "P200");
+    REQUIRE(c2.getInt(tag::Side) == 1);
+    REQUIRE(c2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
 
     runner.stop();
     runnerThread.join();
@@ -756,6 +902,7 @@ TEST_CASE("LiveRunner::openRange/closeRange: one range at a time, never on top o
     FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill.set(tag::OrderID, std::string("9001"));
     fill.set(tag::ClOrdID, buy.getString(tag::ClOrdID));
+    fill.set(tag::PosMaintRptID, "P" + std::string(buy.getString(tag::ClOrdID)));
     fill.set(tag::ExecType, std::string("F"));
     fill.set(tag::OrdStatus, std::string("2"));
     fill.set(tag::AvgPx, std::string("4301.05"));
@@ -898,6 +1045,7 @@ TEST_CASE("LiveRunner::closeAllPositions closes every open leg and idles the eng
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));
@@ -1013,6 +1161,7 @@ TEST_CASE("LiveRunner waits out connection.basketCooldownSeconds after a basket 
     FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
     fill1.set(tag::OrderID, std::string("9001"));
     fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::PosMaintRptID, "P" + std::string(order1ClOrdId));
     fill1.set(tag::ExecType, std::string("F"));
     fill1.set(tag::OrdStatus, std::string("2"));
     fill1.set(tag::AvgPx, std::string("4337.00"));

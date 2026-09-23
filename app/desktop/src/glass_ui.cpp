@@ -339,6 +339,50 @@ void progress(const char* id, float fraction, ImVec4 color, const char* overlay,
     ImGui::Dummy(ImVec2(w, h));
 }
 
+void balanceBar(const char* id, float value, float negScale, float posScale, const char* overlay, float height) {
+    const float neg = std::max(negScale, 0.01f);
+    const float pos = std::max(posScale, 0.01f);
+    // Normalised to [-1, 1]: -1 = full loss side, +1 = target reached.
+    const float target = value >= 0.0f ? std::min(value / pos, 1.0f) : std::max(value / neg, -1.0f);
+    const float shown = animate(ImGui::GetID(id), target, 8.0f);
+
+    const float h = height > 0.0f ? height : ImGui::GetFrameHeight();
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const ImVec2 b(a.x + w, a.y + h);
+    const float mid = a.x + w * 0.5f;
+    const float r = h * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Track, faintly tinted red on the loss half and green on the profit half.
+    dl->AddRectFilled(a, b, col(g_dark ? ImVec4(1, 1, 1, 0.05f) : ImVec4(0, 0, 0, 0.05f)), r);
+    dl->AddRectFilled(a, ImVec2(mid, b.y), col(alpha(kRed, 0.06f)), r, ImDrawFlags_RoundCornersLeft);
+    dl->AddRectFilled(ImVec2(mid, a.y), b, col(alpha(kGreen, 0.06f)), r, ImDrawFlags_RoundCornersRight);
+
+    if (std::fabs(shown) > 0.002f) {
+        const bool up = shown > 0.0f;
+        const ImVec4 c = up ? kGreen : kRed;
+        const float edge = mid + shown * (w * 0.5f);
+        const ImVec2 fa(up ? mid : edge, a.y);
+        const ImVec2 fb(up ? edge : mid, b.y);
+        const ImDrawFlags corners = up ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersLeft;
+        dl->AddRectFilled(fa, fb, col(alpha(c, 0.85f)), r, corners);
+        dl->AddRectFilled(fa, ImVec2(fb.x, a.y + h * 0.5f), col(ImVec4(1, 1, 1, 0.16f)), r,
+                          up ? ImDrawFlags_RoundCornersTopRight : ImDrawFlags_RoundCornersTopLeft);
+        // Soft glow at the moving edge.
+        dl->AddCircleFilled(ImVec2(edge, a.y + h * 0.5f), h * 0.55f, col(alpha(c, 0.25f)), 24);
+    }
+    dl->AddLine(ImVec2(mid, a.y - 2.0f), ImVec2(mid, b.y + 2.0f), col(g_palette.textDim), 1.0f);
+    dl->AddRect(a, b, col(g_palette.cardBorder), r, 0, 1.0f);
+    if (overlay) {
+        const ImVec2 ts = ImGui::CalcTextSize(overlay);
+        const ImVec2 tp(a.x + (w - ts.x) * 0.5f, a.y + (h - ts.y) * 0.5f);
+        dl->AddText(ImVec2(tp.x + 1, tp.y + 1), col(ImVec4(0, 0, 0, g_dark ? 0.55f : 0.15f)), overlay);
+        dl->AddText(tp, col(g_palette.text), overlay);
+    }
+    ImGui::Dummy(ImVec2(w, h));
+}
+
 float ease(const char* id, float target, float speed) { return animate(ImGui::GetID(id), target, speed); }
 
 }  // namespace muuk::desktop::glass

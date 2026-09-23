@@ -94,7 +94,9 @@ CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
 const char* openRangeBlocker(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (!connected || !snap) return "Connect first.";
     if (!snap->bid || !snap->ask) return "Waiting for the first live quote.";
-    if (snap->closeFailed) return "A closing trade was rejected - close leftovers manually, then reconnect.";
+    if (snap->closeFailed)
+        return "A position couldn't be closed by the bot - close it in cTrader, then press Sync from broker "
+               "(Positions tab).";
     if (snap->status == EngineStatus::Active) return "A range is already running - close it first.";
     if (snap->closingInProgress) return "Previous basket is still closing.";
     if (!snap->positions.empty()) return "Previous range still has open positions.";
@@ -320,10 +322,9 @@ void DashboardWindow::render(LiveController& controller) {
     renderKpiCards(snap, connected);
 
     const float leftWidth = std::max(380.0f, ImGui::GetContentRegionAvail().x * 0.35f);
-    ImGui::BeginChild("left", ImVec2(leftWidth, 0), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+    // Scrollable, so nothing in the range panel is ever cut off on a small window.
+    ImGui::BeginChild("left", ImVec2(leftWidth, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     renderRangePanel(controller, snap, connected);
-    renderSettingsPanel(controller, snap, connected);
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -348,6 +349,11 @@ void DashboardWindow::render(LiveController& controller) {
             } else {
                 ImGui::TextDisabled("Not connected.");
             }
+            ImGui::EndTabItem();
+        }
+        const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
+        if (ImGui::BeginTabItem(settingsLabel.c_str())) {
+            renderSettingsPanel(controller, snap, connected);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("  Log  ###log")) {
@@ -534,10 +540,15 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
     }
 
     if (snap && connected && snap->settings.profitTarget > 0.0) {
-        const double floating = floatingPnl(*snap);
-        const std::string overlay = money(floating) + " net  of  " + money(snap->settings.profitTarget) + " target";
-        glass::progress("target_progress", static_cast<float>(floating / snap->settings.profitTarget),
-                        floating >= 0 ? kGreen : kRed, overlay.c_str());
+        const double net = floatingPnl(*snap);
+        const double lossScale =
+            snap->settings.maxBasketLoss > 0.0 ? snap->settings.maxBasketLoss : snap->settings.profitTarget;
+        const std::string overlay = money(net) + " net   |   target " + money(snap->settings.profitTarget);
+        glass::balanceBar("target_bar", static_cast<float>(net), static_cast<float>(lossScale),
+                          static_cast<float>(snap->settings.profitTarget), overlay.c_str());
+        ImGui::SetItemTooltip("Green grows to the right towards the profit target; red grows to the left while the "
+                              "basket is in loss (full at %s).",
+                              snap->settings.maxBasketLoss > 0.0 ? "your max basket loss" : "the same size as the target");
     }
 
     ImGui::Spacing();
@@ -597,8 +608,7 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
 
 void DashboardWindow::renderSettingsPanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                           bool connected) {
-    glass::beginCard("settings_panel", ImVec2(0, 0));
-
+    ImGui::BeginChild("settings_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     withFont(boldFont_, [] {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Strategy settings");
@@ -694,10 +704,23 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     }
     ImGui::EndDisabled();
 
-    glass::endCard();
+    ImGui::EndChild();
 }
 
 void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveSnapshot& snap, bool connected) {
+    ImGui::BeginDisabled(!connected || snap.syncingPositions);
+    if (glass::button(snap.syncingPositions ? "Syncing..." : "Sync from broker", kBlue)) controller.syncPositions();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Reloads every open XAUUSD position from the broker -- lists positions opened before this "
+                          "session (so you can close them here) and drops ones you closed in cTrader.");
+    bool anyAdopted = false;
+    for (const auto& p : snap.positions) anyAdopted = anyAdopted || p.adopted;
+    if (anyAdopted) {
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(kAmber, "\"old\" = already open at the broker before this session");
+    }
+
     if (snap.positions.empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("No open positions.");
@@ -725,7 +748,12 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%llu", static_cast<unsigned long long>(p.id));
+            if (p.adopted) {
+                ImGui::TextColored(kAmber, "old");
+            } else {
+                ImGui::TextDisabled("%llu", static_cast<unsigned long long>(p.id));
+            }
+            ImGui::SetItemTooltip("Broker position id: %s", p.positionId.empty() ? "(unknown)" : p.positionId.c_str());
             ImGui::TableNextColumn();
             ImGui::TextColored(p.side == OrderSide::BuyStop ? kGreen : kRed, "%s", sideName(p.side));
             ImGui::TableNextColumn();
