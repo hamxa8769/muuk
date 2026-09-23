@@ -215,16 +215,21 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
     const ArmedOrder armed = pendingOrders_[foundIndex];
     pendingOrders_.erase_at(foundIndex);
 
-    const int64_t adverseTicks =
-        (armed.order.side == OrderSide::BuyStop)
-            ? std::max<int64_t>(0, event.fillPrice.ticks - armed.order.price.ticks)
-            : std::max<int64_t>(0, armed.order.price.ticks - event.fillPrice.ticks);
-    slippageMoneyAccrued_ += static_cast<double>(adverseTicks) * config_.symbol.tickValue *
+    // Gross P/L is measured from the price each order was *meant* to fill
+    // at, and the gap to the actual fill is charged separately as slippage
+    // (signed: a better-than-requested fill reduces it). That keeps
+    // Net = Gross - Slippage - Spread - Commission - Swap exact. Measuring
+    // gross from the actual fill *and* charging slippage (as an earlier
+    // version did) counted every slipped tick twice.
+    const int64_t slippageTicks = (armed.order.side == OrderSide::BuyStop)
+                                      ? event.fillPrice.ticks - armed.order.price.ticks
+                                      : armed.order.price.ticks - event.fillPrice.ticks;
+    slippageMoneyAccrued_ += static_cast<double>(slippageTicks) * config_.symbol.tickValue *
                               armed.order.volume.toDouble(config_.symbol);
 
     SideAggregate& agg = (armed.order.side == OrderSide::BuyStop) ? buyAggregate_ : sellAggregate_;
     agg.totalVolumeSteps += armed.order.volume.steps;
-    agg.sumEntryPriceTicksVolume += event.fillPrice.ticks * armed.order.volume.steps;
+    agg.sumEntryPriceTicksVolume += armed.order.price.ticks * armed.order.volume.steps;
 
     if (status_ == EngineStatus::HaltedByRisk) {
         return out;

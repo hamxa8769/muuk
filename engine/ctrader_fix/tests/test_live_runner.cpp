@@ -597,6 +597,100 @@ TEST_CASE("LiveRunner::closePosition and cancelOrder act on a single row without
     if (runnerException) std::rethrow_exception(runnerException);
 }
 
+TEST_CASE("LiveRunner snapshot shows every cost and a live net P/L; booked P/L comes from the real exit fill") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.strategy.costs.commissionPerLotRoundTurn = 7.0;  // $7 per lot round turn
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Buy Stop 0.01 @ 4337.00
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Sell Stop, stays pending
+
+    // Fills 0.10 worse than requested.
+    FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill.set(tag::OrderID, std::string("9001"));
+    fill.set(tag::ClOrdID, order1ClOrdId);
+    fill.set(tag::ExecType, std::string("F"));
+    fill.set(tag::OrdStatus, std::string("2"));
+    fill.set(tag::AvgPx, std::string("4337.10"));
+    fill.set(tag::LastQty, std::string("0.01"));
+    fill.set(tag::CumQty, std::string("0.01"));
+    fill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill);
+
+    FixMessage tick = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    tick.set(tag::Symbol, std::string("1"));
+    tick.set(tag::NoMDEntries, int64_t{2});
+    tick.set(tag::MDEntryType, std::string("0"));
+    tick.set(tag::MDEntryPx, std::string("4337.99"));
+    tick.set(tag::MDEntryType, std::string("1"));
+    tick.set(tag::MDEntryPx, std::string("4338.01"));  // mid 4338.00
+    server.sendToClient(kQuoteConn, tick);
+
+    for (int i = 0; i < 50; ++i) {
+        const LiveSnapshot s = runner.snapshot();
+        if (s.positions.size() == 1 && s.bid.has_value()) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    const LiveSnapshot snap = runner.snapshot();
+    REQUIRE(snap.positions.size() == 1);
+    const PositionInfo& pos = snap.positions[0];
+    REQUIRE(pos.requestedPrice == Catch::Approx(4337.00));
+    REQUIRE(pos.entryPrice == Catch::Approx(4337.10));
+    REQUIRE(pos.pnl.gross == Catch::Approx(1.00));       // 4337.00 -> 4338.00, 0.01 lot
+    REQUIRE(pos.pnl.slippage == Catch::Approx(0.10));
+    REQUIRE(pos.pnl.spread == Catch::Approx(0.01));      // mid -> bid
+    REQUIRE(pos.pnl.commission == Catch::Approx(0.07));
+    REQUIRE(pos.pnl.net == Catch::Approx(0.82));         // bid 4337.99 - fill 4337.10 = 0.89, minus 0.07
+    REQUIRE(snap.live.net == Catch::Approx(0.82));
+    REQUIRE(snap.live.costs() == Catch::Approx(0.18));
+
+    // Close it; the broker fills the close at 4337.95 (a little worse than the bid).
+    runner.closePosition(pos.id);
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    FixMessage closeFill = serverHeaderMessage(msgtype::ExecutionReport, 4);
+    closeFill.set(tag::OrderID, std::string("9002"));
+    closeFill.set(tag::ClOrdID, closeOrder.getString(tag::ClOrdID));
+    closeFill.set(tag::ExecType, std::string("F"));
+    closeFill.set(tag::OrdStatus, std::string("2"));
+    closeFill.set(tag::AvgPx, std::string("4337.95"));
+    closeFill.set(tag::LastQty, std::string("0.01"));
+    closeFill.set(tag::CumQty, std::string("0.01"));
+    closeFill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, closeFill);
+
+    for (int i = 0; i < 50; ++i) {
+        if (!runner.snapshot().closingInProgress) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    const LiveSnapshot after = runner.snapshot();
+    REQUIRE(after.bookedGross == Catch::Approx(0.85));       // real fills: 4337.10 -> 4337.95
+    REQUIRE(after.bookedCommission == Catch::Approx(0.07));
+    REQUIRE(after.realizedPnl == Catch::Approx(0.78));
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
 TEST_CASE("LiveRunner::openRange/closeRange: one range at a time, never on top of an unfinished one") {
     MockFixServer server;
     LiveConfig cfg = testConfig(server);
@@ -753,6 +847,7 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     s.maxBasketLoss = 200.0;
     s.autoContinue = false;
     s.startSide = StartSide::BuyOnly;
+    s.commissionPerLot = 7.0;
     saveLiveSettings(path, s);
 
     const LiveConfig reloaded = loadLiveConfig(path);
@@ -770,6 +865,7 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     REQUIRE(back.maxBasketLoss == Catch::Approx(200.0));
     REQUIRE_FALSE(back.autoContinue);
     REQUIRE(back.startSide == StartSide::BuyOnly);
+    REQUIRE(back.commissionPerLot == Catch::Approx(7.0));
 
     std::filesystem::remove(path);
 }

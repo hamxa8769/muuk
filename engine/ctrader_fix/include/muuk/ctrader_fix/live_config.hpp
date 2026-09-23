@@ -90,6 +90,7 @@ struct LiveSettings {
     int maxOrders = 20;
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit
+    double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close), as your broker charges it
     bool autoContinue = true;
     muuk::core::StartSide startSide = muuk::core::StartSide::Both;  // first order(s) of each range
 };

@@ -193,6 +193,8 @@ ExecutionReportInfo parseExecutionReport(const FixMessage& msg) {
     info.leavesQty = optionalDouble(msg.getOptionalString(tag::LeavesQty));
     info.cumQty = optionalDouble(msg.getOptionalString(tag::CumQty));
     info.text = msg.getOptionalString(tag::Text);
+    info.commission = optionalDouble(msg.getOptionalString(tag::Commission));
+    info.commType = msg.getOptionalString(tag::CommType);
     return info;
 }
 

@@ -20,12 +20,44 @@ namespace muuk::ctrader_fix {
 
 // One currently open (filled) position, for a UI to list individually --
 // see LiveRunner's OpenLeg comment for why this can't just be a net figure.
+// Money breakdown for one position or a whole set of them, using the same
+// convention as the engine's basket P/L:
+//   net = gross - slippage - spread - commission - swap
+// gross      move from the price each order was *meant* to fill at to the mid
+// slippage   actual fill vs. requested price (negative = a better fill)
+// spread     cost of crossing to the closing side right now (mid -> bid/ask)
+// commission configured round-turn rate x lots
+// swap       overnight financing -- not tracked yet, always 0
+// net is exactly what closing at the current bid/ask would realize after
+// commission.
+struct PnlBreakdown {
+    double gross = 0.0;
+    double slippage = 0.0;
+    double spread = 0.0;
+    double commission = 0.0;
+    double swap = 0.0;
+    double net = 0.0;
+
+    [[nodiscard]] double costs() const { return slippage + spread + commission + swap; }
+    PnlBreakdown& operator+=(const PnlBreakdown& o) {
+        gross += o.gross;
+        slippage += o.slippage;
+        spread += o.spread;
+        commission += o.commission;
+        swap += o.swap;
+        net += o.net;
+        return *this;
+    }
+};
+
 struct PositionInfo {
     muuk::core::OrderId id = muuk::core::kInvalidOrderId;
     muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
     double lots = 0.0;
-    double entryPrice = 0.0;
-    double floatingPnl = 0.0;  // $, marked at the price it would close at (bid for a buy, ask for a sell)
+    double requestedPrice = 0.0;  // the Stop price the order was placed at
+    double entryPrice = 0.0;      // the price it actually filled at
+    double floatingPnl = 0.0;     // == pnl.net
+    PnlBreakdown pnl;
 };
 
 // One currently working (unfilled) order, for a UI to list individually.
@@ -60,7 +92,15 @@ struct LiveSnapshot {
     bool closeFailed = false;        // a closing order was rejected -- needs the operator
     int cooldownRemainingSeconds = 0;
     int basketsClosed = 0;           // this session
-    double realizedPnl = 0.0;        // this session, sum of each basket's net P/L at close
+
+    PnlBreakdown live;               // all open positions, marked now (sum of positions[].pnl)
+    // Closed this session, from the *actual* fill prices of both the entry
+    // and the closing trade: gross = real price move, commission = rate x
+    // lots, net = gross - commission. (Spread and slippage are already
+    // inside real fill prices, so they aren't charged again here.)
+    double bookedGross = 0.0;
+    double bookedCommission = 0.0;
+    double realizedPnl = 0.0;        // booked net
     LiveSettings settings;
 };
 
@@ -185,7 +225,13 @@ private:
         // The requested boundary price while still in placedOrderInfo_;
         // overwritten with the real fill price once moved into openLegs_.
         muuk::core::Price price;
+        // Always the requested boundary price (for slippage).
+        muuk::core::Price requestedPrice;
     };
+
+    // Live breakdown for one open leg at the latest quote. Caller must hold
+    // engineMutex_ and a quote must have arrived.
+    [[nodiscard]] PnlBreakdown legPnl(const OpenLeg& leg) const;
 
     void log(const std::string& line) const;
 
@@ -193,7 +239,7 @@ private:
     void onTradeMessage(const FixMessage& msg);
     void handleCommand(const muuk::core::Command& cmd);  // caller must hold engineMutex_
     // Sends one closing Market order per leg in `legs` and tracks each by
-    // ClOrdID in pendingCloseClOrdIds_. Does not touch openLegs_ itself --
+    // ClOrdID in pendingCloses_. Does not touch openLegs_ itself --
     // callers pass in (and are responsible for having already cleared)
     // whatever list they want closed. Caller must hold engineMutex_.
     void closeLegs(const std::vector<OpenLeg>& legs);
@@ -215,7 +261,7 @@ private:
     // Starts the next cycle (engine_->restart()) only when the engine has
     // actually completed a basket AND every leg of that basket's real
     // position has been individually flattened at the broker
-    // (pendingCloseClOrdIds_ empty again -- see the CloseBasketCommand
+    // (pendingCloses_ empty again -- see the CloseBasketCommand
     // handling in handleCommand()) or never needed flattening in the first
     // place (openLegs_ was empty), AND (if connection.basketCooldownSeconds
     // > 0) that many seconds have passed since the moment it became fully
@@ -289,9 +335,10 @@ private:
     // genuinely live in that case.
     std::unordered_map<muuk::core::OrderId, OpenLeg> cancelledOrderInfo_;
 
-    // ClOrdIDs of the individual closing Market orders sent for the
-    // current basket close, still awaiting a fill confirmation.
-    std::unordered_set<std::string> pendingCloseClOrdIds_;
+    // Closing Market orders sent and still awaiting a fill confirmation,
+    // keyed by their ClOrdID, each with the leg it closes -- so the actual
+    // realized P/L can be computed from the real exit fill.
+    std::unordered_map<std::string, OpenLeg> pendingCloses_;
     // True once any closing leg has been rejected by the broker: the
     // position may be only partially flattened, so auto-restart is
     // permanently disabled (operator must intervene) rather than risk
@@ -307,7 +354,8 @@ private:
     std::chrono::steady_clock::time_point cooldownUntil_;
 
     int basketsClosed_ = 0;
-    double realizedPnl_ = 0.0;
+    double bookedGross_ = 0.0;
+    double bookedCommission_ = 0.0;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};

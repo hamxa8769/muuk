@@ -66,18 +66,20 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.ask = latestAsk_;
 
     const bool haveQuote = latestBid_.has_value() && latestAsk_.has_value();
-    const Price bid = haveQuote ? Price::fromDouble(*latestBid_, spec) : Price{};
-    const Price ask = haveQuote ? Price::fromDouble(*latestAsk_, spec) : Price{};
     snap.positions.reserve(openLegs_.size());
     for (const auto& leg : openLegs_) {
-        const double lots = leg.volume.toDouble(spec);
-        double pnl = 0.0;
+        PositionInfo info;
+        info.id = leg.id;
+        info.side = leg.side;
+        info.lots = leg.volume.toDouble(spec);
+        info.requestedPrice = leg.requestedPrice.toDouble(spec);
+        info.entryPrice = leg.price.toDouble(spec);
         if (haveQuote) {
-            const int64_t diffTicks =
-                (leg.side == OrderSide::BuyStop) ? bid.ticks - leg.price.ticks : leg.price.ticks - ask.ticks;
-            pnl = static_cast<double>(diffTicks) * spec.tickValue * lots;
+            info.pnl = legPnl(leg);
+            info.floatingPnl = info.pnl.net;
+            snap.live += info.pnl;
         }
-        snap.positions.push_back(PositionInfo{leg.id, leg.side, lots, leg.price.toDouble(spec), pnl});
+        snap.positions.push_back(info);
     }
     snap.pendingOrders.reserve(placedOrderInfo_.size());
     for (const auto& [orderId, leg] : placedOrderInfo_) {
@@ -87,16 +89,41 @@ LiveSnapshot LiveRunner::snapshot() const {
     std::sort(snap.pendingOrders.begin(), snap.pendingOrders.end(),
               [](const PendingOrderInfo& a, const PendingOrderInfo& b) { return a.id < b.id; });
 
-    snap.closingInProgress = !pendingCloseClOrdIds_.empty();
+    snap.closingInProgress = !pendingCloses_.empty();
     snap.closeFailed = basketCloseFailed_;
     if (cooldownActive_) {
         const auto left = std::chrono::ceil<std::chrono::seconds>(cooldownUntil_ - std::chrono::steady_clock::now());
         snap.cooldownRemainingSeconds = static_cast<int>(std::max<std::chrono::seconds::rep>(0, left.count()));
     }
     snap.basketsClosed = basketsClosed_;
-    snap.realizedPnl = realizedPnl_;
+    snap.bookedGross = bookedGross_;
+    snap.bookedCommission = bookedCommission_;
+    snap.realizedPnl = bookedGross_ - bookedCommission_;
     snap.settings = settingsFromConfig(config_);
     return snap;
+}
+
+PnlBreakdown LiveRunner::legPnl(const OpenLeg& leg) const {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const Price bid = Price::fromDouble(*latestBid_, spec);
+    const Price ask = Price::fromDouble(*latestAsk_, spec);
+    const double mid = (static_cast<double>(bid.ticks) + static_cast<double>(ask.ticks)) / 2.0;
+    const double lotsHeld = leg.volume.toDouble(spec);
+    const double moneyPerTick = spec.tickValue * lotsHeld;
+    const bool buy = leg.side == OrderSide::BuyStop;
+
+    PnlBreakdown p;
+    p.gross = (buy ? mid - static_cast<double>(leg.requestedPrice.ticks)
+                   : static_cast<double>(leg.requestedPrice.ticks) - mid) *
+              moneyPerTick;
+    p.slippage = static_cast<double>(buy ? leg.price.ticks - leg.requestedPrice.ticks
+                                         : leg.requestedPrice.ticks - leg.price.ticks) *
+                 moneyPerTick;
+    p.spread = (buy ? mid - static_cast<double>(bid.ticks) : static_cast<double>(ask.ticks) - mid) * moneyPerTick;
+    p.commission = lotsHeld * config_.strategy.costs.commissionPerLotRoundTurn;
+    p.swap = 0.0;
+    p.net = p.gross - p.slippage - p.spread - p.commission - p.swap;
+    return p;
 }
 
 void LiveRunner::stop() {
@@ -251,22 +278,48 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
     if (type == msgtype::ExecutionReport) {
         const ExecutionReportInfo info = parseExecutionReport(msg);
 
+        if (info.execType == ExecType::Trade && info.commission) {
+            // Logged so the configured commission rate can be checked
+            // against what the broker actually charges.
+            log("[trade] broker-reported commission on ClOrdID=" + info.clOrdId.value_or("?") + ": " +
+                std::to_string(*info.commission) + " (CommType=" + info.commType.value_or("?") + ")");
+        }
+
         if (info.execType == ExecType::Trade) {
             // The basket-close market orders aren't tracked by the engine
             // (they have no corresponding PendingOrder) -- they're matched
             // by ClOrdID here instead, and only once *every* leg's closing
             // order has filled is the next cycle allowed to start. See
             // maybeRestartAfterBasketClose().
-            if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
+            if (info.clOrdId) {
                 std::scoped_lock lock(engineMutex_);
-                pendingCloseClOrdIds_.erase(*info.clOrdId);
-                log("[basket] closing trade filled (ClOrdID=" + *info.clOrdId + "), " +
-                    std::to_string(pendingCloseClOrdIds_.size()) + " leg(s) still outstanding");
-                if (pendingCloseClOrdIds_.empty() && engine_) {
-                    log("[basket] all legs flat, next cycle may now start");
-                    maybeRestartAfterBasketClose();
+                if (const auto cit = pendingCloses_.find(*info.clOrdId); cit != pendingCloses_.end()) {
+                    const OpenLeg leg = cit->second;
+                    pendingCloses_.erase(cit);
+
+                    // Book the real result: actual entry fill -> actual exit fill.
+                    const SymbolSpec& spec = config_.strategy.symbol;
+                    const double lotsClosed = leg.volume.toDouble(spec);
+                    std::string booked;
+                    if (info.avgPx) {
+                        const Price exitPrice = Price::fromDouble(*info.avgPx, spec);
+                        const int64_t moveTicks = (leg.side == OrderSide::BuyStop) ? exitPrice.ticks - leg.price.ticks
+                                                                                    : leg.price.ticks - exitPrice.ticks;
+                        const double gross = static_cast<double>(moveTicks) * spec.tickValue * lotsClosed;
+                        const double commission = lotsClosed * config_.strategy.costs.commissionPerLotRoundTurn;
+                        bookedGross_ += gross;
+                        bookedCommission_ += commission;
+                        booked = ", booked " + std::to_string(gross - commission) + " net (gross " +
+                                 std::to_string(gross) + ", commission " + std::to_string(commission) + ")";
+                    }
+                    log("[basket] closing trade filled (ClOrdID=" + *info.clOrdId + ")" + booked + ", " +
+                        std::to_string(pendingCloses_.size()) + " leg(s) still outstanding");
+                    if (pendingCloses_.empty() && engine_) {
+                        log("[basket] all legs flat, next cycle may now start");
+                        maybeRestartAfterBasketClose();
+                    }
+                    return;
                 }
-                return;
             }
 
             const auto orderId = tryParseOrderId(info.clOrdId);
@@ -312,7 +365,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             log("[trade] order rejected (ClOrdID=" + info.clOrdId.value_or("?") +
                 "): " + info.text.value_or("no reason given"));
 
-            if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
+            if (info.clOrdId && pendingCloses_.count(*info.clOrdId) > 0) {
                 // One of the closing trades was rejected: that leg's
                 // position is still open at the broker. Don't wait for a
                 // fill that will never come, but do NOT start a new cycle
@@ -322,7 +375,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 // operator attention (close the leftover position
                 // manually, then restart the bot).
                 std::scoped_lock lock(engineMutex_);
-                pendingCloseClOrdIds_.erase(*info.clOrdId);
+                pendingCloses_.erase(*info.clOrdId);
                 basketCloseFailed_ = true;
                 log("[basket] CRITICAL: a closing trade was rejected (ClOrdID=" + *info.clOrdId +
                     ") -- position is still open at the broker; next cycle will NOT start automatically. "
@@ -373,7 +426,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         // order as a close on this hedging account? The raw OrdStatus/
         // ExecType are logged here (not just engine/core's coarser
         // ExecType enum) so nothing is swallowed.
-        if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
+        if (info.clOrdId && pendingCloses_.count(*info.clOrdId) > 0) {
             log("[basket] closing order status update (ClOrdID=" + *info.clOrdId +
                 ", OrdStatus=" + msg.getOptionalString(tag::OrdStatus).value_or("?") +
                 ", ExecType=" + msg.getOptionalString(tag::ExecType).value_or("?") +
@@ -462,7 +515,7 @@ void LiveRunner::maybeEmitTick() {
 }
 
 bool LiveRunner::accountFlat() const {
-    return openLegs_.empty() && placedOrderInfo_.empty() && pendingCloseClOrdIds_.empty();
+    return openLegs_.empty() && placedOrderInfo_.empty() && pendingCloses_.empty();
 }
 
 void LiveRunner::prepareNextCycle(bool recenter) {
@@ -479,7 +532,7 @@ void LiveRunner::prepareNextCycle(bool recenter) {
 void LiveRunner::maybeRestartAfterBasketClose() {
     // Keep the strategy running continuously: once a basket closes (profit
     // target hit) AND every leg of its real position is confirmed flat at
-    // the broker (pendingCloseClOrdIds_ empty -- see the
+    // the broker (pendingCloses_ empty -- see the
     // ExecutionReport::Trade handling in onTradeMessage), start the next
     // cycle rather than sitting idle. With seedOffsetPoints>0 this re-seeds
     // around the tick that just triggered the close (see armInitialOrders'
@@ -555,7 +608,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
         oss << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
             << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")";
         log(oss.str());
-        placedOrderInfo_[place->id] = OpenLeg{place->id, place->side, place->volume, place->price};
+        placedOrderInfo_[place->id] = OpenLeg{place->id, place->side, place->volume, place->price, place->price};
         tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
@@ -571,8 +624,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
         log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney) + ", " +
             std::to_string(openLegs_.size()) + " leg(s) to flatten");
-        ++basketsClosed_;
-        realizedPnl_ += close->netPnlMoney;
+        ++basketsClosed_;  // booked P/L itself comes from the real closing fills (see onTradeMessage)
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
@@ -602,7 +654,7 @@ void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
         const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
         log("[basket] flattening leg: side=" + std::to_string(side) + " lots=" + std::to_string(lots) +
             " (ClOrdID=" + closeClOrdId + ")");
-        pendingCloseClOrdIds_.insert(closeClOrdId);
+        pendingCloses_.insert({closeClOrdId, leg});
         tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
     }
 }
@@ -647,7 +699,7 @@ bool LiveRunner::openRange() {
     if (!accountFlat()) {
         log("[manual] can't open a range yet: the previous one still has " + std::to_string(openLegs_.size()) +
             " position(s), " + std::to_string(placedOrderInfo_.size()) + " pending order(s) and " +
-            std::to_string(pendingCloseClOrdIds_.size()) + " closing order(s) open");
+            std::to_string(pendingCloses_.size()) + " closing order(s) open");
         return false;
     }
     if (!latestBid_ || !latestAsk_) {

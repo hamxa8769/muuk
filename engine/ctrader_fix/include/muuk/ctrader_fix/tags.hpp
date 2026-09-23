@@ -47,6 +47,8 @@ inline constexpr int MDUpdateAction = 279;
 inline constexpr int MDReqRejReason = 281;
 
 inline constexpr int ClOrdID = 11;
+inline constexpr int Commission = 12;
+inline constexpr int CommType = 13;
 inline constexpr int Side = 54;
 inline constexpr int TransactTime = 60;
 inline constexpr int OrderQty = 38;

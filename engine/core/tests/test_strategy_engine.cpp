@@ -447,6 +447,33 @@ TEST_CASE("seedOffsetPoints>0: seeds sit outside the spread, so they can't both 
     REQUIRE(sellSeed.volume.toDouble(spec) == Catch::Approx(0.01));
 }
 
+TEST_CASE("basket P/L charges slippage exactly once, and net equals the real move from the actual fill") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.costs.commissionPerLotRoundTurn = 7.0;
+    StrategyEngine engine(cfg);
+
+    const CommandBatch initial = engine.start();
+    const auto& buy = placeCmd(initial, 0);  // Buy Stop 0.01 @ 4337.00
+    // Fills 0.10 worse than requested.
+    engine.onOrderConfirmed(OrderConfirmedEvent{buy.id, Price::fromDouble(4337.10, spec)});
+
+    TickEvent tick;
+    tick.bid = Price::fromDouble(4337.99, spec);
+    tick.ask = Price::fromDouble(4338.01, spec);  // mid 4338.00, spread 0.02
+    engine.onTick(tick);
+    const BasketPnlResult pnl = engine.lastBasketPnl();
+
+    // 0.01 lot: $1 per 1.00 move.
+    REQUIRE(pnl.grossPnlMoney == Catch::Approx(1.00));       // 4337.00 (requested) -> 4338.00 (mid)
+    REQUIRE(pnl.slippageMoney == Catch::Approx(0.10));       // filled 0.10 worse
+    REQUIRE(pnl.spreadCostMoney == Catch::Approx(0.01));     // half the 0.02 spread to close
+    REQUIRE(pnl.commissionMoney == Catch::Approx(0.07));     // $7/lot round turn * 0.01
+    // = what closing right now actually nets: bid 4337.99 - fill 4337.10 = $0.89, minus commission.
+    REQUIRE(pnl.netPnlMoney == Catch::Approx(0.89 - 0.07));
+}
+
 TEST_CASE("startSide=BuyOnly: one Buy Stop, then strictly one order at a time, alternating") {
     const SymbolSpec spec = xauusdSpec();
     StrategyConfig cfg = baseConfig(spec);  // range 4336.00 - 4337.00

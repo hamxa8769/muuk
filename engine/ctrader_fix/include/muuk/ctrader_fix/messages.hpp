@@ -97,6 +97,10 @@ struct ExecutionReportInfo {
     std::optional<double> leavesQty;
     std::optional<double> cumQty;
     std::optional<std::string> text;
+    // Only if the broker includes them -- not relied on for P/L (the
+    // configured rate is used); logged so the two can be compared.
+    std::optional<double> commission;
+    std::optional<std::string> commType;
 };
 
 [[nodiscard]] ExecutionReportInfo parseExecutionReport(const FixMessage& msg);

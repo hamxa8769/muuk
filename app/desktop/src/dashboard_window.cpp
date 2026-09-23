@@ -102,10 +102,32 @@ const char* openRangeBlocker(const std::optional<LiveSnapshot>& snap, bool conne
     return nullptr;
 }
 
-double floatingPnl(const LiveSnapshot& snap) {
-    double total = 0.0;
-    for (const auto& p : snap.positions) total += p.floatingPnl;
-    return total;
+double floatingPnl(const LiveSnapshot& snap) { return snap.live.net; }
+
+// One "label ....... value" row of the P/L breakdown. Costs are shown as
+// deductions (with a leading minus) so the column visibly adds up to net.
+void breakdownRow(const char* label, const char* help, double value, bool isCost, ImFont* font = nullptr) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    if (isCost) {
+        ImGui::TextDisabled("  - %s", label);
+    } else {
+        ImGui::TextUnformatted(label);
+    }
+    if (help) ImGui::SetItemTooltip("%s", help);
+    ImGui::TableNextColumn();
+    char buf[32];
+    if (isCost) {
+        std::snprintf(buf, sizeof(buf), "%s$%.2f", value < -0.005 ? "+" : "-", std::fabs(value));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s", money(value).c_str());
+    }
+    const float w = ImGui::CalcTextSize(buf).x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w);
+    const ImVec4 color = isCost ? (std::fabs(value) < 0.005 ? glass::palette().textDim : kAmber) : pnlColor(value);
+    if (font) ImGui::PushFont(font);
+    ImGui::TextColored(color, "%s", buf);
+    if (font) ImGui::PopFont();
 }
 
 // The range as a horizontal price scale: the band between the two
@@ -230,6 +252,7 @@ void clampSettings(LiveSettings& s) {
     s.maxOrders = std::max(1, s.maxOrders);
     s.maxLot = std::max(0.01, s.maxLot);
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
+    s.commissionPerLot = std::max(0.0, s.commissionPerLot);
 }
 
 }  // namespace
@@ -434,14 +457,17 @@ void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bo
          snap ? snap->symbolName : "");
     card("k_spread", "SPREAD", haveQuote ? price(*snap->ask - *snap->bid) : std::string("--"), text,
          snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "");
-    card("k_float", "FLOATING P/L", connected ? money(shownFloating) : std::string("--"), pnlColor(floating),
-         snap ? "Target " + money(snap->settings.profitTarget) : "");
+    card("k_float", "NET P/L (AFTER COSTS)", connected ? money(shownFloating) : std::string("--"), pnlColor(floating),
+         connected && snap ? "Gross " + money(snap->live.gross) + "  |  costs $" + price(snap->live.costs())
+                           : std::string(""));
     card("k_pos", "OPEN POSITIONS", snap ? std::to_string(snap->positions.size()) : std::string("--"), text,
          snap ? "Buy " + lots(buyLots) + "  /  Sell " + lots(sellLots) : "");
     card("k_ord", "PENDING ORDERS", snap ? std::to_string(snap->pendingOrders.size()) : std::string("--"), text,
          cycleState(snap, connected).label);
-    card("k_real", "BOOKED TODAY", snap ? money(shownBooked) : std::string("--"),
-         snap ? pnlColor(snap->realizedPnl) : kGrey, snap ? std::to_string(snap->basketsClosed) + " basket(s)" : "",
+    card("k_real", "BOOKED NET (SESSION)", snap ? money(shownBooked) : std::string("--"),
+         snap ? pnlColor(snap->realizedPnl) : kGrey,
+         snap ? std::to_string(snap->basketsClosed) + " basket(s)  |  commission $" + price(snap->bookedCommission)
+              : "",
          true);
 }
 
@@ -476,9 +502,40 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                                             ImGui::GetColorU32(glass::palette().textDim), msg);
     }
 
+    if (snap && connected) {
+        ImGui::Spacing();
+        withFont(boldFont_, [] { ImGui::TextUnformatted("Costs & net P/L"); });
+        ImGui::SameLine();
+        ImGui::TextDisabled("(all open positions, if closed now)");
+        if (ImGui::BeginTable("pnl_breakdown", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            const auto& b = snap->live;
+            breakdownRow("Gross P/L", "Price move from each order's requested price to the current mid.", b.gross,
+                         false);
+            breakdownRow("Slippage", "Fills worse (+) or better (-) than the requested Stop price.", b.slippage, true);
+            breakdownRow("Spread", "Cost of closing at bid/ask instead of mid, right now.", b.spread, true);
+            breakdownRow("Commission",
+                         "Your configured round-turn commission x lots. Set it in Strategy settings to match your broker.",
+                         b.commission, true);
+            breakdownRow("Swap", "Overnight financing - not tracked yet.", b.swap, true);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Separator();
+            ImGui::TableNextColumn();
+            ImGui::Separator();
+            breakdownRow("Net P/L", "What you would actually take home if everything closed now.", b.net, false,
+                         boldFont_);
+            ImGui::EndTable();
+        }
+        if (snap->settings.commissionPerLot <= 0.0) {
+            ImGui::TextColored(kAmber, "Commission is set to $0 - enter your broker's rate in Strategy settings.");
+        }
+    }
+
     if (snap && connected && snap->settings.profitTarget > 0.0) {
         const double floating = floatingPnl(*snap);
-        const std::string overlay = money(floating) + "  of  " + money(snap->settings.profitTarget) + " target";
+        const std::string overlay = money(floating) + " net  of  " + money(snap->settings.profitTarget) + " target";
         glass::progress("target_progress", static_cast<float>(floating / snap->settings.profitTarget),
                         floating >= 0 ? kGreen : kRed, overlay.c_str());
     }
@@ -593,6 +650,10 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &settingsDirty_);
         settingDouble("Max basket loss ($)", "Safety limit: stop placing new orders past this floating loss. 0 = off.",
                       &s.maxBasketLoss, 10.0, "%.2f", &settingsDirty_);
+        settingDouble("Commission ($/lot)",
+                      "Round-turn commission (open + close) per 1.00 lot, as your broker charges it on XAUUSD. "
+                      "Deducted from net P/L and counted before the profit target is reached.",
+                      &s.commissionPerLot, 0.50, "%.2f", &settingsDirty_);
         clampSettings(s);
         ImGui::EndTable();
     }
@@ -646,15 +707,17 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
     const float footer = ImGui::GetFrameHeightWithSpacing() * 1.3f;
-    if (ImGui::BeginTable("positions", 7, flags, ImVec2(0, -footer))) {
+    if (ImGui::BeginTable("positions", 9, flags, ImVec2(0, -footer))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
-        ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+        ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 48.0f);
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Entry");
         ImGui::TableSetupColumn("Now");
-        ImGui::TableSetupColumn("P/L");
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+        ImGui::TableSetupColumn("Gross");
+        ImGui::TableSetupColumn("Costs");
+        ImGui::TableSetupColumn("Net");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 76.0f);
         ImGui::TableHeadersRow();
 
         for (const auto& p : snap.positions) {
@@ -669,6 +732,9 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::TextUnformatted(lots(p.lots).c_str());
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(price(p.entryPrice).c_str());
+            if (std::fabs(p.entryPrice - p.requestedPrice) >= 0.005) {
+                ImGui::SetItemTooltip("Requested %.2f, filled %.2f", p.requestedPrice, p.entryPrice);
+            }
             ImGui::TableNextColumn();
             if (snap.bid && snap.ask) {
                 ImGui::TextUnformatted(price(p.side == OrderSide::BuyStop ? *snap.bid : *snap.ask).c_str());
@@ -676,7 +742,14 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
                 ImGui::TextDisabled("--");
             }
             ImGui::TableNextColumn();
-            ImGui::TextColored(pnlColor(p.floatingPnl), "%s", money(p.floatingPnl).c_str());
+            ImGui::TextColored(pnlColor(p.pnl.gross), "%s", money(p.pnl.gross).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextColored(p.pnl.costs() > 0.005 ? kAmber : glass::palette().textDim, "-$%.2f", p.pnl.costs());
+            ImGui::SetItemTooltip("Slippage %s\nSpread     %s\nCommission %s\nSwap       %s",
+                                  money(-p.pnl.slippage).c_str(), money(-p.pnl.spread).c_str(),
+                                  money(-p.pnl.commission).c_str(), money(-p.pnl.swap).c_str());
+            ImGui::TableNextColumn();
+            withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(p.pnl.net), "%s", money(p.pnl.net).c_str()); });
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!connected);
             if (glass::button("Close", kRed, ImVec2(-1, 0))) controller.closePosition(p.id);
@@ -692,8 +765,8 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
     const double total = floatingPnl(snap);
     ImGui::Separator();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("Buy %s lots   /   Sell %s lots   /   Total floating", lots(buyLots).c_str(),
-                        lots(sellLots).c_str());
+    ImGui::TextDisabled("Buy %s  /  Sell %s lots   |   Gross %s   Costs -$%.2f   Net", lots(buyLots).c_str(),
+                        lots(sellLots).c_str(), money(snap.live.gross).c_str(), snap.live.costs());
     ImGui::SameLine();
     withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(total), "%s", money(total).c_str()); });
 }

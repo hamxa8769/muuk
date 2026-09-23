@@ -78,6 +78,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.maxOrders = config.strategy.riskLimits.maxOrders;
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
+    s.commissionPerLot = config.strategy.costs.commissionPerLotRoundTurn;
     s.autoContinue = config.connection.autoContinue;
     s.startSide = config.strategy.startSide;
     return s;
@@ -99,6 +100,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
+    st.costs.commissionPerLotRoundTurn = s.commissionPerLot;
     st.startSide = s.startSide;
 
     config.connection.autoRangeWidthPoints = s.rangeWidth;
@@ -130,6 +132,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     st["riskLimits"]["maxOrders"] = s.maxOrders;
     st["riskLimits"]["maxLot"] = s.maxLot;
     st["riskLimits"]["maxBasketLossMoney"] = s.maxBasketLoss;
+    st["costs"]["commissionPerLotRoundTurn"] = s.commissionPerLot;
 
     std::ofstream out(path, std::ios::trunc);
     if (!out) {
