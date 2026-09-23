@@ -59,6 +59,17 @@ acceptance of a pending Stop order, which arrives first as `ExecType=0`
 ("New") with no engine action needed (`engine/core` already updated its
 own state the moment it emitted the `PlaceOrderCommand`).
 
+**`OrderQty(38)` is in lot hundredths, not raw lots** — confirmed
+empirically against a real IC Markets demo account: sending `OrderQty=2`/
+`3` opened `0.02`/`0.03`-lot positions, and a `TRADING_BAD_VOLUME` reject
+citing a "1.00" minimum turned out to mean 0.01 lot, not 1.00 lot. This
+matches cTrader's platform-wide volume convention (hundredths of the
+displayed unit). `engine/core`'s `SymbolSpec`/`Volume` stay in real lots
+throughout — for P&L math, risk checks, display, everything — so the ×100
+conversion is applied only at the wire-encoding boundary in
+`LiveRunner::handleCommand` (`engine/ctrader_fix/src/live_runner.cpp`),
+not baked into `engine/core`.
+
 ## Symbol resolution
 
 `Symbol (55)` is a **broker-assigned numeric id**, not a string like

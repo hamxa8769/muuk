@@ -116,13 +116,15 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     REQUIRE(order1.getInt(tag::Side) == 1);
     REQUIRE(order1.getInt(tag::OrdType) == 3);
     REQUIRE(order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
-    REQUIRE(order1.getDouble(tag::OrderQty) == Catch::Approx(0.01));
+    // OrderQty is lot hundredths on the wire (0.01 lot -> 1.0), not raw
+    // lots -- see docs/ctrader-fix.md "Orders".
+    REQUIRE(order1.getDouble(tag::OrderQty) == Catch::Approx(1.0));
     const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
 
     const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
     REQUIRE(order2.getInt(tag::Side) == 2);
     REQUIRE(order2.getDouble(tag::StopPx) == Catch::Approx(4336.00));
-    REQUIRE(order2.getDouble(tag::OrderQty) == Catch::Approx(0.02));
+    REQUIRE(order2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
 
     // --- Quote subscription, then a harmless in-range tick ---
     (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
@@ -150,7 +152,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     const FixMessage order3 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(order3.getInt(tag::Side) == 1);
     REQUIRE(order3.getDouble(tag::StopPx) == Catch::Approx(4337.00));
-    REQUIRE(order3.getDouble(tag::OrderQty) == Catch::Approx(0.03));
+    REQUIRE(order3.getDouble(tag::OrderQty) == Catch::Approx(3.0));
     REQUIRE(order3.getString(tag::ClOrdID) != order1ClOrdId);
 
     runner.stop();

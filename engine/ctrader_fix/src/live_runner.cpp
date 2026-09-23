@@ -222,9 +222,18 @@ void LiveRunner::handleCommand(const Command& cmd) {
     if (const auto* place = std::get_if<PlaceOrderCommand>(&cmd)) {
         const std::string clOrdId = std::to_string(place->id);
         const int side = (place->side == OrderSide::BuyStop) ? 1 : 2;
-        const double qty = place->volume.toDouble(config_.strategy.symbol);
+        const double lots = place->volume.toDouble(config_.strategy.symbol);
+        // cTrader's FIX OrderQty(38) is in "lot hundredths" (its
+        // platform-wide volume convention), not raw lots -- confirmed
+        // empirically: sending OrderQty=2/3 opened 0.02/0.03-lot
+        // positions, and the broker's stated minimum ("1.00") turned out
+        // to mean 0.01 lot, not 1.00 lot. engine/core's SymbolSpec/Volume
+        // stay in real lots throughout (P&L, risk checks); this scaling
+        // is purely a wire-format detail of this one broker/dialect, so it
+        // belongs here rather than in engine/core.
+        const double qty = lots * 100.0;
         const double stopPx = place->price.toDouble(config_.strategy.symbol);
-        std::cerr << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " qty=" << qty
+        std::cerr << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
                    << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")\n";
         tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
