@@ -62,6 +62,11 @@ struct LiveConnectionConfig {
     // wall-clock time.
     int basketCooldownSeconds = 0;
 
+    // true (default): open the first range as soon as the bot connects,
+    // and the next one automatically after each basket closes.
+    // false: only open a range when the operator asks (LiveRunner::openRange).
+    bool autoContinue = true;
+
     [[nodiscard]] std::string senderCompId() const {
         return environment + "." + brokerUid + "." + traderLogin;
     }
@@ -72,8 +77,36 @@ struct LiveConfig {
     muuk::core::StrategyConfig strategy;
 };
 
+// The operator-tunable subset of LiveConfig, in plain human units (lots,
+// dollars, seconds), for a UI to edit without touching the fixed-point
+// engine types or the credentials.
+struct LiveSettings {
+    double rangeWidth = 2.0;     // $ between the two boundaries
+    double seedOffset = 0.0;     // $ beyond bid/ask for the two seed orders (0 = no seeding)
+    double initialLot = 0.01;
+    double lotIncrement = 0.01;
+    double profitTarget = 1.0;   // basket net P/L ($) that books the basket
+    int cooldownSeconds = 0;     // pause after a basket is fully flat
+    int maxOrders = 20;
+    double maxLot = 10.0;
+    double maxBasketLoss = 0.0;  // $; 0 = no limit
+    bool autoContinue = true;
+};
+
+[[nodiscard]] LiveSettings settingsFromConfig(const LiveConfig& config);
+
+// Writes `settings` into `config`. The range keeps its current center;
+// only its width changes (LiveRunner re-centers it on live price when a
+// range is actually opened).
+void applySettingsToConfig(LiveConfig& config, const LiveSettings& settings);
+
 // Throws std::runtime_error if the file is missing, malformed, or missing
 // a required connection field.
 [[nodiscard]] LiveConfig loadLiveConfig(const std::filesystem::path& path);
+
+// Rewrites only the tunable fields of an existing config file, leaving
+// credentials and everything else exactly as they were. Throws
+// std::runtime_error if the file can't be read or written.
+void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& settings);
 
 }  // namespace muuk::ctrader_fix

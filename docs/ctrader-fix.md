@@ -112,25 +112,38 @@ whole time it runs, not just at startup:
   `restart()` after a basket closes, using the tick that just triggered
   that close as the reference, not the (by then closed and possibly
   stale) previous cycle's range.
-- `LiveRunner::maybeEmitTick` calls `engine_->restart()` itself as soon as
-  it sees `EngineStatus::Completed`, so a closed basket immediately starts
-  the next cycle rather than sitting idle until the process is restarted
-  by hand.
+- With `connection.autoContinue` on (the default), `LiveRunner` starts the
+  next cycle itself once a basket has closed -- but only after every one of
+  its positions is confirmed closed at the broker, no pending order is left,
+  and `connection.basketCooldownSeconds` has passed. It never opens a range
+  on top of an unfinished one. With `autoContinue` off, ranges only open
+  when the operator calls `openRange()` (the desktop app's **Open range**
+  button), under the same "account must be flat" rule.
 
-Together, `autoRangeWidthPoints` (LiveRunner, startup only) +
-`seedOffsetPoints` (StrategyEngine, every cycle) is the combination meant
-for unattended, continuous operation: the very first range comes from
-whatever quote arrives right after connecting, and every range after that
-comes from a real fill rather than a stale guess.
+Together, `autoRangeWidthPoints` (range width, re-centered on live price
+each time a range opens) + `seedOffsetPoints` (StrategyEngine, every
+cycle) is the combination meant for unattended, continuous operation.
 
-One known gap: if the *other*, still-pending seed order happens to fill
-on the broker's side in the brief window between `onOrderConfirmed`
-deciding to cancel it and that `OrderCancelRequest` actually reaching the
-broker, the engine's internal state (which already treated it as
-cancelled) and the broker's real position can disagree. `LiveRunner`
-already logs `OrderCancelReject` if the broker refuses the cancel, but
-does not yet reconcile the engine's state from it — the same class of
-gap as the other Phase-1 simplifications in `docs/architecture.md`.
+**Cancel-vs-fill race.** An order `LiveRunner` has asked the broker to
+cancel can still fill before the cancel lands (most likely for a seed
+order right when its sibling fills). Every sent cancel is remembered
+(`cancelledOrderInfo_`) until the broker confirms it; if a fill arrives
+for one instead, that surplus position is closed immediately with its own
+Market order rather than left open for the rest of the cycle. If the
+broker rejects the cancel, the order goes back on the pending list.
+
+## Operator controls (desktop app / `LiveRunner`)
+
+- `openRange()` / `closeRange()` -- open a new range centered on live price;
+  or cancel all pending orders, close all positions and go Idle.
+- `closeAllPositions()` / `cancelAllPendingOrders()` -- either half of
+  `closeRange()` on its own (also leaves the engine Idle).
+- `closePosition(id)` / `cancelOrder(id)` -- one position or order, leaving
+  the rest of the running cycle alone.
+- `applySettings()` -- range width, lots, profit target, seed offset,
+  cooldown, risk limits, auto-continue; cycle-shaping values take effect
+  from the next range. `saveLiveSettings()` writes them back into the
+  config file without touching the credentials.
 
 ## Who detects a pending order's trigger?
 

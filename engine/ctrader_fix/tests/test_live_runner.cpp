@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -425,6 +427,349 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     runner.stop();
     runnerThread.join();
     if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner closes a cancelled order's fill immediately if it wins the race against its own cancel") {
+    // Reproduces the reported "bot opened 2 positions when the range
+    // started" bug: an order LiveRunner has already asked the broker to
+    // cancel can still fill anyway (a real timing race -- the cancel
+    // request and the fill can cross in flight). The surplus leg must be
+    // closed right away, not silently left open until the next basket
+    // close.
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 1.0;  // low bar, cleared by the rally below
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Buy .01 @ 4337.00
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+    const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Sell .02 @ 4336.00
+    const std::string order2ClOrdId = order2.getString(tag::ClOrdID);
+
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().activeOrderCount == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    // Rally clears the profit target -> basket closes: order1's leg gets
+    // an individual closing Market order, and order2 (still pending) gets
+    // an OrderCancelRequest.
+    FixMessage rally = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 4);
+    rally.set(tag::Symbol, std::string("1"));
+    rally.set(tag::NoMDEntries, int64_t{2});
+    rally.set(tag::MDEntryType, std::string("0"));
+    rally.set(tag::MDEntryPx, std::string("4341.99"));
+    rally.set(tag::MDEntryType, std::string("1"));
+    rally.set(tag::MDEntryPx, std::string("4342.01"));
+    server.sendToClient(kQuoteConn, rally);
+
+    const FixMessage closeOrder1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder1.getInt(tag::OrdType) == 1);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);  // order2's cancel
+
+    // The race: order2 fills anyway, despite the cancel already in flight.
+    FixMessage fill2 = serverHeaderMessage(msgtype::ExecutionReport, 5);
+    fill2.set(tag::OrderID, std::string("9002"));
+    fill2.set(tag::ClOrdID, order2ClOrdId);
+    fill2.set(tag::ExecType, std::string("F"));
+    fill2.set(tag::OrdStatus, std::string("2"));
+    fill2.set(tag::AvgPx, std::string("4336.00"));
+    fill2.set(tag::LastQty, std::string("0.02"));
+    fill2.set(tag::CumQty, std::string("0.02"));
+    fill2.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill2);
+
+    // A second, separate closing Market order for the surplus leg must
+    // appear -- not silence, not a wait for the next basket cycle.
+    const FixMessage closeOrder2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder2.getInt(tag::OrdType) == 1);
+    REQUIRE(closeOrder2.getInt(tag::Side) == 1);  // closes the Sell .02 leg
+    REQUIRE(closeOrder2.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner::closePosition and cancelOrder act on a single row without disturbing the rest") {
+    MockFixServer server;
+    LiveRunner runner(testConfig(server));
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Buy .01 @ 4337.00
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+    const OrderId order1Id = static_cast<OrderId>(std::stoull(order1ClOrdId));
+    const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Sell .02 @ 4336.00
+    const std::string order2ClOrdId = order2.getString(tag::ClOrdID);
+    const OrderId order2Id = static_cast<OrderId>(std::stoull(order2ClOrdId));
+
+    // Fill order1 -> one open position, order2 stays a pending order.
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().positions.size() == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    const LiveSnapshot beforeSnap = runner.snapshot();
+    REQUIRE(beforeSnap.positions.size() == 1);
+    REQUIRE(beforeSnap.positions[0].id == order1Id);
+    REQUIRE(beforeSnap.positions[0].lots == Catch::Approx(0.01));
+    REQUIRE(beforeSnap.pendingOrders.size() == 1);
+    REQUIRE(beforeSnap.pendingOrders[0].id == order2Id);
+    REQUIRE(beforeSnap.status == EngineStatus::Active);  // engine untouched by per-item actions
+
+    runner.closePosition(order1Id);
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder.getInt(tag::OrdType) == 1);
+    REQUIRE(closeOrder.getInt(tag::Side) == 2);
+    REQUIRE(closeOrder.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+
+    runner.cancelOrder(order2Id);
+    const FixMessage cancelReq = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancelReq.getString(tag::OrigClOrdID) == order2ClOrdId);
+
+    for (int i = 0; i < 50; ++i) {
+        const LiveSnapshot s = runner.snapshot();
+        if (s.positions.empty() && s.pendingOrders.empty()) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    const LiveSnapshot afterSnap = runner.snapshot();
+    REQUIRE(afterSnap.positions.empty());
+    REQUIRE(afterSnap.pendingOrders.empty());
+    // Per-item actions leave the engine running -- unlike closeAllPositions()/
+    // cancelAllPendingOrders(), which reset it to Idle.
+    REQUIRE(afterSnap.status == EngineStatus::Active);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner::openRange/closeRange: one range at a time, never on top of an unfinished one") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.connection.autoContinue = false;  // nothing opens until the operator asks
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().connected) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().connected);
+    REQUIRE(runner.snapshot().status == EngineStatus::Idle);  // autoContinue off: no orders yet
+
+    FixMessage tick = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    tick.set(tag::Symbol, std::string("1"));
+    tick.set(tag::NoMDEntries, int64_t{2});
+    tick.set(tag::MDEntryType, std::string("0"));
+    tick.set(tag::MDEntryPx, std::string("4300.00"));
+    tick.set(tag::MDEntryType, std::string("1"));
+    tick.set(tag::MDEntryPx, std::string("4300.10"));
+    server.sendToClient(kQuoteConn, tick);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().bid.has_value()) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    // Tune before opening: $2 range, 0.02 starting lot.
+    LiveSettings s = runner.settings();
+    s.rangeWidth = 2.0;
+    s.initialLot = 0.02;
+    s.lotIncrement = 0.01;
+    runner.applySettings(s);
+
+    REQUIRE(runner.openRange());
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(buy.getInt(tag::Side) == 1);
+    REQUIRE(buy.getDouble(tag::StopPx) == Catch::Approx(4301.05));  // mid 4300.05 + 1.00
+    REQUIRE(buy.getDouble(tag::OrderQty) == Catch::Approx(2.0));     // 0.02 lot
+    const FixMessage sell = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(sell.getInt(tag::Side) == 2);
+    REQUIRE(sell.getDouble(tag::StopPx) == Catch::Approx(4299.05));
+    REQUIRE(sell.getDouble(tag::OrderQty) == Catch::Approx(3.0));
+
+    REQUIRE_FALSE(runner.openRange());  // one already running
+
+    FixMessage fill = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill.set(tag::OrderID, std::string("9001"));
+    fill.set(tag::ClOrdID, buy.getString(tag::ClOrdID));
+    fill.set(tag::ExecType, std::string("F"));
+    fill.set(tag::OrdStatus, std::string("2"));
+    fill.set(tag::AvgPx, std::string("4301.05"));
+    fill.set(tag::LastQty, std::string("0.02"));
+    fill.set(tag::CumQty, std::string("0.02"));
+    fill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().positions.size() == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().positions.size() == 1);
+
+    // Close range: cancel the pending Sell, close the open Buy, go Idle.
+    runner.closeRange();
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == sell.getString(tag::ClOrdID));
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder.getInt(tag::OrdType) == 1);
+    REQUIRE(closeOrder.getInt(tag::Side) == 2);
+    REQUIRE(closeOrder.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    REQUIRE(runner.snapshot().status == EngineStatus::Idle);
+    REQUIRE(runner.snapshot().closingInProgress);
+
+    // The closing trade hasn't confirmed yet -- the account isn't flat, so
+    // no new range may open.
+    REQUIRE_FALSE(runner.openRange());
+
+    FixMessage closeFill = serverHeaderMessage(msgtype::ExecutionReport, 4);
+    closeFill.set(tag::OrderID, std::string("9002"));
+    closeFill.set(tag::ClOrdID, closeOrder.getString(tag::ClOrdID));
+    closeFill.set(tag::ExecType, std::string("F"));
+    closeFill.set(tag::OrdStatus, std::string("2"));
+    closeFill.set(tag::AvgPx, std::string("4300.00"));
+    closeFill.set(tag::LastQty, std::string("0.02"));
+    closeFill.set(tag::CumQty, std::string("0.02"));
+    closeFill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, closeFill);
+    for (int i = 0; i < 50; ++i) {
+        if (!runner.snapshot().closingInProgress) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    // Flat again, and closeRange() left the engine Idle with auto-continue
+    // off -- nothing opened by itself in the meantime.
+    REQUIRE(runner.snapshot().status == EngineStatus::Idle);
+    REQUIRE(runner.openRange());
+    const FixMessage reopened = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(reopened.getInt(tag::OrdType) == 3);
+    // Order ids keep counting up across ranges -- the broker never sees a
+    // ClOrdID reused.
+    REQUIRE(std::stoull(reopened.getString(tag::ClOrdID)) > std::stoull(sell.getString(tag::ClOrdID)));
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips through loadLiveConfig") {
+    const auto path = std::filesystem::temp_directory_path() / "muuk_test_settings.local.json";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << R"({
+  "connection": {
+    "quote": { "host": "q.example", "port": "5201" },
+    "trade": { "host": "t.example", "port": "5202" },
+    "brokerUid": "broker", "traderLogin": "123", "password": "secret",
+    "symbolName": "XAUUSD", "symbolId": "41"
+  },
+  "strategy": {
+    "symbol": { "name": "XAUUSD", "digits": 2, "tickSize": 0.01, "tickValue": 1.0, "contractSize": 100.0,
+                "volumeStep": 0.01, "volumeMin": 0.01, "volumeMax": 100.0 },
+    "range": { "lower": 4292.35, "upper": 4292.55 },
+    "lotProgression": { "initialLot": 0.01, "lotIncrement": 0.01 },
+    "basketProfitTargetMoney": 5.0
+  }
+})";
+    }
+
+    LiveSettings s;
+    s.rangeWidth = 3.0;
+    s.seedOffset = 0.10;
+    s.initialLot = 0.02;
+    s.lotIncrement = 0.02;
+    s.profitTarget = 1.5;
+    s.cooldownSeconds = 45;
+    s.maxOrders = 12;
+    s.maxLot = 1.0;
+    s.maxBasketLoss = 200.0;
+    s.autoContinue = false;
+    saveLiveSettings(path, s);
+
+    const LiveConfig reloaded = loadLiveConfig(path);
+    REQUIRE(reloaded.connection.password == "secret");  // credentials untouched
+    REQUIRE(reloaded.connection.symbolId == "41");
+    const LiveSettings back = settingsFromConfig(reloaded);
+    REQUIRE(back.rangeWidth == Catch::Approx(3.0));
+    REQUIRE(back.seedOffset == Catch::Approx(0.10));
+    REQUIRE(back.initialLot == Catch::Approx(0.02));
+    REQUIRE(back.lotIncrement == Catch::Approx(0.02));
+    REQUIRE(back.profitTarget == Catch::Approx(1.5));
+    REQUIRE(back.cooldownSeconds == 45);
+    REQUIRE(back.maxOrders == 12);
+    REQUIRE(back.maxLot == Catch::Approx(1.0));
+    REQUIRE(back.maxBasketLoss == Catch::Approx(200.0));
+    REQUIRE_FALSE(back.autoContinue);
+
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("LiveRunner::closeAllPositions closes every open leg and idles the engine") {

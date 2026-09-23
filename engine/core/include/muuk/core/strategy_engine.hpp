@@ -94,6 +94,18 @@ public:
     // explicitly decide to retry.
     CommandBatch restart();
 
+    // Abandons the current cycle without emitting any commands: forgets
+    // pending orders and P/L aggregates and returns to Idle (also clears
+    // HaltedByRisk), so start() can arm a fresh cycle later. For a driver
+    // that has already dealt with the broker-side orders/positions itself,
+    // e.g. an operator's manual "close range". Keeps the config, the last
+    // tick and order-id allocation, so ids stay unique across cycles.
+    void stopCycle();
+
+    // Replaces the config used by the next start()/restart(). Only valid
+    // while no cycle is running (Idle or Completed).
+    void reconfigure(const StrategyConfig& config);
+
     // Evaluates the current basket against the profit target and the risk
     // engine against live spread. Also updates the mark price used for
     // floating P/L.
@@ -116,6 +128,10 @@ public:
     [[nodiscard]] int activeOrderCount() const { return static_cast<int>(pendingOrders_.size()); }
     [[nodiscard]] int nextSequenceIndex() const { return nextSequenceIndex_; }
     [[nodiscard]] BasketPnlResult lastBasketPnl() const { return lastBasketPnl_; }
+    // The range currently in force -- differs from the configured one once
+    // seed-anchor mode has re-derived it from a real fill.
+    [[nodiscard]] RangeConfig currentRange() const { return config_.range; }
+    [[nodiscard]] bool seeding() const { return seeding_; }
 
 private:
     // Running per-side accumulator backing aggregatePositionPnlMoney() —

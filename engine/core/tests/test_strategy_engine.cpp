@@ -408,16 +408,83 @@ TEST_CASE("seedOffsetPoints>0: restart() re-seeds around the tick that triggered
     engine.onTick(tick);
     REQUIRE(engine.status() == EngineStatus::Completed);
 
-    // The new cycle's seeds must be centered on this tick's mid (~4350.00)
-    // -- not the now-stale anchored range from before (~4336.05) -- so the
-    // strategy keeps following live price across cycles rather than
-    // arming orders tens of dollars away from the market.
+    // The new cycle's seeds must sit around this tick (bid 4349.99 / ask
+    // 4350.01) -- not the now-stale anchored range from before (~4336.05)
+    // -- so the strategy keeps following live price across cycles rather
+    // than arming orders tens of dollars away from the market.
     const CommandBatch restartOut = engine.restart();
     REQUIRE(restartOut.size() == 2);
     REQUIRE(placeCmd(restartOut, 0).side == OrderSide::BuyStop);
-    REQUIRE(placeCmd(restartOut, 0).price == Price::fromDouble(4350.05, spec));
+    REQUIRE(placeCmd(restartOut, 0).price == Price::fromDouble(4350.06, spec));  // ask + 0.05
     REQUIRE(placeCmd(restartOut, 1).side == OrderSide::SellStop);
-    REQUIRE(placeCmd(restartOut, 1).price == Price::fromDouble(4349.95, spec));
+    REQUIRE(placeCmd(restartOut, 1).price == Price::fromDouble(4349.94, spec));  // bid - 0.05
+}
+
+TEST_CASE("seedOffsetPoints>0: seeds sit outside the spread, so they can't both trigger at once") {
+    // Regression: seeds used to be placed at mid +/- offset. With a spread
+    // wider than 2*offset (e.g. XAUUSD's ~0.11 vs a 0.05 offset) the Buy
+    // Stop landed below the ask and the Sell Stop above the bid, so both
+    // triggered immediately and the bot opened two 0.01 positions at once.
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.seedOffsetPoints = 0.05;
+    StrategyEngine engine(cfg);
+
+    TickEvent tick;
+    tick.bid = Price::fromDouble(4280.88, spec);
+    tick.ask = Price::fromDouble(4280.99, spec);  // spread 0.11
+    REQUIRE(engine.onTick(tick).empty());  // Idle: only records the tick
+
+    const CommandBatch out = engine.start();
+    REQUIRE(out.size() == 2);
+    const auto& buySeed = placeCmd(out, 0);
+    const auto& sellSeed = placeCmd(out, 1);
+    REQUIRE(buySeed.side == OrderSide::BuyStop);
+    REQUIRE(sellSeed.side == OrderSide::SellStop);
+    REQUIRE(buySeed.price.ticks > tick.ask.ticks);   // a Buy Stop triggers on ask >= price
+    REQUIRE(sellSeed.price.ticks < tick.bid.ticks);  // a Sell Stop triggers on bid <= price
+    REQUIRE(buySeed.volume.toDouble(spec) == Catch::Approx(0.01));
+    REQUIRE(sellSeed.volume.toDouble(spec) == Catch::Approx(0.01));
+}
+
+TEST_CASE("stopCycle() abandons the cycle silently and start() can arm a fresh one with unique ids") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyEngine engine(baseConfig(spec));
+
+    const CommandBatch first = engine.start();
+    const OrderId firstBuyId = placeCmd(first, 0).id;
+    engine.onOrderConfirmed(OrderConfirmedEvent{firstBuyId, Price::fromDouble(4337.00, spec)});
+    REQUIRE(engine.activeOrderCount() == 1);
+
+    engine.stopCycle();
+    REQUIRE(engine.status() == EngineStatus::Idle);
+    REQUIRE(engine.activeOrderCount() == 0);
+    REQUIRE(engine.lastBasketPnl().grossPnlMoney == 0.0);
+
+    const CommandBatch second = engine.start();
+    REQUIRE(second.size() == 2);
+    REQUIRE(engine.status() == EngineStatus::Active);
+    // Sequence (and so lot size) restarts, but order ids keep counting up:
+    // they're what the broker sees as ClOrdID, so they must never repeat.
+    REQUIRE(placeCmd(second, 0).sequenceIndex == 1);
+    REQUIRE(placeCmd(second, 0).volume.toDouble(spec) == Catch::Approx(0.01));
+    REQUIRE(placeCmd(second, 0).id > placeCmd(first, 1).id);
+}
+
+TEST_CASE("reconfigure() changes the settings used by the next cycle") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyEngine engine(baseConfig(spec));
+
+    StrategyConfig tuned = baseConfig(spec);
+    tuned.range = RangeConfig{Price::fromDouble(4300.00, spec), Price::fromDouble(4302.00, spec)};
+    tuned.lotProgression = LotProgressionConfig{Volume::fromDouble(0.05, spec), Volume::fromDouble(0.05, spec)};
+    engine.reconfigure(tuned);
+
+    const CommandBatch out = engine.start();
+    REQUIRE(placeCmd(out, 0).price == Price::fromDouble(4302.00, spec));
+    REQUIRE(placeCmd(out, 0).volume.toDouble(spec) == Catch::Approx(0.05));
+    REQUIRE(placeCmd(out, 1).price == Price::fromDouble(4300.00, spec));
+    REQUIRE(placeCmd(out, 1).volume.toDouble(spec) == Catch::Approx(0.10));
 }
 
 TEST_CASE("reArmOnFill=false takes a single fill and does not re-arm that side") {

@@ -18,6 +18,24 @@
 
 namespace muuk::ctrader_fix {
 
+// One currently open (filled) position, for a UI to list individually --
+// see LiveRunner's OpenLeg comment for why this can't just be a net figure.
+struct PositionInfo {
+    muuk::core::OrderId id = muuk::core::kInvalidOrderId;
+    muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
+    double lots = 0.0;
+    double entryPrice = 0.0;
+    double floatingPnl = 0.0;  // $, marked at the price it would close at (bid for a buy, ask for a sell)
+};
+
+// One currently working (unfilled) order, for a UI to list individually.
+struct PendingOrderInfo {
+    muuk::core::OrderId id = muuk::core::kInvalidOrderId;
+    muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
+    double lots = 0.0;
+    double price = 0.0;
+};
+
 // A point-in-time read of LiveRunner's state, for a UI (or anything else)
 // to poll without needing its own hooks into the engine internals. Built
 // from the same data onQuoteMessage/onTradeMessage already maintain, so
@@ -33,6 +51,17 @@ struct LiveSnapshot {
     double lastNetPnlMoney = 0.0;
     std::optional<double> bid;
     std::optional<double> ask;
+    std::vector<PositionInfo> positions;
+    std::vector<PendingOrderInfo> pendingOrders;
+
+    bool connected = false;          // both FIX sessions up and the engine constructed
+    bool seeding = false;            // seed orders armed, real range not anchored yet
+    bool closingInProgress = false;  // closing orders sent, fills not all confirmed yet
+    bool closeFailed = false;        // a closing order was rejected -- needs the operator
+    int cooldownRemainingSeconds = 0;
+    int basketsClosed = 0;           // this session
+    double realizedPnl = 0.0;        // this session, sum of each basket's net P/L at close
+    LiveSettings settings;
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -89,18 +118,47 @@ public:
     // objects (a prior version of this raced there intermittently).
     void stop();
 
-    // Manual operator overrides, safe to call from any thread while run()
-    // is active (no-op if it isn't -- there's no session to send on).
-    // Both send real broker-facing requests (individually-sized closing
-    // Market orders / OrderCancelRequests, the same tested mechanisms the
-    // automatic basket-close path uses) and then rebuild the engine fresh
-    // and Idle, rather than trying to reconcile its internal state with an
-    // action it didn't decide to take itself. The bot will NOT resume
-    // trading on its own afterward -- stop() and start() again to resume.
-    // These act on independent broker-side state (open positions vs.
-    // pending orders), so either can be used alone.
+    // Manual operator controls. All are safe to call from any thread while
+    // run() is active, and no-ops if it isn't (there's no session to send
+    // on).
+    //
+    // openRange(): starts a new cycle centered on live price, using the
+    // current settings. Refuses (logs why, returns false) unless the
+    // account is completely flat -- no open positions, no pending orders,
+    // no closing orders still in flight -- so a new range can never open
+    // on top of an unfinished one.
+    //
+    // closeRange(): ends the running cycle -- cancels every pending order,
+    // closes every open position, and leaves the engine Idle. The bot
+    // won't open another range on its own until openRange() is called.
+    //
+    // closeAllPositions()/cancelAllPendingOrders(): each half of
+    // closeRange() on its own; both also stop the cycle (engine Idle),
+    // since the engine can't be told to forget only part of its state.
+    bool openRange();
+    void closeRange();
     void closeAllPositions();
     void cancelAllPendingOrders();
+
+    // Current tunable settings, and a way to change them. Changes that
+    // shape a cycle (range width, lots, target, ...) take effect when the
+    // next range opens -- never mid-cycle; autoContinue and the cooldown
+    // take effect immediately.
+    [[nodiscard]] LiveSettings settings() const;
+    void applySettings(const LiveSettings& settings);
+
+    // Per-item versions of the above, for a UI to act on a single row of
+    // its positions/pending-orders list, leaving the rest of the running
+    // cycle untouched (unlike the "all" versions, these do NOT stop the
+    // cycle -- that would also drop every other order/position the
+    // strategy still has open, which defeats the point of "just this
+    // one"). The engine's own P/L aggregate may run slightly stale for the
+    // rest of this cycle as a result (it has no way to be told "forget
+    // this one leg") -- bounded, cosmetic, and already an accepted
+    // Phase-1 gap (see docs/ctrader-fix.md's note on the seed-cancel
+    // race). No-op if `id` isn't currently a live position/pending order.
+    void closePosition(muuk::core::OrderId id);
+    void cancelOrder(muuk::core::OrderId id);
 
 private:
     // Per-leg position tracking. engine/core deliberately only keeps a
@@ -121,8 +179,12 @@ private:
     // still correct as the *net* figure, just not sufficient on its own
     // for a hedging account).
     struct OpenLeg {
+        muuk::core::OrderId id = muuk::core::kInvalidOrderId;
         muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
         muuk::core::Volume volume;
+        // The requested boundary price while still in placedOrderInfo_;
+        // overwritten with the real fill price once moved into openLegs_.
+        muuk::core::Price price;
     };
 
     void log(const std::string& line) const;
@@ -135,6 +197,18 @@ private:
     // callers pass in (and are responsible for having already cleared)
     // whatever list they want closed. Caller must hold engineMutex_.
     void closeLegs(const std::vector<OpenLeg>& legs);
+    // Shared bodies of the public manual controls. Caller must hold engineMutex_.
+    void cancelPendingLocked();
+    void closePositionsLocked();
+    // True when nothing from any cycle is still live at the broker: no open
+    // position, no pending order, no closing order awaiting its fill.
+    // Caller must hold engineMutex_.
+    [[nodiscard]] bool accountFlat() const;
+    // Hands config_.strategy (including any settings changed since the
+    // last cycle) to the engine, first re-centering its range on the
+    // latest mid if `recenter` and a quote is available. Only valid while
+    // no cycle is running. Caller must hold engineMutex_.
+    void prepareNextCycle(bool recenter);
     void resolveSymbol();
     void maybeEmitTick();  // caller must hold engineMutex_; no-op if engine_ isn't constructed yet
 
@@ -154,13 +228,19 @@ private:
     // is noticed promptly either way. Caller must hold engineMutex_.
     void maybeRestartAfterBasketClose();
 
-    // Blocks until the first live bid+ask arrives, then centers
-    // config_.strategy.range around its midpoint using
-    // connection.autoRangeWidthPoints. Only called when that width is >0.
-    // Must run before engine_ is constructed (see engine_'s comment) —
-    // quote subscription happens before that construction specifically so
-    // this can observe a real tick first.
-    void waitForFirstQuoteAndCenterRange();
+    // Blocks until the first live bid+ask arrives. Needed before the
+    // engine is started whenever the first range depends on live price:
+    // auto-centering (connection.autoRangeWidthPoints) and seed orders
+    // (which are placed off the real bid/ask). Quote subscription happens
+    // before engine construction specifically so this can observe a tick.
+    void waitForFirstQuote();
+    // Centers config_.strategy.range on the latest mid with
+    // connection.autoRangeWidthPoints as its width. Caller must hold
+    // engineMutex_ and a quote must have arrived.
+    void centerRangeOnLatestQuote();
+    // The latest quote as an engine tick. Caller must hold engineMutex_
+    // and a quote must have arrived.
+    [[nodiscard]] muuk::core::TickEvent latestTick() const;
 
     LiveConfig config_;
     std::string symbolId_;
@@ -191,10 +271,23 @@ private:
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<uint64_t> nextCloseReqId_{1};
 
-    // side/volume for an order LiveRunner has placed but that hasn't
-    // filled (or been cancelled) yet -- moved into openLegs_ on fill.
+    // side/volume/price for an order LiveRunner has placed but that
+    // hasn't filled (or been cancelled) yet -- moved into openLegs_ on
+    // fill, or into cancelledOrderInfo_ once a cancel is sent for it.
     std::unordered_map<muuk::core::OrderId, OpenLeg> placedOrderInfo_;
     std::vector<OpenLeg> openLegs_;
+
+    // Orders LiveRunner has sent OrderCancelRequest for but hasn't yet
+    // heard back about -- the broker might still confirm the fill instead
+    // of the cancel (a real, observed race: a seed order this close to
+    // market can fill in the same window its sibling's cancel is in
+    // flight). If a Trade fill ExecutionReport later arrives for one of
+    // these, it's treated as a surplus leg and closed immediately (not
+    // silently folded into openLegs_ to wait out the rest of the cycle) --
+    // see onTradeMessage. Moved back to placedOrderInfo_ if the broker
+    // instead rejects the cancel (OrderCancelReject) -- the order is still
+    // genuinely live in that case.
+    std::unordered_map<muuk::core::OrderId, OpenLeg> cancelledOrderInfo_;
 
     // ClOrdIDs of the individual closing Market orders sent for the
     // current basket close, still awaiting a fill confirmation.
@@ -212,6 +305,9 @@ private:
     // decided to close. Cleared once the next cycle actually starts.
     bool cooldownActive_ = false;
     std::chrono::steady_clock::time_point cooldownUntil_;
+
+    int basketsClosed_ = 0;
+    double realizedPnl_ = 0.0;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};

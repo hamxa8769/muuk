@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 
 namespace muuk::desktop {
@@ -36,11 +37,24 @@ public:
     // call even if not running.
     void stop();
 
-    // Manual operator overrides -- forwarded straight to LiveRunner (see
-    // its own comment for exactly what these do and why the bot won't
-    // resume trading on its own afterward). No-op if not running.
+    // Range / position controls -- forwarded straight to LiveRunner (see
+    // its comments for exactly what each does). No-ops if not running.
+    bool openRange();
+    void closeRange();
     void closeAllPositions();
     void cancelAllPendingOrders();
+    void closePosition(muuk::core::OrderId id);
+    void cancelOrder(muuk::core::OrderId id);
+
+    // Applies `settings` to the running bot (from its next range on).
+    // No-op if not running.
+    void applySettings(const muuk::ctrader_fix::LiveSettings& settings);
+
+    // Reads/writes only the tunable part of a config file, so settings can
+    // be edited and saved whether or not the bot is connected. On failure
+    // both return false/nullopt and record the message in lastError().
+    [[nodiscard]] std::optional<muuk::ctrader_fix::LiveSettings> loadSettings(const std::string& configPath);
+    bool saveSettings(const std::string& configPath, const muuk::ctrader_fix::LiveSettings& settings);
 
     [[nodiscard]] bool isRunning() const { return running_.load(); }
     // Returns the last known state even after the runner has stopped
@@ -49,10 +63,13 @@ public:
     // successful start().
     [[nodiscard]] std::optional<muuk::ctrader_fix::LiveSnapshot> snapshot() const;
     [[nodiscard]] std::vector<std::string> logLines() const;
+    void clearLog();
     [[nodiscard]] std::string lastError() const;
+    void clearError();
 
 private:
     void appendLog(const std::string& line);
+    void setError(const std::string& message);
 
     std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
     std::thread thread_;
@@ -60,7 +77,7 @@ private:
 
     mutable std::mutex logMutex_;
     std::vector<std::string> log_;
-    static constexpr std::size_t kMaxLogLines = 500;
+    static constexpr std::size_t kMaxLogLines = 2000;
 
     mutable std::mutex errorMutex_;
     std::string lastError_;

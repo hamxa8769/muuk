@@ -73,12 +73,18 @@ CommandBatch StrategyEngine::armInitialOrders() {
         // most recent quote) — is used instead.
         seeding_ = true;
         const bool haveTick = lastTick_.bid.ticks != 0 || lastTick_.ask.ticks != 0;
-        const Price mid = haveTick ? Price{(lastTick_.bid.ticks + lastTick_.ask.ticks) / 2}
-                                    : Price{(config_.range.lowerBound.ticks + config_.range.upperBound.ticks) / 2};
+        const Price rangeMid{(config_.range.lowerBound.ticks + config_.range.upperBound.ticks) / 2};
+        // Offsets are measured from the side of the book each Stop order
+        // actually triggers on (Buy Stop: ask, Sell Stop: bid), not from
+        // the mid. Measured from the mid, an offset smaller than half the
+        // spread puts the Buy Stop below the ask and the Sell Stop above
+        // the bid -- both trigger instantly, opening two positions at once.
+        const Price refAsk = haveTick ? lastTick_.ask : rangeMid;
+        const Price refBid = haveTick ? lastTick_.bid : rangeMid;
         const int64_t offsetTicks =
             std::max<int64_t>(1, Price::fromDouble(config_.seedOffsetPoints, config_.symbol).ticks);
-        const Price seedUpper{mid.ticks + offsetTicks};
-        const Price seedLower{mid.ticks - offsetTicks};
+        const Price seedUpper{refAsk.ticks + offsetTicks};
+        const Price seedLower{refBid.ticks - offsetTicks};
 
         // Both seeds share one sequence slot: exactly one of them ever
         // actually becomes a trade (the other is always cancelled
@@ -118,6 +124,17 @@ CommandBatch StrategyEngine::start() {
 CommandBatch StrategyEngine::restart() {
     assert(status_ == EngineStatus::Completed && "restart() is only valid after a basket close");
     return armInitialOrders();
+}
+
+void StrategyEngine::stopCycle() {
+    resetCycleState();
+    status_ = EngineStatus::Idle;
+}
+
+void StrategyEngine::reconfigure(const StrategyConfig& config) {
+    assert((status_ == EngineStatus::Idle || status_ == EngineStatus::Completed) &&
+           "reconfigure() is only valid while no cycle is running");
+    config_ = config;
 }
 
 BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {

@@ -1,12 +1,30 @@
 #include "live_controller.hpp"
 
-#include "muuk/ctrader_fix/live_config.hpp"
+#include <chrono>
+#include <ctime>
+#include <exception>
 
 namespace muuk::desktop {
 
 using muuk::ctrader_fix::LiveConfig;
 using muuk::ctrader_fix::LiveRunner;
+using muuk::ctrader_fix::LiveSettings;
 using muuk::ctrader_fix::LiveSnapshot;
+
+namespace {
+std::string timestampPrefix() {
+    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S  ", &local);
+    return buf;
+}
+}  // namespace
 
 LiveController::~LiveController() { stop(); }
 
@@ -17,24 +35,17 @@ void LiveController::start(const std::string& configPath) {
     // assigning over a still-joinable std::thread calls std::terminate().
     if (thread_.joinable()) thread_.join();
 
-    {
-        std::scoped_lock lock(errorMutex_);
-        lastError_.clear();
-    }
-    {
-        std::scoped_lock lock(logMutex_);
-        log_.clear();
-    }
+    clearError();
 
     LiveConfig config;
     try {
         config = muuk::ctrader_fix::loadLiveConfig(configPath);
     } catch (const std::exception& ex) {
-        std::scoped_lock lock(errorMutex_);
-        lastError_ = ex.what();
+        setError(ex.what());
         return;
     }
 
+    appendLog("---- connecting (" + configPath + ") ----");
     runner_ = std::make_unique<LiveRunner>(std::move(config));
     runner_->setLogHandler([this](const std::string& line) { appendLog(line); });
 
@@ -44,8 +55,7 @@ void LiveController::start(const std::string& configPath) {
             runner_->run();
         } catch (const std::exception& ex) {
             appendLog(std::string("[error] ") + ex.what());
-            std::scoped_lock lock(errorMutex_);
-            lastError_ = ex.what();
+            setError(ex.what());
         }
         running_ = false;
     });
@@ -57,12 +67,50 @@ void LiveController::stop() {
     running_ = false;
 }
 
+bool LiveController::openRange() { return runner_ && running_.load() && runner_->openRange(); }
+
+void LiveController::closeRange() {
+    if (runner_ && running_.load()) runner_->closeRange();
+}
+
 void LiveController::closeAllPositions() {
     if (runner_ && running_.load()) runner_->closeAllPositions();
 }
 
 void LiveController::cancelAllPendingOrders() {
     if (runner_ && running_.load()) runner_->cancelAllPendingOrders();
+}
+
+void LiveController::closePosition(muuk::core::OrderId id) {
+    if (runner_ && running_.load()) runner_->closePosition(id);
+}
+
+void LiveController::cancelOrder(muuk::core::OrderId id) {
+    if (runner_ && running_.load()) runner_->cancelOrder(id);
+}
+
+void LiveController::applySettings(const LiveSettings& settings) {
+    if (runner_ && running_.load()) runner_->applySettings(settings);
+}
+
+std::optional<LiveSettings> LiveController::loadSettings(const std::string& configPath) {
+    try {
+        return muuk::ctrader_fix::settingsFromConfig(muuk::ctrader_fix::loadLiveConfig(configPath));
+    } catch (const std::exception& ex) {
+        setError(ex.what());
+        return std::nullopt;
+    }
+}
+
+bool LiveController::saveSettings(const std::string& configPath, const LiveSettings& settings) {
+    try {
+        muuk::ctrader_fix::saveLiveSettings(configPath, settings);
+        appendLog("[settings] saved to " + configPath);
+        return true;
+    } catch (const std::exception& ex) {
+        setError(ex.what());
+        return false;
+    }
 }
 
 std::optional<LiveSnapshot> LiveController::snapshot() const {
@@ -75,17 +123,32 @@ std::vector<std::string> LiveController::logLines() const {
     return log_;
 }
 
+void LiveController::clearLog() {
+    std::scoped_lock lock(logMutex_);
+    log_.clear();
+}
+
 std::string LiveController::lastError() const {
     std::scoped_lock lock(errorMutex_);
     return lastError_;
 }
 
+void LiveController::clearError() {
+    std::scoped_lock lock(errorMutex_);
+    lastError_.clear();
+}
+
 void LiveController::appendLog(const std::string& line) {
     std::scoped_lock lock(logMutex_);
-    log_.push_back(line);
+    log_.push_back(timestampPrefix() + line);
     if (log_.size() > kMaxLogLines) {
-        log_.erase(log_.begin());
+        log_.erase(log_.begin(), log_.begin() + static_cast<std::ptrdiff_t>(log_.size() - kMaxLogLines));
     }
+}
+
+void LiveController::setError(const std::string& message) {
+    std::scoped_lock lock(errorMutex_);
+    lastError_ = message;
 }
 
 }  // namespace muuk::desktop

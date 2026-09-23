@@ -64,9 +64,13 @@ commands get executed.
 because a pre-computed range can already be stale by the time it's armed
 — even one just centered on a live quote a moment ago, if the market is
 moving fast. Instead of committing to both full-width boundaries up
-front, `armInitialOrders()` arms two tiny orders (`seedOffsetPoints` price
-units above/below the reference midpoint) and sets an internal `seeding_`
-flag. Both seeds share a single slot in the lot progression
+front, `armInitialOrders()` arms two tiny orders -- a Buy Stop
+`seedOffsetPoints` above the ask and a Sell Stop `seedOffsetPoints` below
+the bid -- and sets an internal `seeding_` flag. The offsets are measured
+from the side of the book each Stop order triggers on, not from the mid:
+measured from the mid, any offset smaller than half the spread (0.05 vs
+XAUUSD's ~0.11 spread, in live testing) put both seeds inside the spread,
+so both triggered at once and opened two positions. Both seeds share a single slot in the lot progression
 (`nextSequenceIndex_` advances once for the pair, not once each) — only
 one of them ever actually becomes a trade, the other is always cancelled
 unfilled below, so only one slot should ever be spent on it. Advancing it
@@ -85,9 +89,17 @@ itself prefers `lastTick_`
 `resetCycleState()`) over `range`'s configured midpoint whenever one
 exists — so a `restart()` after a closed basket re-anchors to the tick
 that *just* triggered the close, not to the previous (now stale) cycle's
-range. Only `range`'s midpoint is used before the very first tick ever
-(the caller — e.g. a live driver — is expected to have set it from
-whatever it knew at construction time).
+range. Only `range`'s midpoint is used before the very first tick ever,
+and then without any spread information -- so a live driver should pass
+the engine a real tick before `start()` (an Idle engine's `onTick()` only
+records it). `LiveRunner::run()` does exactly that.
+
+`stopCycle()` abandons a cycle without emitting commands (back to Idle,
+also clearing HaltedByRisk) for a driver that has already dealt with the
+broker side itself, and `reconfigure()` swaps in new settings between
+cycles. Both keep order-id allocation running, so ClOrdIDs never repeat
+within a session -- which is why `LiveRunner`'s manual controls use them
+rather than rebuilding the engine.
 - On every `onTick`, the basket's net P/L is re-evaluated; once it reaches
   `basketProfitTargetMoney` the basket is closed: all remaining pending
   orders are cancelled and a `CloseBasketCommand` is emitted carrying the
