@@ -202,16 +202,20 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         const ExecutionReportInfo info = parseExecutionReport(msg);
 
         if (info.execType == ExecType::Trade) {
-            // The basket-close market order isn't tracked by the engine (it
-            // has no corresponding PendingOrder) -- it's matched by ClOrdID
-            // here instead, and its fill is what's allowed to unblock the
-            // next cycle. See maybeRestartAfterBasketClose().
-            if (info.clOrdId && !pendingCloseClOrdId_.empty() && *info.clOrdId == pendingCloseClOrdId_) {
+            // The basket-close market orders aren't tracked by the engine
+            // (they have no corresponding PendingOrder) -- they're matched
+            // by ClOrdID here instead, and only once *every* leg's closing
+            // order has filled is the next cycle allowed to start. See
+            // maybeRestartAfterBasketClose().
+            if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
                 std::scoped_lock lock(engineMutex_);
-                log("[basket] closing trade filled -- position flat, next cycle may now start");
-                basketClosePending_ = false;
-                pendingCloseClOrdId_.clear();
-                if (engine_) maybeRestartAfterBasketClose();
+                pendingCloseClOrdIds_.erase(*info.clOrdId);
+                log("[basket] closing trade filled (ClOrdID=" + *info.clOrdId + "), " +
+                    std::to_string(pendingCloseClOrdIds_.size()) + " leg(s) still outstanding");
+                if (pendingCloseClOrdIds_.empty() && engine_) {
+                    log("[basket] all legs flat, next cycle may now start");
+                    maybeRestartAfterBasketClose();
+                }
                 return;
             }
 
@@ -223,6 +227,13 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             }
             const Price fillPrice = Price::fromDouble(*info.avgPx, config_.strategy.symbol);
             std::scoped_lock lock(engineMutex_);
+            // Every real (non-close) fill becomes its own tracked open leg
+            // -- see openLegs_'s comment for why this can't just be a net
+            // aggregate on a hedging-enabled account.
+            if (const auto it = placedOrderInfo_.find(*orderId); it != placedOrderInfo_.end()) {
+                openLegs_.push_back(it->second);
+                placedOrderInfo_.erase(it);
+            }
             if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
             for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{*orderId, fillPrice})) {
                 handleCommand(cmd);
@@ -234,19 +245,21 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             log("[trade] order rejected (ClOrdID=" + info.clOrdId.value_or("?") +
                 "): " + info.text.value_or("no reason given"));
 
-            if (info.clOrdId && !pendingCloseClOrdId_.empty() && *info.clOrdId == pendingCloseClOrdId_) {
-                // The closing trade itself was rejected: the position is
-                // still open at the broker. Clear the flag so the bot
-                // doesn't hang forever waiting for a fill that will never
-                // come, but do NOT start a new cycle -- that would pile a
-                // fresh basket on top of an unflattened one, exactly the
-                // bug this mechanism exists to prevent. Needs operator
-                // attention (close the leftover position manually).
+            if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
+                // One of the closing trades was rejected: that leg's
+                // position is still open at the broker. Don't wait for a
+                // fill that will never come, but do NOT start a new cycle
+                // even once every other leg's close confirms -- that would
+                // pile a fresh basket on top of unflattened exposure,
+                // exactly the bug this mechanism exists to prevent. Needs
+                // operator attention (close the leftover position
+                // manually, then restart the bot).
                 std::scoped_lock lock(engineMutex_);
-                log("[basket] CRITICAL: closing trade was rejected -- position is still open at the broker; "
-                    "next cycle will NOT start automatically. Close it manually, then restart the bot.");
-                basketClosePending_ = false;
-                pendingCloseClOrdId_.clear();
+                pendingCloseClOrdIds_.erase(*info.clOrdId);
+                basketCloseFailed_ = true;
+                log("[basket] CRITICAL: a closing trade was rejected (ClOrdID=" + *info.clOrdId +
+                    ") -- position is still open at the broker; next cycle will NOT start automatically. "
+                    "Close it manually, then restart the bot.");
                 return;
             }
 
@@ -334,16 +347,17 @@ void LiveRunner::maybeEmitTick() {
 
 void LiveRunner::maybeRestartAfterBasketClose() {
     // Keep the strategy running continuously: once a basket closes (profit
-    // target hit) AND its real position is confirmed flat at the broker
-    // (basketClosePending_ cleared -- see the ExecutionReport::Trade
-    // handling in onTradeMessage), start the next cycle rather than sitting
-    // idle. With seedOffsetPoints>0 this re-seeds around the tick that just
-    // triggered the close (see armInitialOrders' comment on lastTick_), so
-    // each new cycle re-anchors to live price instead of drifting away from
-    // a now-closed cycle's range. Never starts a new cycle while
-    // basketClosePending_ is true -- that would open a fresh range on top
-    // of a position that hasn't actually been booked yet.
-    if (engine_->status() == EngineStatus::Completed && !basketClosePending_) {
+    // target hit) AND every leg of its real position is confirmed flat at
+    // the broker (pendingCloseClOrdIds_ empty -- see the
+    // ExecutionReport::Trade handling in onTradeMessage), start the next
+    // cycle rather than sitting idle. With seedOffsetPoints>0 this re-seeds
+    // around the tick that just triggered the close (see armInitialOrders'
+    // comment on lastTick_), so each new cycle re-anchors to live price
+    // instead of drifting away from a now-closed cycle's range. Never
+    // starts a new cycle while any closing leg is still outstanding, or
+    // once basketCloseFailed_ is set -- either would open a fresh range on
+    // top of a position that hasn't actually been booked yet.
+    if (engine_->status() == EngineStatus::Completed && pendingCloseClOrdIds_.empty() && !basketCloseFailed_) {
         log("basket closed; starting the next cycle");
         for (const auto& cmd : engine_->restart()) handleCommand(cmd);
     }
@@ -392,27 +406,35 @@ void LiveRunner::handleCommand(const Command& cmd) {
         oss << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
             << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")";
         log(oss.str());
+        placedOrderInfo_[place->id] = OpenLeg{place->side, place->volume};
         tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
         log("[order] cancelling OrigClOrdID=" + std::to_string(cancel->id));
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(cancel->id)));
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
-        log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney));
-        if (close->closeVolume.steps > 0) {
-            // closeSide is the net EXPOSURE side (BuyStop = net long); the
-            // trade that flattens it is the opposite direction.
-            const int side = (close->closeSide == OrderSide::BuyStop) ? 2 : 1;
-            const double lots = close->closeVolume.toDouble(config_.strategy.symbol);
-            const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
-            const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
-            log("[basket] flattening net position: side=" + std::to_string(side) + " lots=" +
-                std::to_string(lots) + " (ClOrdID=" + closeClOrdId + ")");
-            basketClosePending_ = true;
-            pendingCloseClOrdId_ = closeClOrdId;
-            tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
-        } else {
+        log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney) + ", " +
+            std::to_string(openLegs_.size()) + " leg(s) to flatten");
+        if (openLegs_.empty()) {
             log("[basket] already flat -- nothing to close");
+        } else {
+            // Close every filled leg individually, each with its own
+            // opposite-direction Market order sized to exactly that leg's
+            // volume -- see openLegs_'s comment on why a single net-sized
+            // order isn't enough on a hedging-enabled account (this demo
+            // account is one: cTrader kept several same-symbol fills as
+            // separate positions even when their net exposure was zero).
+            for (const auto& leg : openLegs_) {
+                const int side = (leg.side == OrderSide::BuyStop) ? 2 : 1;  // opposite of the open leg
+                const double lots = leg.volume.toDouble(config_.strategy.symbol);
+                const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
+                const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
+                log("[basket] flattening leg: side=" + std::to_string(side) + " lots=" + std::to_string(lots) +
+                    " (ClOrdID=" + closeClOrdId + ")");
+                pendingCloseClOrdIds_.insert(closeClOrdId);
+                tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
+            }
+            openLegs_.clear();
         }
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +

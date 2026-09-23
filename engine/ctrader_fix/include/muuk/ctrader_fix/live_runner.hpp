@@ -7,6 +7,9 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "muuk/core/strategy_engine.hpp"
 #include "muuk/ctrader_fix/fix_session.hpp"
@@ -95,14 +98,14 @@ private:
     void maybeEmitTick();  // caller must hold engineMutex_; no-op if engine_ isn't constructed yet
 
     // Starts the next cycle (engine_->restart()) only when the engine has
-    // actually completed a basket AND that basket's real position has
-    // either been fully flattened at the broker (basketClosePending_ is
-    // false again, cleared once the closing trade's fill confirms) or
-    // never needed flattening in the first place (closeVolume was 0). This
-    // is what stops a new range/basket from opening while the previous
-    // one's P/L is still un-booked at the broker -- see the
-    // CloseBasketCommand handling in handleCommand(). Caller must hold
-    // engineMutex_.
+    // actually completed a basket AND every leg of that basket's real
+    // position has been individually flattened at the broker
+    // (pendingCloseClOrdIds_ empty again -- see the CloseBasketCommand
+    // handling in handleCommand()) or never needed flattening in the first
+    // place (openLegs_ was empty). This is what stops a new range/basket
+    // from opening while the previous one's P/L is still un-booked at the
+    // broker. Never restarts once basketCloseFailed_ is set -- see its
+    // comment. Caller must hold engineMutex_.
     void maybeRestartAfterBasketClose();
 
     // Blocks until the first live bid+ask arrives, then centers
@@ -141,11 +144,42 @@ private:
 
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<uint64_t> nextCloseReqId_{1};
-    // Set while a basket-close market order (see CloseBasketCommand) has
-    // been sent but its fill hasn't been confirmed by the broker yet.
-    // Blocks the next cycle from starting -- see maybeRestartAfterBasketClose().
-    bool basketClosePending_ = false;
-    std::string pendingCloseClOrdId_;
+
+    // Per-leg position tracking. engine/core deliberately only keeps a
+    // running (side, volume) *aggregate* per side (see SideAggregate in
+    // strategy_engine.cpp) -- fixed-size by design, not a list of
+    // individual fills. That's fine for its own P/L math, but it means a
+    // live driver can't rely on the engine to know *how many separate
+    // broker positions* are open, only the net exposure. That distinction
+    // matters here: on a hedging-enabled account (this demo account is
+    // one -- cTrader keeps every fill as its own position rather than
+    // merging same-symbol exposure), a single net-sized closing order does
+    // NOT close out several smaller same-symbol positions, even when their
+    // net volume is zero (equal Buy and Sell fills can leave the net
+    // exposure at 0 while every individual position is still open and
+    // un-booked). So LiveRunner tracks each real fill as its own leg here
+    // and closes every leg individually on CloseBasketCommand, instead of
+    // trusting CloseBasketCommand's own closeSide/closeVolume (which is
+    // still correct as the *net* figure, just not sufficient on its own
+    // for a hedging account).
+    struct OpenLeg {
+        muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
+        muuk::core::Volume volume;
+    };
+    // side/volume for an order LiveRunner has placed but that hasn't
+    // filled (or been cancelled) yet -- moved into openLegs_ on fill.
+    std::unordered_map<muuk::core::OrderId, OpenLeg> placedOrderInfo_;
+    std::vector<OpenLeg> openLegs_;
+
+    // ClOrdIDs of the individual closing Market orders sent for the
+    // current basket close, still awaiting a fill confirmation.
+    std::unordered_set<std::string> pendingCloseClOrdIds_;
+    // True once any closing leg has been rejected by the broker: the
+    // position may be only partially flattened, so auto-restart is
+    // permanently disabled (operator must intervene) rather than risk
+    // piling a new basket on top of leftover exposure. Cleared only by
+    // constructing a fresh LiveRunner.
+    bool basketCloseFailed_ = false;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};
