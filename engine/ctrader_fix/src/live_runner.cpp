@@ -57,62 +57,91 @@ LiveSnapshot LiveRunner::snapshot() const {
 }
 
 void LiveRunner::stop() {
+    // run() calls this itself on the way out (both on a clean stop and on
+    // a startup failure), and a caller can also call it directly at any
+    // time (e.g. a disconnect handler setting running_=false races with
+    // an operator clicking Stop). Only the first caller tears the
+    // sessions down; everyone else waits for that to finish instead of
+    // racing on the same FixSession objects (concurrent stop() calls on
+    // the same session used to be a real, intermittent crash here).
+    if (stopping_.exchange(true)) {
+        std::unique_lock lock(stopMutex_);
+        stopCv_.wait(lock, [this] { return stopped_; });
+        return;
+    }
+
     running_ = false;
     if (tradeSession_) tradeSession_->stop();
     if (quoteSession_) quoteSession_->stop();
+
+    {
+        std::scoped_lock lock(stopMutex_);
+        stopped_ = true;
+    }
+    stopCv_.notify_all();
 }
 
 void LiveRunner::run() {
     running_ = true;
 
-    FixCredentials quoteCreds;
-    quoteCreds.senderCompId = config_.connection.senderCompId();
-    quoteCreds.targetCompId = config_.connection.targetCompId;
-    quoteCreds.targetSubId = "QUOTE";
-    quoteCreds.senderSubId = "QUOTE";
-    quoteCreds.username = config_.connection.traderLogin;
-    quoteCreds.password = config_.connection.password;
-    quoteCreds.heartBtIntSeconds = config_.connection.heartBtIntSeconds;
+    try {
+        FixCredentials quoteCreds;
+        quoteCreds.senderCompId = config_.connection.senderCompId();
+        quoteCreds.targetCompId = config_.connection.targetCompId;
+        quoteCreds.targetSubId = "QUOTE";
+        quoteCreds.senderSubId = "QUOTE";
+        quoteCreds.username = config_.connection.traderLogin;
+        quoteCreds.password = config_.connection.password;
+        quoteCreds.heartBtIntSeconds = config_.connection.heartBtIntSeconds;
 
-    FixCredentials tradeCreds = quoteCreds;
-    tradeCreds.targetSubId = "TRADE";
-    tradeCreds.senderSubId = "TRADE";
+        FixCredentials tradeCreds = quoteCreds;
+        tradeCreds.targetSubId = "TRADE";
+        tradeCreds.senderSubId = "TRADE";
 
-    quoteSession_ = std::make_unique<FixSession>(config_.connection.quote.host, config_.connection.quote.port,
-                                                  quoteCreds, [this](const FixMessage& m) { onQuoteMessage(m); });
-    tradeSession_ = std::make_unique<FixSession>(config_.connection.trade.host, config_.connection.trade.port,
-                                                  tradeCreds, [this](const FixMessage& m) { onTradeMessage(m); });
+        quoteSession_ = std::make_unique<FixSession>(config_.connection.quote.host, config_.connection.quote.port,
+                                                       quoteCreds,
+                                                       [this](const FixMessage& m) { onQuoteMessage(m); });
+        tradeSession_ = std::make_unique<FixSession>(config_.connection.trade.host, config_.connection.trade.port,
+                                                       tradeCreds,
+                                                       [this](const FixMessage& m) { onTradeMessage(m); });
 
-    quoteSession_->setDisconnectHandler([this](const std::string& reason) {
-        log("[quote session] ended: " + reason);
-        running_ = false;
-    });
-    tradeSession_->setDisconnectHandler([this](const std::string& reason) {
-        log("[trade session] ended: " + reason);
-        running_ = false;
-    });
+        quoteSession_->setDisconnectHandler([this](const std::string& reason) {
+            log("[quote session] ended: " + reason);
+            running_ = false;
+        });
+        tradeSession_->setDisconnectHandler([this](const std::string& reason) {
+            log("[trade session] ended: " + reason);
+            running_ = false;
+        });
 
-    tradeSession_->start();
-    quoteSession_->start();
-    log("logged on to both Quote and Trade sessions");
+        tradeSession_->start();
+        quoteSession_->start();
+        log("logged on to both Quote and Trade sessions");
 
-    resolveSymbol();
-    log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
+        resolveSymbol();
+        log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
 
-    {
-        std::scoped_lock lock(engineMutex_);
-        for (const auto& cmd : engine_.start()) handleCommand(cmd);
+        {
+            std::scoped_lock lock(engineMutex_);
+            for (const auto& cmd : engine_.start()) handleCommand(cmd);
+        }
+
+        quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
+        log("subscribed to quotes; engine is now active");
+
+        while (running_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    } catch (...) {
+        // Ensure both sessions are always torn down before an exception
+        // propagates — otherwise a caller that catches it (rather than
+        // letting it destroy this LiveRunner) would leave whichever
+        // sessions did start still connected in the background.
+        stop();
+        throw;
     }
 
-    quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
-    log("subscribed to quotes; engine is now active");
-
-    while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-
-    if (tradeSession_) tradeSession_->stop();
-    if (quoteSession_) quoteSession_->stop();
+    stop();
 }
 
 void LiveRunner::resolveSymbol() {

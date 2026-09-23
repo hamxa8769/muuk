@@ -71,12 +71,18 @@ public:
     // Connects both sessions, resolves the symbol, arms the engine's
     // initial orders, subscribes to quotes, and then blocks (processing
     // happens on the sessions' own reader threads) until stop() is called
-    // or a session disconnects. Throws on any startup failure (resolve/
-    // connect/logon/symbol-not-found).
+    // or a session disconnects. Always tears both sessions down via
+    // stop() before returning/throwing — including on a startup failure
+    // (resolve/connect/logon/symbol-not-found), so a caller that catches
+    // the exception is never left with sessions still connected in the
+    // background.
     void run();
 
-    // Thread-safe; can be called from a signal handler or another thread
-    // to end run()'s blocking wait and shut both sessions down cleanly.
+    // Thread-safe, and safe to call concurrently with run()'s own
+    // teardown (which also calls this) or from multiple threads at once —
+    // only the first caller actually tears the sessions down; the rest
+    // block until it's done rather than racing on the same FixSession
+    // objects (a prior version of this raced there intermittently).
     void stop();
 
 private:
@@ -105,6 +111,11 @@ private:
 
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<bool> running_{false};
+
+    std::atomic<bool> stopping_{false};
+    std::mutex stopMutex_;
+    std::condition_variable stopCv_;
+    bool stopped_ = false;
 
     LogHandler logHandler_;
 };
