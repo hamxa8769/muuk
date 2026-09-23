@@ -27,3 +27,9 @@ vcpkg/
 *.ilk
 *.exe
 *.log
+
+# Live broker credentials — NEVER commit real FIX API connection details.
+# Copy engine/ctrader_fix/config.example.json to one of these and fill in
+# real values; both patterns are ignored everywhere in the repo.
+*.local.json
+secrets/

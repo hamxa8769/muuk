@@ -1,0 +1,38 @@
+{
+  "connection": {
+    "host": "REPLACE_WITH_HOST_FROM_CTRADER_FIX_API_SETTINGS",
+    "port": "REPLACE_WITH_PORT_FROM_CTRADER_FIX_API_SETTINGS",
+    "environment": "demo",
+    "brokerUid": "REPLACE_WITH_YOUR_BROKER_UID",
+    "traderLogin": "REPLACE_WITH_YOUR_NUMERIC_TRADER_LOGIN",
+    "password": "REPLACE_WITH_YOUR_FIX_API_PASSWORD",
+    "heartBtIntSeconds": 30,
+    "symbolName": "XAUUSD"
+  },
+  "strategy": {
+    "symbol": {
+      "name": "XAUUSD",
+      "digits": 2,
+      "tickSize": 0.01,
+      "tickValue": 1.0,
+      "contractSize": 100.0,
+      "volumeStep": 0.01,
+      "volumeMin": 0.01,
+      "volumeMax": 100.0
+    },
+    "range": { "lower": 4336.00, "upper": 4337.00 },
+    "lotProgression": { "initialLot": 0.01, "lotIncrement": 0.01 },
+    "riskLimits": {
+      "maxOrders": 20,
+      "maxLot": 1.0,
+      "maxBasketLossMoney": 500.0,
+      "maxDrawdownMoney": 1000.0,
+      "maxMarginUsageFraction": 0.0,
+      "maxSpreadTicks": 50,
+      "maxSlippageTicks": 20
+    },
+    "costs": { "commissionPerLotRoundTurn": 0.0, "slippageBufferTicks": 0.0 },
+    "basketProfitTargetMoney": 5.0,
+    "maxRejectRetries": 3
+  }
+}

@@ -12,7 +12,7 @@ target_link_libraries(muuk_backtester PUBLIC muuk_core)
 target_compile_features(muuk_backtester PUBLIC cxx_std_20)
 
 add_executable(muuk-backtest cli/main.cpp)
-target_link_libraries(muuk-backtest PRIVATE muuk_backtester nlohmann_json::nlohmann_json)
+target_link_libraries(muuk-backtest PRIVATE muuk_backtester muuk_config_json nlohmann_json::nlohmann_json)
 
 if(MUUK_BUILD_TESTS)
     add_executable(muuk_backtester_tests

@@ -2,11 +2,11 @@
 
 Ultra-fast XAUUSD pending-order strategy engine. See
 `XAUUSD_Trading_Investment_Platform_Proposal.pdf` for the full product
-vision; this repo currently implements **Phase 1** of that proposal's
-roadmap (§20): the mathematical strategy engine (`engine/core`) and a
-tick-data backtester (`engine/backtester`) that drives it. Broker
-connectivity, the web platform, and everything else described in the
-proposal come in later phases.
+vision. This repo currently implements the proposal's roadmap (§20)
+Phase 1 (the mathematical strategy engine, `engine/core`, and a tick-data
+backtester, `engine/backtester`) and Phase 3 live demo execution
+(`engine/ctrader_fix`, a FIX API client for IC Markets/cTrader). The web
+platform and everything else described in the proposal come later.
 
 Read `docs/architecture.md` first — it explains the event-driven design
 that keeps the core engine allocation-free and identically testable in
@@ -64,6 +64,26 @@ See `docs/data-format.md` for the tick CSV schema and how to point this at
 real exported broker data, and the strategy config JSON fields (symbol
 spec, range, lot progression, risk limits, costs).
 
+## Run live demo trading (IC Markets / cTrader FIX API)
+
+1. Get FIX API credentials for a **demo** account from the cTrader
+   platform: Settings → FIX API. See `docs/ctrader-fix.md` for what each
+   field means.
+2. Copy `engine/ctrader_fix/config.example.json` to a **local, gitignored**
+   file (e.g. `my_ic_markets_demo.local.json` — the `*.local.json` pattern
+   is already in `.gitignore`) and fill in your real host/port/BrokerUID/
+   trader login/password. **Never commit this file.**
+3. Run:
+   ```
+   build\engine\ctrader_fix\Release\muuk-live.exe --credentials my_ic_markets_demo.local.json
+   ```
+
+This connects both the Quote and Trade FIX sessions, resolves the
+configured symbol to the broker's numeric id, arms the strategy's initial
+pending orders, and streams live quotes into the same `StrategyEngine`
+used by the backtester — see `docs/ctrader-fix.md` for the wire-protocol
+details and current known limitations (no TLS yet, demo/plain-TCP only).
+
 ## Layout
 
 ```
@@ -71,5 +91,8 @@ engine/core/         strategy state machine — pure logic, no I/O, no heap
                       allocation in the decision path
 engine/backtester/    historical tick replay: CSV loader, fill simulator,
                       stats aggregation, CLI
-docs/                 architecture notes and the backtester's data format
+engine/ctrader_fix/   live demo trading via IC Markets' cTrader FIX API
+engine/config_json/   shared JSON parsing for StrategyConfig (used by both
+                       the backtester and ctrader_fix CLIs)
+docs/                 architecture notes, backtester data format, FIX notes
 ```

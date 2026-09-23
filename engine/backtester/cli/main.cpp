@@ -6,6 +6,7 @@
 
 #include "muuk/backtester/backtest_runner.hpp"
 #include "muuk/backtester/tick_data_source.hpp"
+#include "muuk/config_json/strategy_config_json.hpp"
 
 using namespace muuk::core;
 using namespace muuk::backtester;
@@ -13,60 +14,9 @@ using json = nlohmann::json;
 
 namespace {
 
-SymbolSpec parseSymbolSpec(const json& j) {
-    SymbolSpec spec;
-    spec.name = j.value("name", spec.name);
-    spec.digits = j.value("digits", spec.digits);
-    spec.tickSize = j.value("tickSize", spec.tickSize);
-    spec.tickValue = j.value("tickValue", spec.tickValue);
-    spec.contractSize = j.value("contractSize", spec.contractSize);
-    spec.volumeStep = j.value("volumeStep", spec.volumeStep);
-    spec.volumeMin = j.value("volumeMin", spec.volumeMin);
-    spec.volumeMax = j.value("volumeMax", spec.volumeMax);
-    return spec;
-}
-
 BacktestConfig parseBacktestConfig(const json& j) {
     BacktestConfig cfg;
-    const SymbolSpec spec = parseSymbolSpec(j.at("symbol"));
-    cfg.strategy.symbol = spec;
-
-    const auto& range = j.at("range");
-    cfg.strategy.range = RangeConfig{Price::fromDouble(range.at("lower").get<double>(), spec),
-                                      Price::fromDouble(range.at("upper").get<double>(), spec)};
-
-    const auto& lots = j.at("lotProgression");
-    cfg.strategy.lotProgression =
-        LotProgressionConfig{Volume::fromDouble(lots.at("initialLot").get<double>(), spec),
-                              Volume::fromDouble(lots.at("lotIncrement").get<double>(), spec)};
-
-    if (j.contains("riskLimits")) {
-        const auto& risk = j.at("riskLimits");
-        cfg.strategy.riskLimits.maxOrders = risk.value("maxOrders", cfg.strategy.riskLimits.maxOrders);
-        cfg.strategy.riskLimits.maxLot =
-            Volume::fromDouble(risk.value("maxLot", 100.0), spec);
-        cfg.strategy.riskLimits.maxBasketLossMoney =
-            risk.value("maxBasketLossMoney", cfg.strategy.riskLimits.maxBasketLossMoney);
-        cfg.strategy.riskLimits.maxDrawdownMoney =
-            risk.value("maxDrawdownMoney", cfg.strategy.riskLimits.maxDrawdownMoney);
-        cfg.strategy.riskLimits.maxMarginUsageFraction =
-            risk.value("maxMarginUsageFraction", cfg.strategy.riskLimits.maxMarginUsageFraction);
-        cfg.strategy.riskLimits.maxSpreadTicks =
-            risk.value("maxSpreadTicks", cfg.strategy.riskLimits.maxSpreadTicks);
-        cfg.strategy.riskLimits.maxSlippageTicks =
-            risk.value("maxSlippageTicks", cfg.strategy.riskLimits.maxSlippageTicks);
-    }
-
-    if (j.contains("costs")) {
-        const auto& costs = j.at("costs");
-        cfg.strategy.costs.commissionPerLotRoundTurn =
-            costs.value("commissionPerLotRoundTurn", cfg.strategy.costs.commissionPerLotRoundTurn);
-        cfg.strategy.costs.slippageBufferTicks =
-            costs.value("slippageBufferTicks", cfg.strategy.costs.slippageBufferTicks);
-    }
-
-    cfg.strategy.basketProfitTargetMoney = j.value("basketProfitTargetMoney", 0.0);
-    cfg.strategy.maxRejectRetries = j.value("maxRejectRetries", cfg.strategy.maxRejectRetries);
+    cfg.strategy = muuk::config_json::parseStrategyConfig(j);
 
     if (j.contains("fillSim")) {
         cfg.fillSim.slippageBufferTicks = j.at("fillSim").value("slippageBufferTicks", 0.0);
