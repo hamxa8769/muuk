@@ -58,6 +58,12 @@ struct SecurityListEntry {
 [[nodiscard]] FixMessage buildNewOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
                                               double orderQty, double stopPx);
 
+// A Market order (OrdType=1) — used only to flatten a basket's net open
+// exposure once it closes (LiveRunner::handleCommand on CloseBasketCommand);
+// the strategy's own entries are always the Stop orders above.
+[[nodiscard]] FixMessage buildMarketOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
+                                                 double orderQty);
+
 [[nodiscard]] FixMessage buildOrderCancelRequest(const std::string& clOrdId, const std::string& origClOrdId,
                                                   std::optional<std::string> orderId = std::nullopt);
 

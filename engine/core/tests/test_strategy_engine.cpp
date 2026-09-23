@@ -193,7 +193,13 @@ TEST_CASE("basket closes and cancels remaining orders once the profit target is 
     for (const auto& cmd : closeOut) {
         if (std::holds_alternative<CloseBasketCommand>(cmd)) {
             sawClose = true;
-            REQUIRE(std::get<CloseBasketCommand>(cmd).netPnlMoney >= cfg.basketProfitTargetMoney);
+            const auto& close = std::get<CloseBasketCommand>(cmd);
+            REQUIRE(close.netPnlMoney >= cfg.basketProfitTargetMoney);
+            // Only seq1 (Buy Stop, 0.01 lot) ever filled -> net long 0.01,
+            // so the caller needs a closing Sell of that size (closeSide
+            // reports the net *exposure* side being closed, i.e. BuyStop).
+            REQUIRE(close.closeSide == OrderSide::BuyStop);
+            REQUIRE(close.closeVolume.toDouble(spec) == Catch::Approx(0.01));
         } else if (std::holds_alternative<CancelOrderCommand>(cmd)) {
             ++cancelCount;
         }

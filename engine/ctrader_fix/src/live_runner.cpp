@@ -202,6 +202,19 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         const ExecutionReportInfo info = parseExecutionReport(msg);
 
         if (info.execType == ExecType::Trade) {
+            // The basket-close market order isn't tracked by the engine (it
+            // has no corresponding PendingOrder) -- it's matched by ClOrdID
+            // here instead, and its fill is what's allowed to unblock the
+            // next cycle. See maybeRestartAfterBasketClose().
+            if (info.clOrdId && !pendingCloseClOrdId_.empty() && *info.clOrdId == pendingCloseClOrdId_) {
+                std::scoped_lock lock(engineMutex_);
+                log("[basket] closing trade filled -- position flat, next cycle may now start");
+                basketClosePending_ = false;
+                pendingCloseClOrdId_.clear();
+                if (engine_) maybeRestartAfterBasketClose();
+                return;
+            }
+
             const auto orderId = tryParseOrderId(info.clOrdId);
             if (!orderId || !info.avgPx) {
                 log("[trade] ignoring unmatched/incomplete fill report (ClOrdID=" + info.clOrdId.value_or("?") +
@@ -218,9 +231,26 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         }
 
         if (info.execType == ExecType::Rejected) {
-            const auto orderId = tryParseOrderId(info.clOrdId);
             log("[trade] order rejected (ClOrdID=" + info.clOrdId.value_or("?") +
                 "): " + info.text.value_or("no reason given"));
+
+            if (info.clOrdId && !pendingCloseClOrdId_.empty() && *info.clOrdId == pendingCloseClOrdId_) {
+                // The closing trade itself was rejected: the position is
+                // still open at the broker. Clear the flag so the bot
+                // doesn't hang forever waiting for a fill that will never
+                // come, but do NOT start a new cycle -- that would pile a
+                // fresh basket on top of an unflattened one, exactly the
+                // bug this mechanism exists to prevent. Needs operator
+                // attention (close the leftover position manually).
+                std::scoped_lock lock(engineMutex_);
+                log("[basket] CRITICAL: closing trade was rejected -- position is still open at the broker; "
+                    "next cycle will NOT start automatically. Close it manually, then restart the bot.");
+                basketClosePending_ = false;
+                pendingCloseClOrdId_.clear();
+                return;
+            }
+
+            const auto orderId = tryParseOrderId(info.clOrdId);
             if (!orderId) return;
             std::scoped_lock lock(engineMutex_);
             if (!engine_) return;
@@ -299,14 +329,21 @@ void LiveRunner::maybeEmitTick() {
     const TickEvent tick{Price::fromDouble(*latestBid_, config_.strategy.symbol),
                           Price::fromDouble(*latestAsk_, config_.strategy.symbol)};
     for (const auto& cmd : engine_->onTick(tick)) handleCommand(cmd);
+    maybeRestartAfterBasketClose();
+}
 
+void LiveRunner::maybeRestartAfterBasketClose() {
     // Keep the strategy running continuously: once a basket closes (profit
-    // target hit), immediately start the next cycle rather than sitting
-    // idle. With seedOffsetPoints>0 this re-seeds around the tick that
-    // just triggered the close (see armInitialOrders' comment on
-    // lastTick_), so each new cycle re-anchors to live price instead of
-    // drifting away from a now-closed cycle's range.
-    if (engine_->status() == EngineStatus::Completed) {
+    // target hit) AND its real position is confirmed flat at the broker
+    // (basketClosePending_ cleared -- see the ExecutionReport::Trade
+    // handling in onTradeMessage), start the next cycle rather than sitting
+    // idle. With seedOffsetPoints>0 this re-seeds around the tick that just
+    // triggered the close (see armInitialOrders' comment on lastTick_), so
+    // each new cycle re-anchors to live price instead of drifting away from
+    // a now-closed cycle's range. Never starts a new cycle while
+    // basketClosePending_ is true -- that would open a fresh range on top
+    // of a position that hasn't actually been booked yet.
+    if (engine_->status() == EngineStatus::Completed && !basketClosePending_) {
         log("basket closed; starting the next cycle");
         for (const auto& cmd : engine_->restart()) handleCommand(cmd);
     }
@@ -361,7 +398,22 @@ void LiveRunner::handleCommand(const Command& cmd) {
         log("[order] cancelling OrigClOrdID=" + std::to_string(cancel->id));
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(cancel->id)));
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
-        log("[basket] closed, net P/L = " + std::to_string(close->netPnlMoney));
+        log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney));
+        if (close->closeVolume.steps > 0) {
+            // closeSide is the net EXPOSURE side (BuyStop = net long); the
+            // trade that flattens it is the opposite direction.
+            const int side = (close->closeSide == OrderSide::BuyStop) ? 2 : 1;
+            const double lots = close->closeVolume.toDouble(config_.strategy.symbol);
+            const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
+            const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
+            log("[basket] flattening net position: side=" + std::to_string(side) + " lots=" +
+                std::to_string(lots) + " (ClOrdID=" + closeClOrdId + ")");
+            basketClosePending_ = true;
+            pendingCloseClOrdId_ = closeClOrdId;
+            tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
+        } else {
+            log("[basket] already flat -- nothing to close");
+        }
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
             ") — no further orders will be armed this cycle");

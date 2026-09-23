@@ -154,7 +154,10 @@ CommandBatch StrategyEngine::onTick(const TickEvent& tick) {
     const bool haveOpenExposure = (buyAggregate_.totalVolumeSteps + sellAggregate_.totalVolumeSteps) > 0;
     if (haveOpenExposure && config_.basketProfitTargetMoney > 0.0 &&
         lastBasketPnl_.netPnlMoney >= config_.basketProfitTargetMoney) {
-        out.push_back(CloseBasketCommand{lastBasketPnl_.netPnlMoney});
+        const int64_t netSteps = buyAggregate_.totalVolumeSteps - sellAggregate_.totalVolumeSteps;
+        const OrderSide closeSide = netSteps >= 0 ? OrderSide::BuyStop : OrderSide::SellStop;
+        const Volume closeVolume{netSteps >= 0 ? netSteps : -netSteps};
+        out.push_back(CloseBasketCommand{lastBasketPnl_.netPnlMoney, closeSide, closeVolume});
         for (const auto& armed : pendingOrders_) {
             out.push_back(CancelOrderCommand{armed.order.id});
         }

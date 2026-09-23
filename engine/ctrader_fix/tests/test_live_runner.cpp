@@ -194,6 +194,116 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     if (runnerException) std::rethrow_exception(runnerException);
 }
 
+TEST_CASE("LiveRunner flattens the net position with a market order on basket close, "
+          "and only starts the next cycle once that fill is confirmed") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 1.0;  // low bar, cleared by the rally below
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    // --- Cycle 1's initial two boundary orders ---
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    REQUIRE(order1.getInt(tag::Side) == 1);
+    REQUIRE(order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+
+    const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    REQUIRE(order2.getInt(tag::Side) == 2);
+
+    // --- Buy Stop fills; only a long 0.01-lot leg is open. ---
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().activeOrderCount == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().activeOrderCount == 1);
+
+    // --- Price rallies well past the profit target -> basket closes. The
+    // engine cancels order2 (OrderCancelRequest, not a NewOrderSingle) and
+    // emits CloseBasketCommand; LiveRunner must respond with an actual
+    // Market order (OrdType=1) to flatten the 0.01-lot long, not just log
+    // it and move on. ---
+    FixMessage rally = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    rally.set(tag::Symbol, std::string("1"));
+    rally.set(tag::NoMDEntries, int64_t{2});
+    rally.set(tag::MDEntryType, std::string("0"));
+    rally.set(tag::MDEntryPx, std::string("4341.99"));
+    rally.set(tag::MDEntryType, std::string("1"));
+    rally.set(tag::MDEntryPx, std::string("4342.01"));
+    server.sendToClient(kQuoteConn, rally);
+
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder.getInt(tag::OrdType) == 1);  // Market, not Stop
+    REQUIRE(closeOrder.getInt(tag::Side) == 2);      // net long -> flatten with a Sell
+    REQUIRE(closeOrder.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    const std::string closeClOrdId = closeOrder.getString(tag::ClOrdID);
+
+    // The basket is closed and the range is flat at the broker, but the
+    // next cycle must NOT have started yet: no new boundary order should
+    // exist until the closing trade itself is confirmed filled.
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().status == EngineStatus::Completed) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().status == EngineStatus::Completed);
+    REQUIRE(runner.snapshot().activeOrderCount == 0);
+
+    // --- Now confirm the closing trade's fill. Only this unblocks cycle 2. ---
+    FixMessage closeFill = serverHeaderMessage(msgtype::ExecutionReport, 4);
+    closeFill.set(tag::OrderID, std::string("9002"));
+    closeFill.set(tag::ClOrdID, closeClOrdId);
+    closeFill.set(tag::ExecType, std::string("F"));
+    closeFill.set(tag::OrdStatus, std::string("2"));
+    closeFill.set(tag::AvgPx, std::string("4342.00"));
+    closeFill.set(tag::LastQty, std::string("0.01"));
+    closeFill.set(tag::CumQty, std::string("0.01"));
+    closeFill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, closeFill);
+
+    const FixMessage cycle2Order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(cycle2Order1.getInt(tag::OrdType) == 3);  // Stop -- back to normal strategy entries
+    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().status == EngineStatus::Active) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().status == EngineStatus::Active);
+    REQUIRE(runner.snapshot().activeOrderCount == 2);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
 TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogHandler") {
     MockFixServer server;
     LiveRunner runner(testConfig(server));

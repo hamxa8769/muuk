@@ -94,6 +94,17 @@ private:
     void resolveSymbol();
     void maybeEmitTick();  // caller must hold engineMutex_; no-op if engine_ isn't constructed yet
 
+    // Starts the next cycle (engine_->restart()) only when the engine has
+    // actually completed a basket AND that basket's real position has
+    // either been fully flattened at the broker (basketClosePending_ is
+    // false again, cleared once the closing trade's fill confirms) or
+    // never needed flattening in the first place (closeVolume was 0). This
+    // is what stops a new range/basket from opening while the previous
+    // one's P/L is still un-booked at the broker -- see the
+    // CloseBasketCommand handling in handleCommand(). Caller must hold
+    // engineMutex_.
+    void maybeRestartAfterBasketClose();
+
     // Blocks until the first live bid+ask arrives, then centers
     // config_.strategy.range around its midpoint using
     // connection.autoRangeWidthPoints. Only called when that width is >0.
@@ -129,6 +140,12 @@ private:
     bool firstQuoteReceived_ = false;
 
     std::atomic<uint64_t> nextCancelReqId_{1};
+    std::atomic<uint64_t> nextCloseReqId_{1};
+    // Set while a basket-close market order (see CloseBasketCommand) has
+    // been sent but its fill hasn't been confirmed by the broker yet.
+    // Blocks the next cycle from starting -- see maybeRestartAfterBasketClose().
+    bool basketClosePending_ = false;
+    std::string pendingCloseClOrdId_;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};

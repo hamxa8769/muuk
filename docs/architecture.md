@@ -83,8 +83,24 @@ range. Only `range`'s midpoint is used before the very first tick ever
 (the caller — e.g. a live driver — is expected to have set it from
 whatever it knew at construction time).
 - On every `onTick`, the basket's net P/L is re-evaluated; once it reaches
-  `basketProfitTargetMoney` the basket is closed and all remaining pending
-  orders are cancelled (proposal §6).
+  `basketProfitTargetMoney` the basket is closed: all remaining pending
+  orders are cancelled and a `CloseBasketCommand` is emitted carrying the
+  net open exposure (`closeSide`/`closeVolume`, derived from the running
+  buy/sell fill aggregates) that still needs to be flattened at the broker
+  (proposal §6). `engine/core` itself never sends a live closing trade —
+  it has no I/O — so this is purely data for the driver to act on.
+  `LiveRunner::handleCommand` turns it into an actual Market order
+  (`OrdType=1`) and does **not** call `restart()` until that order's fill
+  is confirmed back (matched by `ClOrdID`, tracked via
+  `basketClosePending_`); only then does the next cycle start. Skipping
+  this wait was a real bug: `restart()` used to run immediately on
+  `EngineStatus::Completed`, so a new range/basket would start seeding
+  while the previous cycle's real position was still open at the broker
+  — cancelling *pending* orders is not the same as *closing filled ones*,
+  and nothing was doing the latter. `BacktestRunner` doesn't need any of
+  this: its "position" is just the engine's own P/L aggregates, which
+  `resetCycleState()` already clears on the next `start()`/`restart()`,
+  so there's nothing external left to flatten.
 - Before any new order is armed, the risk engine checks it against
   `RiskLimits`. A breach emits a `RiskAlertCommand` and halts further order
   creation (`EngineStatus::HaltedByRisk`) — proposal §8.

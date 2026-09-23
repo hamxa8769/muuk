@@ -115,6 +115,18 @@ FixMessage buildNewOrderSingle(const std::string& clOrdId, const std::string& sy
     return msg;
 }
 
+FixMessage buildMarketOrderSingle(const std::string& clOrdId, const std::string& symbolId, int side,
+                                   double orderQty) {
+    FixMessage msg(msgtype::NewOrderSingle);
+    msg.set(tag::ClOrdID, clOrdId);
+    msg.set(tag::Symbol, symbolId);
+    msg.set(tag::Side, int64_t{side});
+    msg.set(tag::TransactTime, nowUtcTimestamp());
+    msg.set(tag::OrderQty, orderQty, 2);
+    msg.set(tag::OrdType, int64_t{1});  // Market
+    return msg;
+}
+
 FixMessage buildOrderCancelRequest(const std::string& clOrdId, const std::string& origClOrdId,
                                     std::optional<std::string> orderId) {
     FixMessage msg(msgtype::OrderCancelRequest);

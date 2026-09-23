@@ -53,6 +53,15 @@ struct CancelOrderCommand {
 
 struct CloseBasketCommand {
     double netPnlMoney = 0.0;
+    // The net open exposure being closed. A live driver needs this to send
+    // an actual closing trade at the broker -- BacktestRunner doesn't (its
+    // book is a pure internal accounting simulation, not a real position).
+    // BuyStop here means a net long position (close it with a market
+    // Sell); SellStop means net short (close with a market Buy).
+    // closeVolume.steps == 0 means the basket was already flat (equal Buy/
+    // Sell fill volume) -- nothing to close.
+    OrderSide closeSide = OrderSide::BuyStop;
+    Volume closeVolume;
 };
 
 struct RiskAlertCommand {
