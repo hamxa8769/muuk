@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include <thread>
 
 #include "muuk/ctrader_fix/messages.hpp"
@@ -28,6 +29,32 @@ std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId
 LiveRunner::LiveRunner(LiveConfig config) : config_(std::move(config)), engine_(config_.strategy) {}
 
 LiveRunner::~LiveRunner() { stop(); }
+
+void LiveRunner::log(const std::string& line) const {
+    if (logHandler_) {
+        logHandler_(line);
+    } else {
+        std::cerr << line << "\n";
+    }
+}
+
+LiveSnapshot LiveRunner::snapshot() const {
+    LiveSnapshot snap;
+    snap.symbolName = config_.connection.symbolName;
+    snap.rangeLower = config_.strategy.range.lowerBound.toDouble(config_.strategy.symbol);
+    snap.rangeUpper = config_.strategy.range.upperBound.toDouble(config_.strategy.symbol);
+
+    std::scoped_lock lock(engineMutex_);
+    snap.status = engine_.status();
+    snap.symbolId = symbolId_;
+    snap.activeOrderCount = engine_.activeOrderCount();
+    const BasketPnlResult pnl = engine_.lastBasketPnl();
+    snap.lastGrossPnlMoney = pnl.grossPnlMoney;
+    snap.lastNetPnlMoney = pnl.netPnlMoney;
+    snap.bid = latestBid_;
+    snap.ask = latestAsk_;
+    return snap;
+}
 
 void LiveRunner::stop() {
     running_ = false;
@@ -57,20 +84,20 @@ void LiveRunner::run() {
                                                   tradeCreds, [this](const FixMessage& m) { onTradeMessage(m); });
 
     quoteSession_->setDisconnectHandler([this](const std::string& reason) {
-        std::cerr << "[quote session] ended: " << reason << "\n";
+        log("[quote session] ended: " + reason);
         running_ = false;
     });
     tradeSession_->setDisconnectHandler([this](const std::string& reason) {
-        std::cerr << "[trade session] ended: " << reason << "\n";
+        log("[trade session] ended: " + reason);
         running_ = false;
     });
 
     tradeSession_->start();
     quoteSession_->start();
-    std::cerr << "logged on to both Quote and Trade sessions\n";
+    log("logged on to both Quote and Trade sessions");
 
     resolveSymbol();
-    std::cerr << "resolved symbol '" << config_.connection.symbolName << "' -> id " << symbolId_ << "\n";
+    log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
 
     {
         std::scoped_lock lock(engineMutex_);
@@ -78,7 +105,7 @@ void LiveRunner::run() {
     }
 
     quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
-    std::cerr << "subscribed to quotes; engine is now active\n";
+    log("subscribed to quotes; engine is now active");
 
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -134,8 +161,8 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         if (info.execType == ExecType::Trade) {
             const auto orderId = tryParseOrderId(info.clOrdId);
             if (!orderId || !info.avgPx) {
-                std::cerr << "[trade] ignoring unmatched/incomplete fill report (ClOrdID="
-                          << info.clOrdId.value_or("?") << ")\n";
+                log("[trade] ignoring unmatched/incomplete fill report (ClOrdID=" + info.clOrdId.value_or("?") +
+                    ")");
                 return;
             }
             const Price fillPrice = Price::fromDouble(*info.avgPx, config_.strategy.symbol);
@@ -148,8 +175,8 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
 
         if (info.execType == ExecType::Rejected) {
             const auto orderId = tryParseOrderId(info.clOrdId);
-            std::cerr << "[trade] order rejected (ClOrdID=" << info.clOrdId.value_or("?")
-                       << "): " << info.text.value_or("no reason given") << "\n";
+            log("[trade] order rejected (ClOrdID=" + info.clOrdId.value_or("?") +
+                "): " + info.text.value_or("no reason given"));
             if (!orderId) return;
             std::scoped_lock lock(engineMutex_);
             for (const auto& cmd :
@@ -168,20 +195,21 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
 
     if (type == msgtype::OrderCancelReject) {
         const OrderCancelRejectInfo info = parseOrderCancelReject(msg);
-        std::cerr << "[trade] cancel request rejected (OrigClOrdID=" << info.origClOrdId.value_or("?")
-                   << "): " << info.text.value_or("no reason given") << "\n";
+        log("[trade] cancel request rejected (OrigClOrdID=" + info.origClOrdId.value_or("?") +
+            "): " + info.text.value_or("no reason given"));
         return;
     }
 
     if (type == msgtype::BusinessMessageReject) {
-        std::cerr << "[trade] BusinessMessageReject: refMsgType="
-                   << msg.getOptionalString(tag::RefMsgType).value_or("?")
-                   << " reason=" << msg.getOptionalString(tag::BusinessRejectReason).value_or("?")
-                   << " text=" << msg.getOptionalString(tag::Text).value_or("no reason given") << "\n";
+        std::ostringstream oss;
+        oss << "[trade] BusinessMessageReject: refMsgType=" << msg.getOptionalString(tag::RefMsgType).value_or("?")
+            << " reason=" << msg.getOptionalString(tag::BusinessRejectReason).value_or("?")
+            << " text=" << msg.getOptionalString(tag::Text).value_or("no reason given");
+        log(oss.str());
         return;
     }
 
-    std::cerr << "[trade] unhandled message type: " << type << "\n";
+    log("[trade] unhandled message type: " + type);
 }
 
 void LiveRunner::onQuoteMessage(const FixMessage& msg) {
@@ -202,12 +230,11 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
     }
 
     if (type == msgtype::MarketDataRequestReject) {
-        std::cerr << "[quote] market data subscription was rejected: "
-                   << msg.getOptionalString(tag::Text).value_or("no reason given") << "\n";
+        log("[quote] market data subscription was rejected: " + msg.getOptionalString(tag::Text).value_or("no reason given"));
         return;
     }
 
-    std::cerr << "[quote] unhandled message type: " << type << "\n";
+    log("[quote] unhandled message type: " + type);
 }
 
 void LiveRunner::maybeEmitTick() {
@@ -233,18 +260,20 @@ void LiveRunner::handleCommand(const Command& cmd) {
         // belongs here rather than in engine/core.
         const double qty = lots * 100.0;
         const double stopPx = place->price.toDouble(config_.strategy.symbol);
-        std::cerr << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
-                   << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")\n";
+        std::ostringstream oss;
+        oss << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
+            << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")";
+        log(oss.str());
         tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
-        std::cerr << "[order] cancelling OrigClOrdID=" << cancel->id << "\n";
+        log("[order] cancelling OrigClOrdID=" + std::to_string(cancel->id));
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(cancel->id)));
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
-        std::cerr << "[basket] closed, net P/L = " << close->netPnlMoney << "\n";
+        log("[basket] closed, net P/L = " + std::to_string(close->netPnlMoney));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
-        std::cerr << "[risk] ALERT: limit breached (kind=" << static_cast<int>(alert->kind)
-                   << ") — no further orders will be armed this cycle\n";
+        log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
+            ") — no further orders will be armed this cycle");
     }
 }
 

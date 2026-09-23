@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,23 @@
 #include "muuk/ctrader_fix/live_config.hpp"
 
 namespace muuk::ctrader_fix {
+
+// A point-in-time read of LiveRunner's state, for a UI (or anything else)
+// to poll without needing its own hooks into the engine internals. Built
+// from the same data onQuoteMessage/onTradeMessage already maintain, so
+// there's no separate state to keep in sync.
+struct LiveSnapshot {
+    muuk::core::EngineStatus status = muuk::core::EngineStatus::Idle;
+    std::string symbolName;
+    std::string symbolId;
+    double rangeLower = 0.0;
+    double rangeUpper = 0.0;
+    int activeOrderCount = 0;
+    double lastGrossPnlMoney = 0.0;
+    double lastNetPnlMoney = 0.0;
+    std::optional<double> bid;
+    std::optional<double> ask;
+};
 
 // The live counterpart to backtester::BacktestRunner
 // (engine/backtester/include/muuk/backtester/backtest_runner.hpp):
@@ -29,11 +47,26 @@ namespace muuk::ctrader_fix {
 // onOrderConfirmed/onOrderRejected).
 class LiveRunner {
 public:
+    using LogHandler = std::function<void(const std::string&)>;
+
     explicit LiveRunner(LiveConfig config);
     ~LiveRunner();
 
     LiveRunner(const LiveRunner&) = delete;
     LiveRunner& operator=(const LiveRunner&) = delete;
+
+    // Receives every status/order/error line this class would otherwise
+    // print to stderr (unchanged default when no handler is set — the CLI
+    // relies on that). May be called from any thread that calls into
+    // LiveRunner. Must be set before run() — like FixSession's
+    // setDisconnectHandler, it is read without synchronization once
+    // running.
+    void setLogHandler(LogHandler handler) { logHandler_ = std::move(handler); }
+
+    // Thread-safe point-in-time read of the current state, for a UI to
+    // poll. Safe to call from any thread, including while run() is active
+    // on another one.
+    [[nodiscard]] LiveSnapshot snapshot() const;
 
     // Connects both sessions, resolves the symbol, arms the engine's
     // initial orders, subscribes to quotes, and then blocks (processing
@@ -47,6 +80,8 @@ public:
     void stop();
 
 private:
+    void log(const std::string& line) const;
+
     void onQuoteMessage(const FixMessage& msg);
     void onTradeMessage(const FixMessage& msg);
     void handleCommand(const muuk::core::Command& cmd);  // caller must hold engineMutex_
@@ -59,7 +94,7 @@ private:
     std::unique_ptr<FixSession> quoteSession_;
     std::unique_ptr<FixSession> tradeSession_;
 
-    std::mutex engineMutex_;
+    mutable std::mutex engineMutex_;
     muuk::core::StrategyEngine engine_;
     std::optional<double> latestBid_;
     std::optional<double> latestAsk_;
@@ -70,6 +105,8 @@ private:
 
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<bool> running_{false};
+
+    LogHandler logHandler_;
 };
 
 }  // namespace muuk::ctrader_fix

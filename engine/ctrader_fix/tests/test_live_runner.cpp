@@ -1,5 +1,8 @@
+#include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -154,6 +157,59 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
     REQUIRE(order3.getDouble(tag::StopPx) == Catch::Approx(4337.00));
     REQUIRE(order3.getDouble(tag::OrderQty) == Catch::Approx(3.0));
     REQUIRE(order3.getString(tag::ClOrdID) != order1ClOrdId);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogHandler") {
+    MockFixServer server;
+    LiveRunner runner(testConfig(server));
+
+    std::mutex logMutex;
+    std::vector<std::string> logLines;
+    // Must be set before run() -- see setLogHandler's doc comment.
+    runner.setLogHandler([&](const std::string& line) {
+        std::scoped_lock lock(logMutex);
+        logLines.push_back(line);
+    });
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // seq1
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // seq2
+
+    const LiveSnapshot snap = runner.snapshot();
+    REQUIRE(snap.status == EngineStatus::Active);
+    REQUIRE(snap.activeOrderCount == 2);
+    REQUIRE(snap.symbolName == "XAUUSD");
+    REQUIRE(snap.symbolId == "1");
+    REQUIRE(snap.rangeLower == Catch::Approx(4336.00));
+    REQUIRE(snap.rangeUpper == Catch::Approx(4337.00));
+
+    {
+        std::scoped_lock lock(logMutex);
+        const bool sawLogonLine =
+            std::any_of(logLines.begin(), logLines.end(),
+                        [](const std::string& l) { return l.find("logged on") != std::string::npos; });
+        REQUIRE(sawLogonLine);
+    }
 
     runner.stop();
     runnerThread.join();
