@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MUUK_BUILD_TESTS "Build unit tests" ON)
 option(MUUK_BUILD_BENCHMARKS "Build micro-benchmarks" ON)
+option(MUUK_BUILD_DESKTOP_APP "Build the native desktop status/control app" ON)
 
 if(MSVC)
     add_compile_options(/W4 /permissive- /EHsc)
@@ -75,7 +76,51 @@ if(WIN32)
     target_link_libraries(asio INTERFACE ws2_32 mswsock)
 endif()
 
+# Dear ImGui + GLFW + OpenGL3: the native desktop status/control app
+# (app/desktop). GLFW ships its own proper CMake support; ImGui doesn't
+# (it's meant to be dropped straight into a consumer's own build), so a
+# small static-library target wraps its fetched sources here, the same
+# pattern already used for standalone Asio above.
+if(MUUK_BUILD_DESKTOP_APP)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG        3.4
+    )
+    FetchContent_MakeAvailable(glfw)
+
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.91.5
+    )
+    FetchContent_MakeAvailable(imgui)
+
+    add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    target_include_directories(imgui PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+endif()
+
 add_subdirectory(engine/core)
 add_subdirectory(engine/config_json)
 add_subdirectory(engine/backtester)
 add_subdirectory(engine/ctrader_fix)
+
+if(MUUK_BUILD_DESKTOP_APP)
+    add_subdirectory(app/desktop)
+endif()

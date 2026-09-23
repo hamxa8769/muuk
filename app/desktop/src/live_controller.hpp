@@ -1,0 +1,63 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "muuk/ctrader_fix/live_runner.hpp"
+
+namespace muuk::desktop {
+
+// Owns a muuk::ctrader_fix::LiveRunner on a background thread and exposes
+// thread-safe accessors for the render (GUI) thread to poll every frame:
+// the latest LiveSnapshot, a rolling log buffer, and any startup/runtime
+// error. This is the only place app/desktop touches engine/ctrader_fix —
+// DashboardWindow only ever talks to this class.
+class LiveController {
+public:
+    LiveController() = default;
+    ~LiveController();
+
+    LiveController(const LiveController&) = delete;
+    LiveController& operator=(const LiveController&) = delete;
+
+    // Loads the config at `path` and starts LiveRunner::run() on a
+    // background thread. No-op if already running. On a config load
+    // failure, records the message (readable via lastError()) and starts
+    // nothing.
+    void start(const std::string& configPath);
+
+    // Stops the running LiveRunner (if any) and joins its thread. Safe to
+    // call even if not running.
+    void stop();
+
+    [[nodiscard]] bool isRunning() const { return running_.load(); }
+    // Returns the last known state even after the runner has stopped
+    // (e.g. a dropped connection), so the UI can show what happened
+    // rather than blanking out. std::nullopt only before the first
+    // successful start().
+    [[nodiscard]] std::optional<muuk::ctrader_fix::LiveSnapshot> snapshot() const;
+    [[nodiscard]] std::vector<std::string> logLines() const;
+    [[nodiscard]] std::string lastError() const;
+
+private:
+    void appendLog(const std::string& line);
+
+    std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
+    std::thread thread_;
+    std::atomic<bool> running_{false};
+
+    mutable std::mutex logMutex_;
+    std::vector<std::string> log_;
+    static constexpr std::size_t kMaxLogLines = 500;
+
+    mutable std::mutex errorMutex_;
+    std::string lastError_;
+};
+
+}  // namespace muuk::desktop

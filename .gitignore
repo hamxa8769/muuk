@@ -28,6 +28,10 @@ vcpkg/
 *.exe
 *.log
 
+# Dear ImGui's per-user window-layout cache (app/desktop), written next to
+# wherever muuk-desktop.exe is run from.
+imgui.ini
+
 # Live broker credentials — NEVER commit real FIX API connection details.
 # Copy engine/ctrader_fix/config.example.json to one of these and fill in
 # real values; both patterns are ignored everywhere in the repo.

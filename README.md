@@ -84,6 +84,21 @@ pending orders, and streams live quotes into the same `StrategyEngine`
 used by the backtester — see `docs/ctrader-fix.md` for the wire-protocol
 details and current known limitations (no TLS yet, demo/plain-TCP only).
 
+## Run the native desktop app
+
+`app/desktop` (proposal §9, "Desktop Trading Application") is a live
+status/control panel over the same `LiveRunner` the CLI uses:
+
+```
+build\app\desktop\Release\muuk-desktop.exe
+```
+
+Paste the path to your local credentials file (same one as `muuk-live`,
+see above) into the "Credentials file" field and click **Start**. It shows
+symbol, strategy status, range, active order count, live bid/ask/spread,
+and basket gross/net P/L, plus a scrolling log of the same events
+`muuk-live` prints to stderr. **Stop** disconnects cleanly.
+
 ## Layout
 
 ```
@@ -94,5 +109,6 @@ engine/backtester/    historical tick replay: CSV loader, fill simulator,
 engine/ctrader_fix/   live demo trading via IC Markets' cTrader FIX API
 engine/config_json/   shared JSON parsing for StrategyConfig (used by both
                        the backtester and ctrader_fix CLIs)
+app/desktop/          native ImGui status/control panel over LiveRunner
 docs/                 architecture notes, backtester data format, FIX notes
 ```
