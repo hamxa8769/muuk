@@ -52,6 +52,16 @@ struct LiveConnectionConfig {
     // LiveRunner::waitForFirstQuoteAndCenterRange in live_runner.cpp.
     double autoRangeWidthPoints = 0.0;
 
+    // How long LiveRunner waits, after a basket has fully closed (every
+    // filled leg confirmed flattened at the broker), before starting the
+    // next cycle's range. 0 (default) starts immediately, matching the
+    // behavior before this existed. A pause here is purely operational —
+    // e.g. giving the operator a moment to glance at the account, or
+    // avoiding immediately re-seeding into the same brief spike that just
+    // closed the previous basket — engine/core itself has no notion of
+    // wall-clock time.
+    int basketCooldownSeconds = 0;
+
     [[nodiscard]] std::string senderCompId() const {
         return environment + "." + brokerUid + "." + traderLogin;
     }

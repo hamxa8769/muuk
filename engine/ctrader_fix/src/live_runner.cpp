@@ -357,10 +357,29 @@ void LiveRunner::maybeRestartAfterBasketClose() {
     // starts a new cycle while any closing leg is still outstanding, or
     // once basketCloseFailed_ is set -- either would open a fresh range on
     // top of a position that hasn't actually been booked yet.
-    if (engine_->status() == EngineStatus::Completed && pendingCloseClOrdIds_.empty() && !basketCloseFailed_) {
-        log("basket closed; starting the next cycle");
-        for (const auto& cmd : engine_->restart()) handleCommand(cmd);
+    if (engine_->status() != EngineStatus::Completed || !pendingCloseClOrdIds_.empty() || basketCloseFailed_) {
+        return;
     }
+
+    if (config_.connection.basketCooldownSeconds > 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!cooldownActive_) {
+            // First call to see the basket fully flat -- start the clock
+            // from right now, not from whenever it merely decided to close.
+            cooldownActive_ = true;
+            cooldownUntil_ = now + std::chrono::seconds(config_.connection.basketCooldownSeconds);
+            log("[basket] fully flat; next cycle starts after a " +
+                std::to_string(config_.connection.basketCooldownSeconds) + "s cooldown");
+            return;
+        }
+        if (now < cooldownUntil_) {
+            return;  // still cooling down -- this function gets called again on the next tick
+        }
+    }
+
+    cooldownActive_ = false;
+    log("basket closed; starting the next cycle");
+    for (const auto& cmd : engine_->restart()) handleCommand(cmd);
 }
 
 void LiveRunner::waitForFirstQuoteAndCenterRange() {

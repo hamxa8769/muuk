@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -102,10 +103,15 @@ private:
     // position has been individually flattened at the broker
     // (pendingCloseClOrdIds_ empty again -- see the CloseBasketCommand
     // handling in handleCommand()) or never needed flattening in the first
-    // place (openLegs_ was empty). This is what stops a new range/basket
-    // from opening while the previous one's P/L is still un-booked at the
-    // broker. Never restarts once basketCloseFailed_ is set -- see its
-    // comment. Caller must hold engineMutex_.
+    // place (openLegs_ was empty), AND (if connection.basketCooldownSeconds
+    // > 0) that many seconds have passed since the moment it became fully
+    // flat. This is what stops a new range/basket from opening while the
+    // previous one's P/L is still un-booked at the broker, and then keeps
+    // it from immediately re-seeding into the same brief spike that just
+    // closed it. Never restarts once basketCloseFailed_ is set -- see its
+    // comment. Called on every live quote tick (maybeEmitTick) as well as
+    // right when the last closing leg confirms, so the cooldown elapsing
+    // is noticed promptly either way. Caller must hold engineMutex_.
     void maybeRestartAfterBasketClose();
 
     // Blocks until the first live bid+ask arrives, then centers
@@ -180,6 +186,13 @@ private:
     // piling a new basket on top of leftover exposure. Cleared only by
     // constructing a fresh LiveRunner.
     bool basketCloseFailed_ = false;
+
+    // Set once (by maybeRestartAfterBasketClose) the moment a basket
+    // becomes fully flat, so connection.basketCooldownSeconds is measured
+    // from actual confirmed-flat time, not from whenever the engine first
+    // decided to close. Cleared once the next cycle actually starts.
+    bool cooldownActive_ = false;
+    std::chrono::steady_clock::time_point cooldownUntil_;
     std::atomic<bool> running_{false};
 
     std::atomic<bool> stopping_{false};

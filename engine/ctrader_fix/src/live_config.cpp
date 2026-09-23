@@ -50,6 +50,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.symbolName = conn.value("symbolName", std::string("XAUUSD"));
     cfg.connection.symbolId = conn.value("symbolId", "");
     cfg.connection.autoRangeWidthPoints = conn.value("autoRangeWidthPoints", 0.0);
+    cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
 
     requireNonEmpty(cfg.connection.brokerUid, "connection.brokerUid");
     requireNonEmpty(cfg.connection.traderLogin, "connection.traderLogin");

@@ -427,6 +427,117 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     if (runnerException) std::rethrow_exception(runnerException);
 }
 
+TEST_CASE("LiveRunner waits out connection.basketCooldownSeconds after a basket "
+          "is fully flat before starting the next cycle") {
+    MockFixServer server;
+    LiveConfig cfg = testConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 1.0;
+    cfg.connection.basketCooldownSeconds = 1;  // seconds -- short so the test stays fast
+    LiveRunner runner(cfg);
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // order2
+
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().activeOrderCount == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    FixMessage rally = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    rally.set(tag::Symbol, std::string("1"));
+    rally.set(tag::NoMDEntries, int64_t{2});
+    rally.set(tag::MDEntryType, std::string("0"));
+    rally.set(tag::MDEntryPx, std::string("4341.99"));
+    rally.set(tag::MDEntryType, std::string("1"));
+    rally.set(tag::MDEntryPx, std::string("4342.01"));
+    server.sendToClient(kQuoteConn, rally);
+
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder.getInt(tag::OrdType) == 1);
+
+    FixMessage closeFill = serverHeaderMessage(msgtype::ExecutionReport, 4);
+    closeFill.set(tag::OrderID, std::string("9002"));
+    closeFill.set(tag::ClOrdID, closeOrder.getString(tag::ClOrdID));
+    closeFill.set(tag::ExecType, std::string("F"));
+    closeFill.set(tag::OrdStatus, std::string("2"));
+    closeFill.set(tag::AvgPx, std::string("4342.00"));
+    closeFill.set(tag::LastQty, std::string("0.01"));
+    closeFill.set(tag::CumQty, std::string("0.01"));
+    closeFill.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, closeFill);
+
+    // The basket is fully flat now (the only leg's closing trade just
+    // confirmed), but the cooldown hasn't elapsed yet -- no new order
+    // should appear within a window well short of the 1s cooldown.
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 300ms), std::runtime_error);
+    REQUIRE(runner.snapshot().status == EngineStatus::Completed);
+
+    // A quote tick arriving mid-cooldown must not bypass it either.
+    FixMessage midCooldownTick = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 5);
+    midCooldownTick.set(tag::Symbol, std::string("1"));
+    midCooldownTick.set(tag::NoMDEntries, int64_t{2});
+    midCooldownTick.set(tag::MDEntryType, std::string("0"));
+    midCooldownTick.set(tag::MDEntryPx, std::string("4342.00"));
+    midCooldownTick.set(tag::MDEntryType, std::string("1"));
+    midCooldownTick.set(tag::MDEntryPx, std::string("4342.02"));
+    server.sendToClient(kQuoteConn, midCooldownTick);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 300ms), std::runtime_error);
+    REQUIRE(runner.snapshot().status == EngineStatus::Completed);
+
+    // Once the cooldown has elapsed, the next tick lets the next cycle start.
+    std::this_thread::sleep_for(600ms);  // 300+300+600 > the 1s cooldown
+    FixMessage afterCooldownTick = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 6);
+    afterCooldownTick.set(tag::Symbol, std::string("1"));
+    afterCooldownTick.set(tag::NoMDEntries, int64_t{2});
+    afterCooldownTick.set(tag::MDEntryType, std::string("0"));
+    afterCooldownTick.set(tag::MDEntryPx, std::string("4342.00"));
+    afterCooldownTick.set(tag::MDEntryType, std::string("1"));
+    afterCooldownTick.set(tag::MDEntryPx, std::string("4342.02"));
+    server.sendToClient(kQuoteConn, afterCooldownTick);
+
+    const FixMessage cycle2Order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(cycle2Order1.getInt(tag::OrdType) == 3);
+    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().status == EngineStatus::Active) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().status == EngineStatus::Active);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
 TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogHandler") {
     MockFixServer server;
     LiveRunner runner(testConfig(server));
