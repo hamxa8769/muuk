@@ -9,28 +9,39 @@ codebase actually implements — not a replacement for the spec.
 ## Getting credentials
 
 FIX API credentials are per-account and issued by cTrader itself: in the
-cTrader (or cAlgo) desktop/web app, open **Settings → FIX API**. You'll get
-a **BrokerUID**, a numeric **trader login**, a **password**, and a
-**host/port** for both a Quote and a Trade connection — these are specific
-to your account and environment (demo vs live) and are never guessable or
-looked up externally. Plain-TCP FIX ports (this client does not yet
-support TLS — see "Known limitations" below) are commonly in the 5201/5202
-range, but treat whatever your account's settings page shows as
-authoritative.
+cTrader (or cAlgo) desktop/web app, open **Settings → FIX API**. That
+screen lists the **Price connection** (Quote session) and the **Trade
+connection** separately — each has its own **Host** and **Port**, which
+are not assumed to be the same (`LiveConnectionConfig::quote`/`trade` in
+`live_config.hpp` map directly to these two blocks). You'll also get a
+**BrokerUID**, a numeric **trader login**, and a **password** shared by
+both connections. All of this is specific to your account and environment
+(demo vs live) and is never guessable or looked up externally. Plain-TCP
+FIX ports (this client does not yet support TLS — see "Known limitations"
+below) are commonly in the 5201/5202 range, but treat whatever your
+account's settings page shows as authoritative.
+
+The same settings screen typically also lists a **Symbol Id** table
+(instrument name → numeric id) for reference — you do **not** need to copy
+that into the config; `LiveRunner` resolves the configured `symbolName`
+(e.g. "XAUUSD") to its numeric id automatically at startup via
+`SecurityListRequest` (see "Symbol resolution" below).
 
 ## Session model
 
-Two independent FIX sessions per account, same TCP host/port, same
-identity, differing only in `TargetSubID (57)`:
+Two independent FIX sessions per account, differing in both endpoint and
+`TargetSubID (57)`:
 
-- **Quote** session: `TargetSubID=QUOTE`, `SenderSubID=Quote`. Used for
-  `MarketDataRequest`/`MarketDataSnapshotFullRefresh`/
-  `MarketDataIncrementalRefresh`.
+- **Quote** ("Price connection") session: `TargetSubID=QUOTE`,
+  `SenderSubID=Quote`. Used for `MarketDataRequest`/
+  `MarketDataSnapshotFullRefresh`/`MarketDataIncrementalRefresh`.
 - **Trade** session: `TargetSubID=TRADE`, `SenderSubID=Trade`. Used for
   everything order-related.
 
 `SenderCompID (49)` = `"<environment>.<BrokerUID>.<TraderLogin>"` (e.g.
-`demo.icmarkets.12345`); `TargetCompID (56)` is always `"CSERVER"`.
+`demo.icmarkets.12345`); `TargetCompID (56)` is always `"CSERVER"`. This
+identity, plus Username/Password, is the same on both connections — only
+the endpoint and TargetSubID/SenderSubID differ.
 
 ## Orders
 

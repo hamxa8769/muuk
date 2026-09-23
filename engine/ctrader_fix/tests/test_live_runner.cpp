@@ -34,8 +34,8 @@ SymbolSpec xauusdSpec() {
 
 LiveConfig testConfig(const MockFixServer& server) {
     LiveConfig cfg;
-    cfg.connection.host = "127.0.0.1";
-    cfg.connection.port = server.port();
+    cfg.connection.quote = FixEndpoint{"127.0.0.1", server.port()};
+    cfg.connection.trade = FixEndpoint{"127.0.0.1", server.port()};
     cfg.connection.environment = "demo";
     cfg.connection.brokerUid = "testbroker";
     cfg.connection.traderLogin = "12345";

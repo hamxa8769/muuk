@@ -50,10 +50,10 @@ void LiveRunner::run() {
     tradeCreds.targetSubId = "TRADE";
     tradeCreds.senderSubId = "Trade";
 
-    quoteSession_ = std::make_unique<FixSession>(config_.connection.host, config_.connection.port, quoteCreds,
-                                                  [this](const FixMessage& m) { onQuoteMessage(m); });
-    tradeSession_ = std::make_unique<FixSession>(config_.connection.host, config_.connection.port, tradeCreds,
-                                                  [this](const FixMessage& m) { onTradeMessage(m); });
+    quoteSession_ = std::make_unique<FixSession>(config_.connection.quote.host, config_.connection.quote.port,
+                                                  quoteCreds, [this](const FixMessage& m) { onQuoteMessage(m); });
+    tradeSession_ = std::make_unique<FixSession>(config_.connection.trade.host, config_.connection.trade.port,
+                                                  tradeCreds, [this](const FixMessage& m) { onTradeMessage(m); });
 
     quoteSession_->setDisconnectHandler([this](const std::string& reason) {
         std::cerr << "[quote session] ended: " << reason << "\n";
