@@ -30,8 +30,18 @@ struct LiveConnectionConfig {
     std::string brokerUid;
     std::string traderLogin;  // numeric account id
     std::string password;
+    // Shown as "TargetCompID" on your cTrader FIX API settings screen.
+    // The generic spec examples use "CSERVER", but individual
+    // brokers/accounts can (and do) use a different exact string here
+    // (e.g. "cServer") — this must match yours exactly or Logon fails.
+    std::string targetCompId = "CSERVER";
     int heartBtIntSeconds = 30;
-    std::string symbolName = "XAUUSD";  // resolved to the broker's numeric Symbol id at startup
+    std::string symbolName = "XAUUSD";
+    // Optional: if your account's FIX symbol id for `symbolName` is
+    // already known (shown on the same settings screen), set it here to
+    // skip the SecurityListRequest lookup at startup. Leave empty to
+    // resolve it automatically instead.
+    std::string symbolId;
 
     [[nodiscard]] std::string senderCompId() const {
         return environment + "." + brokerUid + "." + traderLogin;

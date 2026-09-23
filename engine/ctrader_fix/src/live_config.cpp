@@ -45,8 +45,10 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.brokerUid = conn.value("brokerUid", "");
     cfg.connection.traderLogin = conn.value("traderLogin", "");
     cfg.connection.password = conn.value("password", "");
+    cfg.connection.targetCompId = conn.value("targetCompId", std::string("CSERVER"));
     cfg.connection.heartBtIntSeconds = conn.value("heartBtIntSeconds", 30);
     cfg.connection.symbolName = conn.value("symbolName", std::string("XAUUSD"));
+    cfg.connection.symbolId = conn.value("symbolId", "");
 
     requireNonEmpty(cfg.connection.brokerUid, "connection.brokerUid");
     requireNonEmpty(cfg.connection.traderLogin, "connection.traderLogin");

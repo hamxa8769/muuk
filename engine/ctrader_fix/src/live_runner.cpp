@@ -40,15 +40,16 @@ void LiveRunner::run() {
 
     FixCredentials quoteCreds;
     quoteCreds.senderCompId = config_.connection.senderCompId();
+    quoteCreds.targetCompId = config_.connection.targetCompId;
     quoteCreds.targetSubId = "QUOTE";
-    quoteCreds.senderSubId = "Quote";
+    quoteCreds.senderSubId = "QUOTE";
     quoteCreds.username = config_.connection.traderLogin;
     quoteCreds.password = config_.connection.password;
     quoteCreds.heartBtIntSeconds = config_.connection.heartBtIntSeconds;
 
     FixCredentials tradeCreds = quoteCreds;
     tradeCreds.targetSubId = "TRADE";
-    tradeCreds.senderSubId = "Trade";
+    tradeCreds.senderSubId = "TRADE";
 
     quoteSession_ = std::make_unique<FixSession>(config_.connection.quote.host, config_.connection.quote.port,
                                                   quoteCreds, [this](const FixMessage& m) { onQuoteMessage(m); });
@@ -88,6 +89,14 @@ void LiveRunner::run() {
 }
 
 void LiveRunner::resolveSymbol() {
+    if (!config_.connection.symbolId.empty()) {
+        // Already known (e.g. from the same cTrader FIX API settings
+        // screen the connection details came from) — skip the
+        // SecurityListRequest round-trip entirely.
+        symbolId_ = config_.connection.symbolId;
+        return;
+    }
+
     std::unique_lock lock(symbolMutex_);
     symbolResolved_ = false;
     symbolId_.clear();
