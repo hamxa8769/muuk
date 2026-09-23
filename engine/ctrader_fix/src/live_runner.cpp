@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 #include "muuk/ctrader_fix/messages.hpp"
 #include "muuk/ctrader_fix/tags.hpp"
@@ -266,6 +267,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             const auto orderId = tryParseOrderId(info.clOrdId);
             if (!orderId) return;
             std::scoped_lock lock(engineMutex_);
+            placedOrderInfo_.erase(*orderId);  // this order is done -- no longer genuinely outstanding
             if (!engine_) return;
             for (const auto& cmd :
                  engine_->onOrderRejected(OrderRejectedEvent{*orderId, RejectReason::BrokerRejected})) {
@@ -274,10 +276,36 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             return;
         }
 
-        // New/Cancelled/Expired/OrderStatus: informational only. The engine
-        // already updated its own state when it emitted the Place/Cancel
-        // command; a broker-side cancel/expiry confirmation doesn't need
-        // to be replayed back into it.
+        if (info.execType == ExecType::Cancelled || info.execType == ExecType::Expired) {
+            // Keeps placedOrderInfo_ accurate as "genuinely still
+            // outstanding at the broker" -- needed for cancelAllPendingOrders()
+            // to only ever act on orders that are actually still live.
+            if (const auto orderId = tryParseOrderId(info.clOrdId)) {
+                std::scoped_lock lock(engineMutex_);
+                placedOrderInfo_.erase(*orderId);
+            }
+        }
+
+        // New/Cancelled/Expired/OrderStatus: for a normal strategy order,
+        // this is informational only -- the engine already updated its own
+        // state when it emitted the Place/Cancel command, and a
+        // broker-side cancel/expiry confirmation doesn't need to be
+        // replayed back into it. But for one of THIS basket's closing
+        // orders specifically, log it clearly regardless -- a close order
+        // stuck in "New" (acknowledged but never actually filling) with no
+        // trace in the log is exactly the kind of silent stall that made
+        // this hard to debug live: was the order rejected, still working,
+        // or did the broker's FIX dialect simply not treat a plain Market
+        // order as a close on this hedging account? The raw OrdStatus/
+        // ExecType are logged here (not just engine/core's coarser
+        // ExecType enum) so nothing is swallowed.
+        if (info.clOrdId && pendingCloseClOrdIds_.count(*info.clOrdId) > 0) {
+            log("[basket] closing order status update (ClOrdID=" + *info.clOrdId +
+                ", OrdStatus=" + msg.getOptionalString(tag::OrdStatus).value_or("?") +
+                ", ExecType=" + msg.getOptionalString(tag::ExecType).value_or("?") +
+                ", LeavesQty=" + msg.getOptionalString(tag::LeavesQty).value_or("?") +
+                ", CumQty=" + msg.getOptionalString(tag::CumQty).value_or("?") + ")");
+        }
         return;
     }
 
@@ -430,35 +458,75 @@ void LiveRunner::handleCommand(const Command& cmd) {
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
         log("[order] cancelling OrigClOrdID=" + std::to_string(cancel->id));
+        placedOrderInfo_.erase(cancel->id);
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(cancel->id)));
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
         log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney) + ", " +
             std::to_string(openLegs_.size()) + " leg(s) to flatten");
-        if (openLegs_.empty()) {
-            log("[basket] already flat -- nothing to close");
-        } else {
-            // Close every filled leg individually, each with its own
-            // opposite-direction Market order sized to exactly that leg's
-            // volume -- see openLegs_'s comment on why a single net-sized
-            // order isn't enough on a hedging-enabled account (this demo
-            // account is one: cTrader kept several same-symbol fills as
-            // separate positions even when their net exposure was zero).
-            for (const auto& leg : openLegs_) {
-                const int side = (leg.side == OrderSide::BuyStop) ? 2 : 1;  // opposite of the open leg
-                const double lots = leg.volume.toDouble(config_.strategy.symbol);
-                const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
-                const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
-                log("[basket] flattening leg: side=" + std::to_string(side) + " lots=" + std::to_string(lots) +
-                    " (ClOrdID=" + closeClOrdId + ")");
-                pendingCloseClOrdIds_.insert(closeClOrdId);
-                tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
-            }
-            openLegs_.clear();
-        }
+        closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
             ") — no further orders will be armed this cycle");
     }
+}
+
+void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
+    // Closes every leg individually, each with its own opposite-direction
+    // Market order sized to exactly that leg's volume -- see openLegs_'s
+    // comment on why a single net-sized order isn't enough on a
+    // hedging-enabled account (this demo account is one: cTrader kept
+    // several same-symbol fills as separate positions even when their net
+    // exposure was zero). Shared by the automatic CloseBasketCommand path
+    // and the manual closeAllPositions() control. Caller must hold
+    // engineMutex_ and must have already moved/cleared its own copy of
+    // whatever list it passes in (this only sends orders and tracks their
+    // ClOrdIDs -- it never mutates openLegs_ itself).
+    if (legs.empty()) {
+        log("[basket] already flat -- nothing to close");
+        return;
+    }
+    for (const auto& leg : legs) {
+        const int side = (leg.side == OrderSide::BuyStop) ? 2 : 1;  // opposite of the open leg
+        const double lots = leg.volume.toDouble(config_.strategy.symbol);
+        const double qty = lots * 100.0;  // see the lot-hundredths note in the PlaceOrderCommand branch
+        const std::string closeClOrdId = "x" + std::to_string(nextCloseReqId_++);
+        log("[basket] flattening leg: side=" + std::to_string(side) + " lots=" + std::to_string(lots) +
+            " (ClOrdID=" + closeClOrdId + ")");
+        pendingCloseClOrdIds_.insert(closeClOrdId);
+        tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty));
+    }
+}
+
+void LiveRunner::closeAllPositions() {
+    std::scoped_lock lock(engineMutex_);
+    if (!tradeSession_) return;
+    log("[manual] operator requested: close all positions (" + std::to_string(openLegs_.size()) + " leg(s))");
+    closeLegs(std::exchange(openLegs_, {}));
+    // The engine's own P/L aggregates now describe exposure that no longer
+    // exists at the broker -- rebuilding it fresh (Idle, no pending
+    // orders, no aggregates) rather than trying to patch that state is the
+    // only way to keep it from acting on stale assumptions. It stays Idle
+    // (onTick() and onOrderConfirmed() are no-ops from Idle) until the
+    // operator stops and restarts the bot -- this is a manual override,
+    // not a strategy decision, so it should not silently resume trading.
+    engine_ = std::make_unique<StrategyEngine>(config_.strategy);
+}
+
+void LiveRunner::cancelAllPendingOrders() {
+    std::scoped_lock lock(engineMutex_);
+    if (!tradeSession_) return;
+    log("[manual] operator requested: cancel all pending orders (" + std::to_string(placedOrderInfo_.size()) +
+        " order(s))");
+    for (const auto& [orderId, leg] : placedOrderInfo_) {
+        const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
+        log("[manual] cancelling OrigClOrdID=" + std::to_string(orderId));
+        tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(orderId)));
+    }
+    placedOrderInfo_.clear();
+    // Same reasoning as closeAllPositions(): the engine still thinks these
+    // orders are legitimately pending, so it needs a clean slate rather
+    // than a patched one. See that method's comment.
+    engine_ = std::make_unique<StrategyEngine>(config_.strategy);
 }
 
 }  // namespace muuk::ctrader_fix

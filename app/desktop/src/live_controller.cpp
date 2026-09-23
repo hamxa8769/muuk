@@ -57,6 +57,14 @@ void LiveController::stop() {
     running_ = false;
 }
 
+void LiveController::closeAllPositions() {
+    if (runner_ && running_.load()) runner_->closeAllPositions();
+}
+
+void LiveController::cancelAllPendingOrders() {
+    if (runner_ && running_.load()) runner_->cancelAllPendingOrders();
+}
+
 std::optional<LiveSnapshot> LiveController::snapshot() const {
     if (!runner_) return std::nullopt;
     return runner_->snapshot();

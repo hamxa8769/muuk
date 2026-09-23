@@ -89,12 +89,52 @@ public:
     // objects (a prior version of this raced there intermittently).
     void stop();
 
+    // Manual operator overrides, safe to call from any thread while run()
+    // is active (no-op if it isn't -- there's no session to send on).
+    // Both send real broker-facing requests (individually-sized closing
+    // Market orders / OrderCancelRequests, the same tested mechanisms the
+    // automatic basket-close path uses) and then rebuild the engine fresh
+    // and Idle, rather than trying to reconcile its internal state with an
+    // action it didn't decide to take itself. The bot will NOT resume
+    // trading on its own afterward -- stop() and start() again to resume.
+    // These act on independent broker-side state (open positions vs.
+    // pending orders), so either can be used alone.
+    void closeAllPositions();
+    void cancelAllPendingOrders();
+
 private:
+    // Per-leg position tracking. engine/core deliberately only keeps a
+    // running (side, volume) *aggregate* per side (see SideAggregate in
+    // strategy_engine.cpp) -- fixed-size by design, not a list of
+    // individual fills. That's fine for its own P/L math, but it means a
+    // live driver can't rely on the engine to know *how many separate
+    // broker positions* are open, only the net exposure. That distinction
+    // matters here: on a hedging-enabled account (this demo account is
+    // one -- cTrader keeps every fill as its own position rather than
+    // merging same-symbol exposure), a single net-sized closing order does
+    // NOT close out several smaller same-symbol positions, even when their
+    // net volume is zero (equal Buy and Sell fills can leave the net
+    // exposure at 0 while every individual position is still open and
+    // un-booked). So LiveRunner tracks each real fill as its own leg here
+    // and closes every leg individually on CloseBasketCommand, instead of
+    // trusting CloseBasketCommand's own closeSide/closeVolume (which is
+    // still correct as the *net* figure, just not sufficient on its own
+    // for a hedging account).
+    struct OpenLeg {
+        muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
+        muuk::core::Volume volume;
+    };
+
     void log(const std::string& line) const;
 
     void onQuoteMessage(const FixMessage& msg);
     void onTradeMessage(const FixMessage& msg);
     void handleCommand(const muuk::core::Command& cmd);  // caller must hold engineMutex_
+    // Sends one closing Market order per leg in `legs` and tracks each by
+    // ClOrdID in pendingCloseClOrdIds_. Does not touch openLegs_ itself --
+    // callers pass in (and are responsible for having already cleared)
+    // whatever list they want closed. Caller must hold engineMutex_.
+    void closeLegs(const std::vector<OpenLeg>& legs);
     void resolveSymbol();
     void maybeEmitTick();  // caller must hold engineMutex_; no-op if engine_ isn't constructed yet
 
@@ -151,27 +191,6 @@ private:
     std::atomic<uint64_t> nextCancelReqId_{1};
     std::atomic<uint64_t> nextCloseReqId_{1};
 
-    // Per-leg position tracking. engine/core deliberately only keeps a
-    // running (side, volume) *aggregate* per side (see SideAggregate in
-    // strategy_engine.cpp) -- fixed-size by design, not a list of
-    // individual fills. That's fine for its own P/L math, but it means a
-    // live driver can't rely on the engine to know *how many separate
-    // broker positions* are open, only the net exposure. That distinction
-    // matters here: on a hedging-enabled account (this demo account is
-    // one -- cTrader keeps every fill as its own position rather than
-    // merging same-symbol exposure), a single net-sized closing order does
-    // NOT close out several smaller same-symbol positions, even when their
-    // net volume is zero (equal Buy and Sell fills can leave the net
-    // exposure at 0 while every individual position is still open and
-    // un-booked). So LiveRunner tracks each real fill as its own leg here
-    // and closes every leg individually on CloseBasketCommand, instead of
-    // trusting CloseBasketCommand's own closeSide/closeVolume (which is
-    // still correct as the *net* figure, just not sufficient on its own
-    // for a hedging account).
-    struct OpenLeg {
-        muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
-        muuk::core::Volume volume;
-    };
     // side/volume for an order LiveRunner has placed but that hasn't
     // filled (or been cancelled) yet -- moved into openLegs_ on fill.
     std::unordered_map<muuk::core::OrderId, OpenLeg> placedOrderInfo_;

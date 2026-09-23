@@ -36,6 +36,12 @@ public:
     // call even if not running.
     void stop();
 
+    // Manual operator overrides -- forwarded straight to LiveRunner (see
+    // its own comment for exactly what these do and why the bot won't
+    // resume trading on its own afterward). No-op if not running.
+    void closeAllPositions();
+    void cancelAllPendingOrders();
+
     [[nodiscard]] bool isRunning() const { return running_.load(); }
     // Returns the last known state even after the runner has stopped
     // (e.g. a dropped connection), so the UI can show what happened

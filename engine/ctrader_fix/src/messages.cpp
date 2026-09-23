@@ -124,6 +124,13 @@ FixMessage buildMarketOrderSingle(const std::string& clOrdId, const std::string&
     msg.set(tag::TransactTime, nowUtcTimestamp());
     msg.set(tag::OrderQty, orderQty, 2);
     msg.set(tag::OrdType, int64_t{1});  // Market
+    // Unlike the Stop orders above, a Market order is meaningless left
+    // open/working -- it must execute immediately or not at all.
+    // TimeInForce(59)=3 (IOC) says exactly that; several FIX venues
+    // silently reject or park a Market order lacking TimeInForce
+    // altogether, which was suspected as the reason live-tested closing
+    // orders weren't actually flattening positions.
+    msg.set(tag::TimeInForce, std::string("3"));
     return msg;
 }
 

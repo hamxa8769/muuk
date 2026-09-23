@@ -126,6 +126,54 @@ void DashboardWindow::render(LiveController& controller) {
         ImGui::TextColored(color, "%s", running ? "● Connected" : "○ Disconnected");
     }
 
+    ImGui::SameLine(0.0f, 24.0f);
+    ImGui::BeginDisabled(!running);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.20f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.68f, 0.24f, 0.20f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.45f, 0.16f, 0.14f, 1.0f));
+    if (ImGui::Button("Close all positions", ImVec2(160, 0))) {
+        ImGui::OpenPopup("Confirm close all positions");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel all pending orders", ImVec2(190, 0))) {
+        ImGui::OpenPopup("Confirm cancel all pending");
+    }
+    ImGui::PopStyleColor(3);
+    ImGui::EndDisabled();
+
+    // Both are manual, broker-facing overrides that also stop the bot from
+    // trading on its own afterward (see LiveRunner::closeAllPositions'/
+    // cancelAllPendingOrders' comments) -- a confirmation guards against a
+    // stray click doing something that disruptive.
+    if (ImGui::BeginPopupModal("Confirm close all positions", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Close every open position at the broker with individual Market orders?");
+        ImGui::TextDisabled("The bot will stop trading until you Stop and Start it again.");
+        ImGui::Spacing();
+        if (ImGui::Button("Close all positions", ImVec2(160, 0))) {
+            controller.closeAllPositions();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Confirm cancel all pending", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Cancel every still-pending (unfilled) order at the broker?");
+        ImGui::TextDisabled("The bot will stop trading until you Stop and Start it again.");
+        ImGui::Spacing();
+        if (ImGui::Button("Cancel all pending orders", ImVec2(190, 0))) {
+            controller.cancelAllPendingOrders();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dismiss", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     const std::string err = controller.lastError();
     if (!err.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "Error: %s", err.c_str());

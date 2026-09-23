@@ -427,6 +427,117 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     if (runnerException) std::rethrow_exception(runnerException);
 }
 
+TEST_CASE("LiveRunner::closeAllPositions closes every open leg and idles the engine") {
+    MockFixServer server;
+    LiveRunner runner(testConfig(server));
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // Buy .01 @ 4337.00
+    const std::string order1ClOrdId = order1.getString(tag::ClOrdID);
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);  // order2, left pending
+
+    FixMessage fill1 = serverHeaderMessage(msgtype::ExecutionReport, 3);
+    fill1.set(tag::OrderID, std::string("9001"));
+    fill1.set(tag::ClOrdID, order1ClOrdId);
+    fill1.set(tag::ExecType, std::string("F"));
+    fill1.set(tag::OrdStatus, std::string("2"));
+    fill1.set(tag::AvgPx, std::string("4337.00"));
+    fill1.set(tag::LastQty, std::string("0.01"));
+    fill1.set(tag::CumQty, std::string("0.01"));
+    fill1.set(tag::LeavesQty, std::string("0"));
+    server.sendToClient(kTradeConn, fill1);
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().activeOrderCount == 1) break;
+        std::this_thread::sleep_for(50ms);
+    }
+
+    // One open leg (Buy .01, from order1) and one still-pending order
+    // (order2, Sell) at this point. closeAllPositions() must only touch
+    // the open leg -- pending orders are cancelAllPendingOrders()'s job.
+    runner.closeAllPositions();
+
+    const FixMessage closeOrder = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(closeOrder.getInt(tag::OrdType) == 1);  // Market
+    REQUIRE(closeOrder.getInt(tag::Side) == 2);      // opposite of the Buy leg
+    REQUIRE(closeOrder.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+
+    // The engine is now a fresh, Idle instance -- it will not act on its
+    // own until the operator explicitly restarts the bot.
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().status == EngineStatus::Idle) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().status == EngineStatus::Idle);
+    REQUIRE(runner.snapshot().activeOrderCount == 0);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
+TEST_CASE("LiveRunner::cancelAllPendingOrders cancels every pending order and idles the engine") {
+    MockFixServer server;
+    LiveRunner runner(testConfig(server));
+
+    std::exception_ptr runnerException;
+    std::thread runnerThread([&] {
+        try {
+            runner.run();
+        } catch (...) {
+            runnerException = std::current_exception();
+        }
+    });
+
+    (void)server.waitForMessage(msgtype::Logon, kTradeConn);
+    server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::Logon, kQuoteConn);
+    server.sendToClient(kQuoteConn, serverHeaderMessage(msgtype::Logon, 1));
+    (void)server.waitForMessage(msgtype::SecurityListRequest, kTradeConn);
+    server.sendToClient(kTradeConn, buildSecurityListResponse());
+    (void)server.waitForMessage(msgtype::MarketDataRequest, kQuoteConn);
+
+    const FixMessage order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    const std::string order1Id = order1.getString(tag::ClOrdID);
+    const FixMessage order2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn);
+    const std::string order2Id = order2.getString(tag::ClOrdID);
+
+    runner.cancelAllPendingOrders();
+
+    const FixMessage cancel1 = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage cancel2 = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const std::vector<std::string> cancelledIds = {cancel1.getString(tag::OrigClOrdID),
+                                                    cancel2.getString(tag::OrigClOrdID)};
+    REQUIRE(std::find(cancelledIds.begin(), cancelledIds.end(), order1Id) != cancelledIds.end());
+    REQUIRE(std::find(cancelledIds.begin(), cancelledIds.end(), order2Id) != cancelledIds.end());
+
+    for (int i = 0; i < 50; ++i) {
+        if (runner.snapshot().status == EngineStatus::Idle) break;
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(runner.snapshot().status == EngineStatus::Idle);
+    REQUIRE(runner.snapshot().activeOrderCount == 0);
+
+    runner.stop();
+    runnerThread.join();
+    if (runnerException) std::rethrow_exception(runnerException);
+}
+
 TEST_CASE("LiveRunner waits out connection.basketCooldownSeconds after a basket "
           "is fully flat before starting the next cycle") {
     MockFixServer server;
