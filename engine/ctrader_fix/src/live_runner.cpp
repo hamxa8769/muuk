@@ -353,6 +353,26 @@ void LiveRunner::run() {
         while (running_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (++loops % 50 == 0) markDirty();  // lifetime statistics, every ~10 s
+            if (loops % 300 == 0) {  // a heartbeat in the log every minute
+                std::scoped_lock lock(engineMutex_);
+                if (engine_) {
+                    PnlBreakdown live;
+                    if (latestBid_ && latestAsk_) {
+                        for (const auto& leg : openLegs_) live += legPnl(leg);
+                    }
+                    const auto rtt = brokerRoundTripMs_.summary();
+                    std::ostringstream oss;
+                    oss.setf(std::ios::fixed);
+                    oss.precision(2);
+                    const EngineStatus st = engine_->status();
+                    oss << "[status] " << (st == EngineStatus::Active ? "range active" : st == EngineStatus::Completed ? "basket booked" : st == EngineStatus::HaltedByRisk ? "halted by risk" : "idle")
+                        << " | " << openLegs_.size() << " position(s), " << (placedOrderInfo_.size() + waitingOrders_.size())
+                        << " pending | net $" << live.net << " | " << (ticksProcessed_ - statusTicks_) << " quotes/min";
+                    if (rtt.samples > 0) oss << " | round trip " << rtt.avg << " ms avg";
+                    statusTicks_ = ticksProcessed_;
+                    log(oss.str());
+                }
+            }
             if (loops % 5 == 0) {
                 std::scoped_lock lock(engineMutex_);
                 checkBasketHealthLocked();

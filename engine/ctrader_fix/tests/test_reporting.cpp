@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "muuk/ctrader_fix/basket_history.hpp"
+#include "muuk/ctrader_fix/instance_lock.hpp"
 #include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/pdf_writer.hpp"
 #include "muuk/ctrader_fix/session_report.hpp"
@@ -207,4 +208,18 @@ TEST_CASE("Volume statistics: lots, value traded, won/lost lots and P/L per day,
     REQUIRE(legSlippage(baskets[0].legs[0], 100.0) == Catch::Approx(0.05));
     REQUIRE(legSlippage(baskets[0].legs[1], 100.0) == Catch::Approx(0.0));
     REQUIRE(total.slippage == Catch::Approx(4 * 0.05));
+}
+
+TEST_CASE("InstanceLock: only one holder per config file at a time") {
+    const auto file = std::filesystem::temp_directory_path() / "muuk_test_instance.lock";
+    muuk::ctrader_fix::InstanceLock first;
+    REQUIRE(first.acquire(file));
+    REQUIRE(first.acquire(file));  // re-acquiring your own lock is fine
+    {
+        muuk::ctrader_fix::InstanceLock second;
+        REQUIRE_FALSE(second.acquire(file));  // another holder: refused
+    }
+    first.release();
+    muuk::ctrader_fix::InstanceLock third;
+    REQUIRE(third.acquire(file));  // free again once released
 }

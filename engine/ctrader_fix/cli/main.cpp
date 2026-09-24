@@ -13,6 +13,7 @@
 #include <windows.h>
 #endif
 
+#include "muuk/ctrader_fix/instance_lock.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/live_state.hpp"
@@ -103,6 +104,13 @@ int main(int argc, char** argv) {
     if (credentialsPath.empty()) {
         std::cerr << "usage: muuk-live --credentials <local-config.json> [--keep-open-on-exit]\n";
         return 1;
+    }
+
+    muuk::ctrader_fix::InstanceLock instanceLock;
+    if (!instanceLock.acquire(muuk::ctrader_fix::instanceLockFile(credentialsPath))) {
+        std::cerr << "error: Muuk is already running with this config (the app, another muuk-live, or the auto-start "
+                     "task). Close that one first -- two copies on one login keep kicking each other off the broker.\n";
+        return 2;
     }
 
     // A bad config is a mistake to fix, not something to retry.

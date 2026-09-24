@@ -6,6 +6,7 @@ add_library(muuk_ctrader_fix STATIC
     src/live_runner.cpp
     src/basket_history.cpp
     src/live_state.cpp
+    src/instance_lock.cpp
     src/volume_stats.cpp
     src/pdf_writer.cpp
     src/session_report.cpp

@@ -558,6 +558,7 @@ private:
     std::atomic<double> clockOffsetMs_{0.0};
     std::atomic<bool> clockOffsetKnown_{false};
     uint64_t quoteMessages_ = 0;  // guarded by engineMutex_
+    uint64_t statusTicks_ = 0;    // ticksProcessed_ at the last [status] line
     // Close range asked for a new range after connection.manualCloseCooldownSeconds.
     bool reopenAfterManualClose_ = false;  // a saved basket couldn't be resumed: the operator decides what's next
 

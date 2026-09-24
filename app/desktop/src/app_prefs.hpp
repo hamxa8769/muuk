@@ -13,6 +13,7 @@ struct AppPrefs {
     bool darkMode = true;
     bool autoConnect = false;  // connect as soon as the app opens
     bool autoReconnect = true; // reconnect by itself after a dropped connection
+    bool liteMode = false;     // least CPU (always on without a graphics card)
 };
 
 // %APPDATA%\Muuk\desktop.json (or next to the working directory elsewhere).

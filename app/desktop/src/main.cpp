@@ -12,6 +12,7 @@
 #define NOMINMAX  // keep windows.h's min/max macros from breaking std::min/std::max
 #include <windows.h>
 #include <dwmapi.h>
+#include <wtsapi32.h>
 #endif
 
 #ifdef _WIN32
@@ -152,7 +153,7 @@ public:
         context_->OMSetRenderTargets(1, &target_, nullptr);
         context_->ClearRenderTargetView(target_, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        swapChain_->Present(1, 0);  // vsync
+        occluded_ = swapChain_->Present(1, 0) == DXGI_STATUS_OCCLUDED;  // vsync
 #else
         glViewport(0, 0, w, h);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -180,6 +181,16 @@ public:
     }
 
     [[nodiscard]] const std::string& name() const { return name_; }
+    // The window can't be seen (covered, locked screen): nothing to draw.
+    // Re-checked with a test present on every call.
+    [[nodiscard]] bool occluded() {
+#ifdef _WIN32
+        if (occluded_ && swapChain_) occluded_ = swapChain_->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED;
+        return occluded_;
+#else
+        return false;
+#endif
+    }
     // Drawing on the CPU: keep the frame rate down.
     [[nodiscard]] bool software() const { return software_; }
 
@@ -206,7 +217,47 @@ private:
     GLFWwindow* window_ = nullptr;
     std::string name_;
     bool software_ = false;
+    bool occluded_ = false;
 };
+
+// When the user last actually did something in the window (mouse, keys,
+// focus, resize). Set by GLFW callbacks installed before ImGui's backend,
+// which chains to them -- unlike "the event wait returned early", which
+// any window message (e.g. one caused by presenting a frame) triggers.
+double g_lastInputAt = 0.0;
+void noteInput() { g_lastInputAt = glfwGetTime(); }
+void installInputWatch(GLFWwindow* window) {
+    glfwSetCursorPosCallback(window, [](GLFWwindow*, double, double) { noteInput(); });
+    glfwSetMouseButtonCallback(window, [](GLFWwindow*, int, int, int) { noteInput(); });
+    glfwSetScrollCallback(window, [](GLFWwindow*, double, double) { noteInput(); });
+    glfwSetKeyCallback(window, [](GLFWwindow*, int, int, int, int) { noteInput(); });
+    glfwSetCharCallback(window, [](GLFWwindow*, unsigned int) { noteInput(); });
+    glfwSetWindowFocusCallback(window, [](GLFWwindow*, int) { noteInput(); });
+    glfwSetWindowSizeCallback(window, [](GLFWwindow*, int, int) { noteInput(); });
+}
+
+// false while this Windows session has no screen attached -- Remote Desktop
+// disconnected -- when nothing drawn could be seen. Checked every 2 s.
+bool sessionActive() {
+#ifdef _WIN32
+    static double checkedAt = -10.0;
+    static bool active = true;
+    const double now = glfwGetTime();
+    if (now - checkedAt < 2.0) return active;
+    checkedAt = now;
+    WTS_CONNECTSTATE_CLASS* state = nullptr;
+    DWORD bytes = 0;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSConnectState,
+                                    reinterpret_cast<LPWSTR*>(&state), &bytes) &&
+        state != nullptr) {
+        active = *state == WTSActive;
+        WTSFreeMemory(state);
+    }
+    return active;
+#else
+    return true;
+#endif
+}
 
 #ifdef _WIN32
 // Exit guard for Windows logoff/shutdown/restart (e.g. a VPS applying
@@ -287,6 +338,7 @@ int main(int argc, char** argv) {
     ImFont* numbers = tryAddFont("C:/Windows/Fonts/bahnschrift.ttf", base * 1.55f, kGlyphRanges);
     if (!numbers) numbers = tryAddFont("C:/Windows/Fonts/seguisb.ttf", base * 1.45f, kGlyphRanges);
 
+    installInputWatch(window);  // before the backend, so it chains to these
     Renderer renderer;
     if (!renderer.init(window)) {
         std::fprintf(stderr, "could not start the graphics renderer\n");
@@ -299,8 +351,7 @@ int main(int argc, char** argv) {
     muuk::desktop::LiveController controller;
     muuk::desktop::DashboardWindow dashboard;
     dashboard.setFonts(bold, large, numbers);
-    dashboard.setRendererName(renderer.name());
-    muuk::desktop::glass::setLowPower(renderer.software());
+    dashboard.setRenderer(renderer.name(), renderer.software());
     dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
     if (!configArg.empty()) dashboard.setConfigPath(configArg);
     // --connect, or the "Connect when the app opens" preference.
@@ -317,19 +368,37 @@ int main(int argc, char** argv) {
         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&guardWndProc)));
 #endif
 
+    double lastFrameAt = -1.0;
     while (!dashboard.exitApproved()) {
-        // Wakes immediately on any input; otherwise redraws often enough for
-        // live prices/P&L to keep moving, but no more than the window needs:
-        // an unattended VPS window mostly sits minimized or in the
-        // background, and a GPU-less VPS draws every frame on the CPU. The
-        // bot itself runs on its own threads and is never slowed by this.
-        double fps = renderer.software() ? 15.0 : 60.0;
-        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
-            fps = 2.0;  // still ticks auto-reconnect and the exit guard
-        } else if (!glfwGetWindowAttrib(window, GLFW_FOCUSED)) {
-            fps = renderer.software() ? 5.0 : 10.0;
+        // Frame pacing -- redraw often enough for live prices/P&L to keep
+        // moving, but no more than the window needs: an unattended VPS
+        // window mostly sits minimized or unseen, and a GPU-less VPS draws
+        // every frame on the CPU. The bot runs on its own threads and is
+        // never slowed by any of this.
+        //   hidden (minimized, covered, Remote Desktop disconnected): draw
+        //       nothing, wake once a second for auto-reconnect;
+        //   lite mode: 10 frames/s for 3 s after any input, else 1 frame/s;
+        //   otherwise: 60 frames/s focused, 10 in the background.
+        // Waiting until the frame is due (not just until the next window
+        // message) is what keeps idle at 1 frame/s.
+        bool hidden = false;
+        for (;;) {
+            hidden = glfwGetWindowAttrib(window, GLFW_ICONIFIED) || renderer.occluded() || !sessionActive();
+            const double now = glfwGetTime();
+            double interval = 1.0 / 60.0;
+            if (hidden) {
+                interval = 1.0;
+            } else if (dashboard.liteMode()) {
+                interval = now - g_lastInputAt < 3.0 ? 0.1 : 1.0;
+            } else if (!glfwGetWindowAttrib(window, GLFW_FOCUSED)) {
+                interval = 0.1;
+            }
+            const double remaining = lastFrameAt + interval - now;
+            if (remaining <= 0.0 || glfwWindowShouldClose(window)) break;
+            glfwWaitEventsTimeout(remaining);
         }
-        glfwWaitEventsTimeout(1.0 / fps);
+        glfwPollEvents();
+        lastFrameAt = glfwGetTime();
 
         // Exit guard: the close button (or Alt+F4) only *asks* to exit; with
         // trades still open the dashboard shows a dialog first.
@@ -337,6 +406,15 @@ int main(int argc, char** argv) {
             glfwSetWindowShouldClose(window, GLFW_FALSE);
             dashboard.requestExit(controller);
             if (dashboard.exitApproved()) break;
+            // The exit dialog needs a visible window (closed from the taskbar while minimized).
+            glfwRestoreWindow(window);
+            glfwFocusWindow(window);
+            noteInput();
+        }
+
+        if (hidden) {
+            dashboard.tickWithoutDrawing(controller);
+            continue;
         }
 
         renderer.newFrame();

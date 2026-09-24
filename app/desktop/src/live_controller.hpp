@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "muuk/ctrader_fix/instance_lock.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 
@@ -145,6 +146,9 @@ private:
     std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // One bot per config (see InstanceLock): held from start() to stop(),
+    // across reconnects.
+    muuk::ctrader_fix::InstanceLock instanceLock_;
 
     // Auto-reconnect (GUI thread only, except the atomics).
     std::atomic<bool> wantConnected_{false};  // between start() and stop()

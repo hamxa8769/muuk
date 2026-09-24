@@ -60,6 +60,7 @@ std::unordered_map<ImGuiID, float>& animState() {
 }
 
 float animate(ImGuiID id, float target, float speed) {
+    if (g_lowPower) return target;  // lite: no easing -- nothing keeps redrawing
     auto& state = animState();
     const auto it = state.find(id);
     if (it == state.end()) {
@@ -90,6 +91,11 @@ void softGlow(ImDrawList* dl, ImVec2 center, float radius, ImVec4 color) {
 void drawCardBackdrop(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     const Palette& p = g_palette;
     const float r = kCardRounding;
+    if (g_lowPower) {  // lite: flat card
+        dl->AddRectFilled(a, b, col(p.cardFill), r);
+        dl->AddRect(a, b, col(p.cardBorder), r, 0, 1.0f);
+        return;
+    }
 
     // Soft shadow as fading outlines, so the translucent interior isn't darkened.
     for (int i = 1; i <= 6; ++i) {
@@ -239,6 +245,7 @@ void drawBackground() {
 }
 
 void setLowPower(bool on) { g_lowPower = on; }
+bool lowPower() { return g_lowPower; }
 
 void beginCard(const char* id, ImVec2 size, bool autoHeight, ImGuiWindowFlags extraFlags) {
     ImGuiChildFlags childFlags = ImGuiChildFlags_AlwaysUseWindowPadding;
@@ -277,7 +284,7 @@ bool button(const char* label, ImVec4 tint, ImVec2 size, ButtonKind kind) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float r = kButtonRounding;
 
-    if (h > 0.01f) {
+    if (h > 0.01f && !g_lowPower) {
         for (int i = 1; i <= 4; ++i) {
             const float g = static_cast<float>(i) * 1.6f;
             dl->AddRect(ImVec2(a.x - g, a.y - g), ImVec2(b.x + g, b.y + g),
@@ -289,8 +296,10 @@ bool button(const char* label, ImVec4 tint, ImVec2 size, ButtonKind kind) {
     ImVec4 fill = alpha(tint, primary ? 0.60f + 0.22f * h : 0.10f + 0.12f * h);
     if (held) fill = ImVec4(fill.x * 0.82f, fill.y * 0.82f, fill.z * 0.82f, fill.w + 0.08f);
     dl->AddRectFilled(a, b, col(fill), r);
-    dl->AddRectFilled(a, ImVec2(b.x, a.y + sz.y * 0.5f), col(ImVec4(1, 1, 1, primary ? 0.14f : 0.05f)), r,
-                      ImDrawFlags_RoundCornersTop);
+    if (!g_lowPower) {
+        dl->AddRectFilled(a, ImVec2(b.x, a.y + sz.y * 0.5f), col(ImVec4(1, 1, 1, primary ? 0.14f : 0.05f)), r,
+                          ImDrawFlags_RoundCornersTop);
+    }
     dl->AddRect(a, b, col(alpha(tint, primary ? 0.95f : 0.30f + 0.40f * h)), r, 0, 1.0f);
 
     const ImVec4 textColor = primary ? ImVec4(1, 1, 1, 1) : g_palette.text;
@@ -313,7 +322,7 @@ void pill(const char* text, ImVec4 color, bool pulse) {
     dl->AddRect(a, b, col(alpha(color, 0.45f)), height * 0.5f, 0, 1.0f);
 
     const ImVec2 dot(a.x + padX + dotR, a.y + height * 0.5f);
-    if (pulse) {
+    if (pulse && !g_lowPower) {
         const float phase = std::fmod(static_cast<float>(ImGui::GetTime()) * 1.1f, 1.0f);
         dl->AddCircleFilled(dot, dotR + 7.0f * phase, col(alpha(color, 0.45f * (1.0f - phase))), 24);
     }

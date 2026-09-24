@@ -36,10 +36,18 @@ LiveController::~LiveController() { stop(); }
 
 void LiveController::start(const std::string& configPath) {
     if (running_.load()) return;
+    if (!instanceLock_.acquire(muuk::ctrader_fix::instanceLockFile(configPath))) {
+        setError("Muuk is already running with this config (another window, muuk-live, or the auto-start task). "
+                 "Close that one first -- two copies on one login keep kicking each other off the broker.");
+        return;
+    }
     wantConnected_ = true;
     consecutiveFailures_ = 0;
     reconnectScheduled_ = false;
-    if (!startRunner(configPath)) wantConnected_ = false;  // bad config: nothing to retry
+    if (!startRunner(configPath)) {
+        wantConnected_ = false;  // bad config: nothing to retry
+        instanceLock_.release();
+    }
 }
 
 bool LiveController::startRunner(const std::string& configPath) {
@@ -149,6 +157,7 @@ void LiveController::stop() {
     running_ = false;
     // Keep a copy of every session's log without anyone having to remember.
     if (wasRunning && !configPath_.empty()) (void)saveLog(configPath_);
+    instanceLock_.release();
 }
 
 bool LiveController::openRange() { return runner_ && running_.load() && runner_->openRange(); }

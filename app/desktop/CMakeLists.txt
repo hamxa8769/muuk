@@ -12,6 +12,6 @@ add_executable(muuk-desktop
 target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix imgui)
 if(WIN32)
     # dwmapi: dark native title bar to match the app theme; shell32: open PDFs/folders.
-    target_link_libraries(muuk-desktop PRIVATE dwmapi shell32 psapi)
+    target_link_libraries(muuk-desktop PRIVATE dwmapi shell32 psapi wtsapi32)
 endif()
 target_compile_features(muuk-desktop PRIVATE cxx_std_20)

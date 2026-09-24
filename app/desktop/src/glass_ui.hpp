@@ -36,9 +36,11 @@ void applyTheme(bool dark);
 // Call once per frame before any window.
 void drawBackground();
 
-// Low-power look for drawing without a GPU (software renderer on a VPS):
-// a still background with far fewer translucent layers. Same colours.
+// Lite mode, for drawing without a GPU (software renderer on a VPS): a
+// still, flat look -- no glows, shadows, sheen, pulses or animations -- so
+// a frame is cheap and nothing on screen asks for another one. Same colours.
 void setLowPower(bool on);
+[[nodiscard]] bool lowPower();
 
 // A frosted glass card. Everything between beginCard/endCard is laid out
 // inside it with normal ImGui calls. size.y == 0 with autoHeight grows to

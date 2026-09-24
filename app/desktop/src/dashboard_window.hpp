@@ -44,8 +44,17 @@ public:
     // Overrides the config path found by findDefaultConfigPath() (e.g.
     // from the command line).
     void setConfigPath(const std::string& path);
-    // Shown in the Performance tab (e.g. "Direct3D 11 (software - no graphics card)").
-    void setRendererName(std::string name) { rendererName_ = std::move(name); }
+    // Shown in the Performance tab (e.g. "Direct3D 11 software (no GPU)").
+    // A software renderer forces Lite mode on.
+    void setRenderer(std::string name, bool software) {
+        rendererName_ = std::move(name);
+        softwareRenderer_ = software;
+    }
+    // Lite mode: flat look, no animations, and main.cpp redraws only when
+    // something happens (1 frame/s idle). Always on without a GPU.
+    [[nodiscard]] bool liteMode() const { return prefs_.liteMode || softwareRenderer_; }
+    // For frames that aren't drawn (window hidden): keeps auto-reconnect going.
+    void tickWithoutDrawing(LiveController& controller);
     [[nodiscard]] std::string configPath() const { return configPathBuffer_.data(); }
 
     void render(LiveController& controller);
@@ -120,6 +129,7 @@ private:
     // Performance tab.
     SystemMonitor monitor_;
     std::string rendererName_;
+    bool softwareRenderer_ = false;
     double perfSampledAt_ = -1.0;
     uint64_t lastTicks_ = 0;
     double quotesPerSecond_ = 0.0;

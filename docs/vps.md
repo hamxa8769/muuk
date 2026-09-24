@@ -18,8 +18,29 @@ themselves if the connection drops.
 - **Region: London or Europe.** IC Markets' cTrader servers are in London;
   confirm with IC Markets, since this can change.
 - 2 vCPU and 2–4 GB RAM is plenty.
-- No graphics card needed. The app then draws in software (low-power
-  look, ~15 frames/s, about 0% CPU while minimized).
+- No graphics card needed. The app then draws in software and switches to
+  **Lite mode** by itself. Measured on 1 CPU core: about 5% with the window
+  open and idle, and 0% when minimized, covered, or with Remote Desktop
+  disconnected. RAM is about 50 MB.
+
+### CPU
+
+| | CPU | When to use |
+|---|---|---|
+| `muuk-desktop`, Lite mode | ~5% of a core idle, ~0% minimized | you want to look at it now and then |
+| `muuk-desktop` while you move the mouse | up to ~50% of a core (10 frames/s) | only while you use it |
+| `muuk-live` (console) | ~0% | least possible; watch the `[status]` line every minute |
+
+- Lite mode means a flat look, no animations or graphs, and redrawing
+  only when something happens: 1 frame/s idle, 10 frames/s for 3 s after
+  you touch it. Trading speed is the same in every mode.
+- On a PC with a GPU you can switch it on too: Performance tab → *Lite
+  mode*.
+- **Run one copy only.** Two copies on one login keep kicking each other
+  off the broker and burn CPU reconnecting. The bot now refuses to start a
+  second copy for the same config ("Muuk is already running with this
+  config"). That includes the auto-start task plus a copy you started by
+  hand.
 
 ## 2. Make the package (on your PC)
 

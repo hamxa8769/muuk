@@ -458,6 +458,7 @@ void DashboardWindow::render(LiveController& controller) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground |
                      ImGuiWindowFlags_NoScrollbar);
 
+    glass::setLowPower(liteMode());
     controller.setAutoReconnect(prefs_.autoReconnect);
     controller.tick();  // reconnects a dropped connection when it's time
     const bool running = controller.isRunning();
@@ -1699,6 +1700,11 @@ void DashboardWindow::renderVolumeTab() {
 }
 
 
+void DashboardWindow::tickWithoutDrawing(LiveController& controller) {
+    controller.setAutoReconnect(prefs_.autoReconnect);
+    controller.tick();
+}
+
 void DashboardWindow::samplePerformance(const std::optional<LiveSnapshot>& snap) {
     monitor_.sample(LiveController::dataDirectory(configPathBuffer_.data()));
     const double now = ImGui::GetTime();
@@ -1776,7 +1782,8 @@ void DashboardWindow::renderPerformanceTab(LiveController& controller, const std
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float w = (ImGui::GetContentRegionAvail().x - spacing * 3) / 4.0f;
     const float h = ImGui::GetTextLineHeight() * 3.0f + (numberFont_ ? numberFont_->FontSize : 20.0f) +
-                    ImGui::GetStyle().WindowPadding.y * 2 + ImGui::GetStyle().ItemSpacing.y * 4 + 46.0f;
+                    ImGui::GetStyle().WindowPadding.y * 2 + ImGui::GetStyle().ItemSpacing.y * 4 +
+                    (liteMode() ? 0.0f : 46.0f);
     auto pct = [](double v) {
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%.0f%%", v);
@@ -1788,13 +1795,15 @@ void DashboardWindow::renderPerformanceTab(LiveController& controller, const std
         ImGui::TextDisabled("%s", caption);
         withFont(numberFont_, [&] { ImGui::TextColored(color, "%s", value.c_str()); });
         ImGui::TextDisabled("%s", sub.c_str());
-        std::vector<float> values(graph.begin(), graph.end());
-        if (values.empty()) values.push_back(0.0f);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_PlotLines, color);
-        ImGui::PlotLines("##g", values.data(), static_cast<int>(values.size()), 0, nullptr, 0.0f, graphMax,
-                         ImVec2(-FLT_MIN, 42.0f));
-        ImGui::PopStyleColor(2);
+        if (!liteMode()) {  // lite: numbers only
+            std::vector<float> values(graph.begin(), graph.end());
+            if (values.empty()) values.push_back(0.0f);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_PlotLines, color);
+            ImGui::PlotLines("##g", values.data(), static_cast<int>(values.size()), 0, nullptr, 0.0f, graphMax,
+                             ImVec2(-FLT_MIN, 42.0f));
+            ImGui::PopStyleColor(2);
+        }
         glass::endCard();
         if (!last) ImGui::SameLine();
     };
@@ -1856,6 +1865,17 @@ void DashboardWindow::renderPerformanceTab(LiveController& controller, const std
             row("Clock vs broker", "--");
         }
         if (ImGui::Checkbox("Reconnect by itself if the connection drops", &prefs_.autoReconnect)) savePrefs(prefs_);
+        ImGui::BeginDisabled(softwareRenderer_);
+        bool lite = liteMode();
+        if (ImGui::Checkbox("Lite mode (least CPU)", &lite)) {
+            prefs_.liteMode = lite;
+            savePrefs(prefs_);
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip(softwareRenderer_
+                                  ? "Always on here: there's no graphics card, so every frame is drawn by the CPU."
+                                  : "Flat look, no animations, and the window redraws only when something happens "
+                                    "(about once a second when idle). Trading is never slowed either way.");
         ImGui::SetItemTooltip("Retries after 5, 10, 20, 40, then every 60 s. The running basket is checked against "
                               "the broker and picked up again on reconnect.");
 
