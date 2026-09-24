@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -162,5 +163,9 @@ struct OrderCancelRejectInfo {
 // used for TransactTime. Declared here so tests can verify the format
 // without depending on wall-clock time.
 [[nodiscard]] std::string nowUtcTimestamp();
+
+// A FIX UTCTimestamp ("YYYYMMDD-HH:MM:SS" with optional ".sss") as
+// milliseconds since the Unix epoch; nullopt if it doesn't parse.
+[[nodiscard]] std::optional<int64_t> parseUtcTimestampMs(const std::string& fixTimestamp);
 
 }  // namespace muuk::ctrader_fix

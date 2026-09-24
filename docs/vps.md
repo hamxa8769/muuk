@@ -1,122 +1,136 @@
 # Running Muuk on a VPS
 
-A VPS keeps the bot running 24/5 when your own PC is off. Both programs
-run on one:
+A VPS keeps the bot running 24/5 when your own PC is off. It also puts
+the bot next to the broker. From a home PC, reaching IC Markets' cTrader
+servers can take 250+ ms. From a VPS in the same region it is a few ms.
 
 | Program | Use it when |
 |---|---|
-| `muuk-live.exe` (console) | Unattended, 24/5. No graphics needed, smallest footprint. |
-| `muuk-desktop.exe` (window) | You want to watch or control it over Remote Desktop. |
+| `muuk-desktop.exe` (window) | You want to watch and control it over Remote Desktop. Works without a graphics card. |
+| `muuk-live.exe` (console) | Unattended, smallest footprint. |
 
-Both use the same config file and trading logic. The desktop app also
-saves basket history, reports and logs.
+Both use the same config, state and history files, and both reconnect by
+themselves if the connection drops.
 
 ## 1. Pick the VPS
 
-- **Windows** (Windows Server 2019/2022, or Windows 10/11). The build is
-  Windows-native.
-- **Close to the broker's cTrader servers.** For IC Markets these are in
-  London; confirm with IC Markets, since this changes. Pick a London or
-  Europe region. The desktop app's *System speed → Broker round trip*
-  shows the latency you actually get. Aim for a few milliseconds instead
-  of 100+.
-- 2 vCPU and 2–4 GB RAM is plenty. The bot itself needs microseconds per
-  quote.
+- **Windows**: Windows Server 2019/2022, or Windows 10/11.
+- **Region: London or Europe.** IC Markets' cTrader servers are in London;
+  confirm with IC Markets, since this can change.
+- 2 vCPU and 2–4 GB RAM is plenty.
+- No graphics card needed. The app then draws in software (low-power
+  look, ~15 frames/s, about 0% CPU while minimized).
 
-## 2. Copy it over
+## 2. Make the package (on your PC)
 
-Copy these files into one folder, e.g. `C:\Muuk\`:
+```powershell
+cmake --build build --config Release
+powershell -ExecutionPolicy Bypass -File tools\package-vps.ps1 -Config .\ic_markets_demo.local.json
+```
 
-- `build\engine\ctrader_fix\Release\muuk-live.exe`
-- `build\app\desktop\Release\muuk-desktop.exe`
-- your config (`ic_markets_demo.local.json`)
+This creates `dist\Muuk-VPS\` and `dist\Muuk-VPS.zip` with:
 
-The Release builds link the MSVC runtime dynamically. If a program won't
-start ("VCRUNTIME140.dll missing"), install the *Microsoft Visual C++
-Redistributable (x64)* from Microsoft on the VPS.
+| File | What it is |
+|---|---|
+| `muuk-desktop.exe`, `muuk-live.exe` | the app and the console bot |
+| `msvcp140.dll`, `vcruntime140*.dll` | the Visual C++ runtime, so nothing needs installing |
+| `check-vps.ps1` | checks the VPS is fit to trade (changes nothing) |
+| `install-autostart.ps1` | starts the bot at logon and restarts it if it stops |
+| `start-desktop.cmd`, `start-live.cmd` | double-click starters |
+| `README-VPS.md` | this guide |
+| your config | **it contains your FIX password** — keep the zip private |
 
-`muuk-desktop` needs OpenGL 3.0. Many VPSs have no GPU. If the window
-doesn't open (the console shows `GLFW error ... WGL`), use `muuk-live`
-there, or put a software OpenGL `opengl32.dll` (Mesa llvmpipe) next to
-`muuk-desktop.exe`.
+## 3. Copy it to the VPS
 
-## 3. Start automatically
+1. Connect with Remote Desktop (`mstsc`). Before connecting, open *Show
+   Options → Local Resources → More…* and tick your drive (e.g. `E:`).
+   It then shows up on the VPS in File Explorer as *E on your-PC*.
+2. Copy `Muuk-VPS.zip` to the VPS, e.g. into `C:\Muuk\`, and extract it.
+   Copy-paste of the file over RDP also works.
+3. If Windows blocks the files (downloaded or copied from another machine),
+   right-click the zip → *Properties* → *Unblock*, before extracting.
 
-Use Task Scheduler → *Create Task*:
+## 4. Check the VPS
 
-- **Trigger:** *At startup* for `muuk-live`, or *At log on* for
-  `muuk-desktop` (it needs a desktop session).
-- **Action:**
-  - `C:\Muuk\muuk-live.exe --credentials C:\Muuk\ic_markets_demo.local.json`, or
-  - `C:\Muuk\muuk-desktop.exe --config C:\Muuk\ic_markets_demo.local.json --connect`
-- **Start in:** `C:\Muuk`
-- **Settings:** *If the task fails, restart every 1 minute*. Leave
-  *Stop the task if it runs longer than* unchecked.
+```powershell
+cd C:\Muuk
+powershell -ExecutionPolicy Bypass -File .\check-vps.ps1
+```
 
-Instead of `--connect`, you can tick **Connect when the app opens** in
-the app itself. After a restart the bot reconnects and carries on with the
-running basket. It checks the basket against the broker first; see
-`docs/ctrader-fix.md`, "Persistence".
+| Line | Good | Fix if not |
+|---|---|---|
+| Broker trade / quote | under 20 ms | pick a VPS region nearer London |
+| Time sync | recent sync | *Settings → Time & language → Sync now* |
+| Power plan | sleep "never" | *Power options → never sleep* |
+| Disk | 2 GB+ free | free up space |
+| VC++ runtime | found | it's in the folder; re-extract the zip |
 
-For `muuk-desktop` on a server that restarts by itself, enable automatic
-logon for that user (Sysinternals *Autologon*). Otherwise the *At log on*
-trigger never fires.
+## 5. First run: check it works
 
-## 4. Keep it running
+1. Double-click `start-desktop.cmd`. The app opens and connects with your
+   config.
+2. **Performance tab.** Leave it open for a few minutes.
+   - The top line should say **"Healthy - ready for trading"**.
+   - Broker round trip should be a few ms (it's measured on every order).
+   - The clock should be within a few hundred ms.
+   - Quotes per second should be above 0 while the market is open.
+   - *Graphics* shows whether it found a graphics card or is drawing in
+     software (both are fine).
+3. **Log tab.** Check for "logged on", "[sync] ...", and "engine is now
+   active" or "connected -- waiting for Open range".
+4. **Positions / Pending orders.** These must match what cTrader shows for
+   the account.
+5. **Reconnect test.** Disconnect the VPS network for ~30 s, or restart the
+   app. The log shows `[reconnect] ...`, then the basket is picked up again
+   (`[resume] ...`).
+6. **Don't run the bot on your PC and the VPS at the same time** with the
+   same login. The second logon kicks the first one off, and both then
+   fight over the same basket. Close it on your PC first.
 
-- **Power:** High performance plan; never sleep or hibernate.
-- **Remote Desktop:** when you're done, close the RDP window
-  (*disconnect*). **Don't sign out.** Signing out ends the session and
-  closes the app. The desktop app treats that like a shutdown (see
-  below).
-- **Windows Update:** set active hours and pause automatic restarts.
-  Restart by hand at the weekend, when gold (XAUUSD) is closed, roughly
+## 6. Start automatically
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
+```
+
+- This registers a Task Scheduler task. At logon it starts
+  `muuk-desktop.exe --config <your config> --connect`, and restarts it if
+  it stops.
+- Use `-Mode live` for the console bot instead, and `-Remove` to undo.
+- If the VPS can reboot by itself, turn on automatic logon for your user
+  (Sysinternals *Autologon*). Otherwise nobody logs on and nothing starts.
+- The app's own **Connect when the app opens** checkbox does the same
+  thing as `--connect`.
+
+## 7. Day to day
+
+- **Remote Desktop:** close the RDP window (*disconnect*). **Don't sign
+  out.** Signing out ends the session. The app treats that like a shutdown
+  and closes every position first.
+- **Minimize the app** when you're not watching it. Minimized it redraws
+  twice a second and uses almost no CPU. Trading is never slowed by the
+  window.
+- **Windows Update:** set active hours and pause automatic restarts. Do
+  restarts at the weekend, when gold (XAUUSD) is closed, roughly
   Friday 22:00 to Sunday 23:00 UTC.
 
-## 5. What the exit guard covers, and what it doesn't
+## What protects the account, and what doesn't
 
 | Event | What happens |
 |---|---|
-| `muuk-live`: Ctrl+C, closing the console, logoff, shutdown | Cancels every pending order, closes every position, waits for the broker to confirm, then exits. `--keep-open-on-exit` turns this off. |
-| `muuk-desktop`: close button / Alt+F4 with trades open | Asks: *Close everything & exit*, *Exit, keep them open*, or *Cancel*. |
-| `muuk-desktop`: Windows logoff / shutdown / restart | Closes everything automatically. Windows shows "Muuk is closing open positions" for up to 8 s. |
-| Crash, killed process (Task Manager), power or network loss, VPS host failure | **Nothing on the client can react.** Positions stay open at the broker, unmanaged. |
-
-The last row is the real risk of any client-side bot. To limit it:
-
-- Set **Max basket loss** in Settings. The bot then stops adding orders
-  once the loss reaches that amount (it does not close the basket; see
-  `docs/architecture.md`).
-- The Task Scheduler restart (step 3) brings the bot back. When it
-  reconnects, it checks the saved basket against the broker and carries
-  on with it, including any order that filled while it was down. If
-  something changed that it can't explain, it doesn't resume: it cancels
-  the basket's pending orders, lists the remaining positions, and opens
-  nothing new until they're closed.
-- Check the account from the cTrader mobile app now and then.
+| Connection drops (network, broker restart) | Reconnects after 5, 10, 20, 40, then every 60 s. The running basket is checked against the broker and carries on. |
+| App restarted, or the VPS rebooted | Starts again (step 6), reconnects, picks the basket up (`docs/ctrader-fix.md`, "Persistence"). |
+| A pending order goes missing | Placed again, logged as `MISSED`. |
+| `muuk-live`: Ctrl+C, closing the console, logoff, shutdown | Closes every position and pending order first (`--keep-open-on-exit` turns this off). |
+| `muuk-desktop`: close button with trades open | Asks: close everything and exit, keep them open, or cancel. |
+| `muuk-desktop`: Windows logoff / shutdown | Closes everything first (up to 8 s). |
+| Crash, killed process, power or VPS host failure | **Nothing can react at that moment.** Positions stay open until the bot is back (auto-start). Set **Max basket loss** and check the account from the cTrader app. |
 
 ## Before using real money
 
-This is built and tested for the IC Markets **demo** account. Before a
-live account:
-
-- **TLS.** The FIX connection is plain TCP today (see
-  `docs/ctrader-fix.md`, "Known limitations"), so your FIX password
-  crosses the network unencrypted. cTrader offers SSL FIX ports; adding
-  TLS is the one must-do.
-- **Commission.** Set your real rate in Settings (it defaults to $0).
-  Otherwise net P/L and the profit target ignore it.
-- Run it on the demo account, on the VPS, for at least a week or two.
-  Compare the PDF report with cTrader's own history.
-
-## Keeping an eye on it
-
-Everything the bot does is in its own files next to the config:
-
-- `muuk_state/`: the running basket, so a restart carries on with it
-- `muuk_history/baskets.jsonl`: every basket
-- `muuk_reports/`: PDF reports
-- `muuk_logs/`: the running log, plus copies saved on every disconnect
-
-Copy these off the VPS, or open the desktop app over RDP to see the same
-thing live.
+- This is built and tested against the IC Markets **demo** account.
+- **TLS:** the FIX connection is plain TCP today, so your FIX password
+  crosses the network unencrypted. Add TLS before any live account.
+- Set your real commission rate in Settings.
+- Run on demo, on the VPS, for a week or two. Compare the PDF report with
+  cTrader's own history.

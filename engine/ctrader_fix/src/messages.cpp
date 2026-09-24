@@ -7,6 +7,34 @@
 
 namespace muuk::ctrader_fix {
 
+std::optional<int64_t> parseUtcTimestampMs(const std::string& ts) {
+    // YYYYMMDD-HH:MM:SS[.sss]
+    if (ts.size() < 17 || ts[8] != '-' || ts[11] != ':' || ts[14] != ':') return std::nullopt;
+    auto num = [&](std::size_t pos, std::size_t len) -> int {
+        int v = 0;
+        for (std::size_t i = pos; i < pos + len; ++i) {
+            if (ts[i] < '0' || ts[i] > '9') return -1;
+            v = v * 10 + (ts[i] - '0');
+        }
+        return v;
+    };
+    const int y = num(0, 4), mo = num(4, 2), d = num(6, 2), h = num(9, 2), mi = num(12, 2), s = num(15, 2);
+    if (y < 0 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || mi < 0 || s < 0) return std::nullopt;
+    int ms = 0;
+    if (ts.size() >= 21 && ts[17] == '.') {
+        ms = num(18, 3);
+        if (ms < 0) return std::nullopt;
+    }
+    // Days since the epoch for a proleptic Gregorian date (Howard Hinnant's days_from_civil).
+    const int yy = y - (mo <= 2 ? 1 : 0);
+    const int era = (yy >= 0 ? yy : yy - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(yy - era * 400);
+    const unsigned doy = static_cast<unsigned>((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+    return ((days * 24 + h) * 60 + mi) * 60000 + static_cast<int64_t>(s) * 1000 + ms;
+}
+
 std::string nowUtcTimestamp() {
     const auto now = std::chrono::system_clock::now();
     const std::time_t t = std::chrono::system_clock::to_time_t(now);

@@ -36,6 +36,10 @@ void applyTheme(bool dark);
 // Call once per frame before any window.
 void drawBackground();
 
+// Low-power look for drawing without a GPU (software renderer on a VPS):
+// a still background with far fewer translucent layers. Same colours.
+void setLowPower(bool on);
+
 // A frosted glass card. Everything between beginCard/endCard is laid out
 // inside it with normal ImGui calls. size.y == 0 with autoHeight grows to
 // fit the contents; size (0,0) without autoHeight fills the remaining space.

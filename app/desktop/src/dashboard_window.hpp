@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string>
@@ -9,6 +10,7 @@
 
 #include "app_prefs.hpp"
 #include "live_controller.hpp"
+#include "system_monitor.hpp"
 #include "muuk/ctrader_fix/volume_stats.hpp"
 
 struct ImFont;
@@ -42,6 +44,8 @@ public:
     // Overrides the config path found by findDefaultConfigPath() (e.g.
     // from the command line).
     void setConfigPath(const std::string& path);
+    // Shown in the Performance tab (e.g. "Direct3D 11 (software - no graphics card)").
+    void setRendererName(std::string name) { rendererName_ = std::move(name); }
     [[nodiscard]] std::string configPath() const { return configPathBuffer_.data(); }
 
     void render(LiveController& controller);
@@ -57,7 +61,7 @@ public:
 private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
     // The tabs on the right; a KPI card click selects one.
-    enum class Tab { None, Positions, Orders, History, Volume, Settings, Log };
+    enum class Tab { None, Positions, Orders, History, Volume, Performance, Settings, Log };
     [[nodiscard]] int tabFlags(Tab tab) const;
 
     void setTheme(bool dark);
@@ -73,6 +77,8 @@ private:
     void renderHistoryTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void renderSpeed(const muuk::ctrader_fix::LiveSnapshot& snap);
     void renderVolumeTab();
+    void renderPerformanceTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
+    void samplePerformance(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void refreshVolume();
     void renderConfirmPopup(LiveController& controller);
     void renderExitPopup(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
@@ -110,9 +116,20 @@ private:
     double exitClosingSince_ = 0.0;
 
     Tab selectTab_ = Tab::None;  // switch to this tab on the next frame
+
+    // Performance tab.
+    SystemMonitor monitor_;
+    std::string rendererName_;
+    double perfSampledAt_ = -1.0;
+    uint64_t lastTicks_ = 0;
+    double quotesPerSecond_ = 0.0;
+    double lastQuoteSeenAt_ = -1.0;
+    std::deque<float> rttHistory_;
+    std::deque<float> quoteHistory_;
     muuk::core::OrderId placeNowId_ = muuk::core::kInvalidOrderId;  // waiting order awaiting "Place now" confirmation
 
     Confirm confirm_ = Confirm::None;
+    std::string manualReopenText_;
     bool openConfirmRequested_ = false;
 
     std::string flashMessage_;

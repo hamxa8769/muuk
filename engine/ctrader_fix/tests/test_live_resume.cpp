@@ -609,3 +609,41 @@ TEST_CASE("Watchdog: a running basket left without any pending order gets its ne
     bot.finish();
     bot.rethrow();
 }
+
+TEST_CASE("Close range: after the manual-close cooldown a new range opens by itself (not when shutting down)") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.manualCloseCooldownSeconds = 1;
+    Bot bot(cfg, freshStateFile("manual_reopen"));
+    int seq = handshake(server, {}, {});
+    sendQuote(server, 2, 4336.50, 4336.60);
+
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // the Sell Stop
+
+    bot.runner().closeRange();
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getInt(tag::OrdType) == 1);
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4336.50, 1.0, "P1");
+
+    // Flat: the countdown shows, nothing is placed yet...
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().cooldownRemainingSeconds > 0; }));
+    REQUIRE(bot.runner().snapshot().status == EngineStatus::Idle);
+    // ...and then a new range opens around the live price.
+    const FixMessage reopened = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(reopened.getInt(tag::OrdType) == 3);
+    REQUIRE(reopened.getInt(tag::Side) == 1);
+    REQUIRE(reopened.getDouble(tag::StopPx) == Catch::Approx(4337.05));  // mid 4336.55 + half of $1.00
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().status == EngineStatus::Active; }));
+
+    // Closing for shutdown (exit guard) never reopens.
+    bot.runner().closeRange(false);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 2500ms), std::runtime_error);
+    REQUIRE(bot.runner().snapshot().status == EngineStatus::Idle);
+
+    bot.finish();
+    bot.rethrow();
+}

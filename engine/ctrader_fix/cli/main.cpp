@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -21,6 +22,7 @@ muuk::ctrader_fix::LiveRunner* g_runner = nullptr;
 bool g_flattenOnExit = true;
 bool g_shutdownStarted = false;
 std::mutex g_runnerMutex;  // keeps main() from destroying the runner while a handler still uses it
+std::atomic<bool> g_exitRequested{false};  // Ctrl+C / close / logoff / shutdown: stop, don't reconnect
 
 // Exit guard: unless --keep-open-on-exit was given, close every position and
 // cancel every pending order before disconnecting, so the account is never
@@ -56,11 +58,13 @@ BOOL WINAPI consoleHandler(DWORD event) {
     switch (event) {
         case CTRL_C_EVENT:
         case CTRL_BREAK_EVENT:
+            g_exitRequested = true;
             shutdownRunner(std::chrono::seconds(20));
             return TRUE;
         case CTRL_CLOSE_EVENT:
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT:
+            g_exitRequested = true;
             shutdownRunner(std::chrono::milliseconds(4500));
             return TRUE;
         default:
@@ -75,18 +79,23 @@ void handleSignal(int) { g_signalled = true; }  // async-signal-safe; the watche
 
 int main(int argc, char** argv) {
     std::string credentialsPath;
+    bool reconnect = true;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--credentials" && i + 1 < argc) {
             credentialsPath = argv[++i];
         } else if (arg == "--keep-open-on-exit") {
             g_flattenOnExit = false;
+        } else if (arg == "--no-reconnect") {
+            reconnect = false;
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "usage: muuk-live --credentials <local-config.json> [--keep-open-on-exit]\n"
+            std::cout << "usage: muuk-live --credentials <local-config.json> [--keep-open-on-exit] [--no-reconnect]\n"
                          "  (see README.md / docs/ctrader-fix.md for the config file's shape;\n"
                          "   keep this file out of git — it holds your cTrader FIX login.)\n"
                          "  On Ctrl+C, closing the console, logoff or shutdown every open position is\n"
-                         "  closed and every pending order cancelled first, unless --keep-open-on-exit.\n";
+                         "  closed and every pending order cancelled first, unless --keep-open-on-exit.\n"
+                         "  A dropped connection is retried after 5, 10, 20, 40, then every 60 s, and\n"
+                         "  the running basket is picked up again -- unless --no-reconnect.\n";
             return 0;
         }
     }
@@ -96,41 +105,64 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // A bad config is a mistake to fix, not something to retry.
     try {
-        const muuk::ctrader_fix::LiveConfig config = muuk::ctrader_fix::loadLiveConfig(credentialsPath);
-        muuk::ctrader_fix::LiveRunner runner(config);
-        // The running basket is saved next to the config and picked up again
-        // on the next start (see LiveRunner::setStateFile).
-        const auto stateFile = muuk::ctrader_fix::defaultStateFile(credentialsPath);
-        runner.setStateFile(stateFile);
-        std::cerr << "state file: " << stateFile.string() << "\n";
-        const RunnerRegistration registration(&runner);
-
-#ifdef _WIN32
-        SetConsoleCtrlHandler(consoleHandler, TRUE);
-        runner.run();
-#else
-        std::signal(SIGINT, handleSignal);
-        std::signal(SIGTERM, handleSignal);
-        std::atomic<bool> done{false};
-        std::thread watcher([&] {
-            while (!done && !g_signalled) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            if (g_signalled) shutdownRunner(std::chrono::seconds(20));
-        });
-        try {
-            runner.run();
-        } catch (...) {
-            done = true;
-            watcher.join();
-            throw;
-        }
-        done = true;
-        watcher.join();
-#endif
+        (void)muuk::ctrader_fix::loadLiveConfig(credentialsPath);
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << "\n";
         return 1;
     }
 
+#ifdef _WIN32
+    SetConsoleCtrlHandler(consoleHandler, TRUE);
+#else
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
+    std::atomic<bool> done{false};
+    std::thread watcher([&] {
+        while (!done && !g_signalled) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (g_signalled) {
+            g_exitRequested = true;
+            shutdownRunner(std::chrono::seconds(20));
+        }
+    });
+#endif
+
+    // The running basket is saved next to the config and picked up again on
+    // every (re)connect (see LiveRunner::setStateFile).
+    const auto stateFile = muuk::ctrader_fix::defaultStateFile(credentialsPath);
+    std::cerr << "state file: " << stateFile.string() << "\n";
+    int failures = 0;
+    while (!g_exitRequested) {
+        const auto startedAt = std::chrono::steady_clock::now();
+        try {
+            const muuk::ctrader_fix::LiveConfig config = muuk::ctrader_fix::loadLiveConfig(credentialsPath);
+            muuk::ctrader_fix::LiveRunner runner(config);
+            runner.setStateFile(stateFile);
+            const RunnerRegistration registration(&runner);
+            {
+                std::scoped_lock lock(g_runnerMutex);
+                g_shutdownStarted = false;  // this runner can be shut down
+            }
+            if (!g_exitRequested) runner.run();
+        } catch (const std::exception& ex) {
+            std::cerr << "error: " << ex.what() << "\n";
+        }
+        if (g_exitRequested || !reconnect) break;
+
+        // Back off: 5, 10, 20, 40, then 60 s -- reset once a connection held for a minute.
+        if (std::chrono::steady_clock::now() - startedAt > std::chrono::seconds(60)) failures = 0;
+        const int delay = std::min(60, 5 << std::min(failures, 4));
+        ++failures;
+        std::cerr << "[reconnect] connection lost -- reconnecting in " << delay << "s\n";
+        for (int i = 0; i < delay * 10 && !g_exitRequested; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+#ifndef _WIN32
+    done = true;
+    watcher.join();
+#endif
     return 0;
 }

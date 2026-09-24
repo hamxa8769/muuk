@@ -157,7 +157,15 @@ broker rejects the cancel, the order goes back on the pending list.
 ## Operator controls (desktop app / `LiveRunner`)
 
 - `openRange()` / `closeRange()` -- open a new range centered on live price;
-  or cancel all pending orders, close all positions and go Idle.
+  or cancel all pending orders, close all positions and go Idle. After
+  `closeRange()`, with auto-continue on, a new range opens around live price
+  `connection.manualCloseCooldownSeconds` (default 15; Settings → "Cooldown
+  after Close range") after the account is confirmed flat. The countdown
+  shows as "Cooldown" in the app, and 0 means wait for Open range instead.
+  The exit guard uses `closeRange(false)`, which never reopens.
+- Dropped connections are retried after 5, 10, 20, 40, then every 60 s, by
+  both `muuk-desktop` ("Reconnect by itself", Performance tab) and
+  `muuk-live` (`--no-reconnect` turns it off).
 - `closeAllPositions()` / `cancelAllPendingOrders()` -- either half of
   `closeRange()` on its own (also leaves the engine Idle).
 - `closePosition(id)` / `cancelOrder(id)` -- one position or order, leaving

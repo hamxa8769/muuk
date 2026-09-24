@@ -30,6 +30,7 @@ AppPrefs loadPrefs() {
         prefs.configPath = j.value("configPath", std::string());
         prefs.darkMode = j.value("darkMode", true);
         prefs.autoConnect = j.value("autoConnect", false);
+        prefs.autoReconnect = j.value("autoReconnect", true);
     } catch (const std::exception&) {
         return AppPrefs{};
     }
@@ -44,7 +45,8 @@ void savePrefs(const AppPrefs& prefs) {
         std::ofstream out(file, std::ios::trunc);
         out << nlohmann::json{{"configPath", prefs.configPath},
                               {"darkMode", prefs.darkMode},
-                              {"autoConnect", prefs.autoConnect}}
+                              {"autoConnect", prefs.autoConnect},
+                              {"autoReconnect", prefs.autoReconnect}}
                    .dump(2);
     } catch (const std::exception&) {
         // Preferences are a convenience -- never worth interrupting the app for.

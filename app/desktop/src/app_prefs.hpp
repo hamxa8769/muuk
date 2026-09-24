@@ -12,6 +12,7 @@ struct AppPrefs {
     std::string configPath;    // last config used
     bool darkMode = true;
     bool autoConnect = false;  // connect as soon as the app opens
+    bool autoReconnect = true; // reconnect by itself after a dropped connection
 };
 
 // %APPDATA%\Muuk\desktop.json (or next to the working directory elsewhere).

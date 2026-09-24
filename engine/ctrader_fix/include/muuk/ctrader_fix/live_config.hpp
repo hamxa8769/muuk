@@ -62,6 +62,12 @@ struct LiveConnectionConfig {
     // wall-clock time.
     int basketCooldownSeconds = 0;
 
+    // After the operator closes a range by hand (LiveRunner::closeRange):
+    // with autoContinue on, wait this long once the account is flat, then
+    // open a new range around live price. 0 = don't reopen by itself --
+    // wait for Open range, like closeAllPositions/cancelAllPendingOrders.
+    int manualCloseCooldownSeconds = 15;
+
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
     // false: only open a range when the operator asks (LiveRunner::openRange).
@@ -94,6 +100,7 @@ struct LiveSettings {
     double lotIncrement = 0.01;
     double profitTarget = 1.0;   // basket net P/L ($) that books the basket
     int cooldownSeconds = 0;     // pause after a basket is fully flat
+    int manualCloseCooldownSeconds = 15;  // pause after Close range before a new range opens; 0 = don't reopen
     int maxOrders = 20;
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit

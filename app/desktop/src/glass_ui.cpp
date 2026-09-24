@@ -10,6 +10,7 @@ namespace muuk::desktop::glass {
 namespace {
 
 bool g_dark = true;
+bool g_lowPower = false;
 
 Palette g_palette;
 
@@ -76,13 +77,13 @@ const char* visibleEnd(const char* label) {
 }
 
 void softGlow(ImDrawList* dl, ImVec2 center, float radius, ImVec4 color) {
-    constexpr int kLayers = 28;
+    const int kLayers = g_lowPower ? 6 : 28;
     ImVec4 layer = color;
     layer.w = color.w * 2.0f / kLayers;
     const ImU32 c = ImGui::ColorConvertFloat4ToU32(layer);
     for (int i = 0; i < kLayers; ++i) {
         const float f = 1.0f - static_cast<float>(i) / kLayers;
-        dl->AddCircleFilled(center, radius * f, c, 64);
+        dl->AddCircleFilled(center, radius * f, c, g_lowPower ? 40 : 64);
     }
 }
 
@@ -103,8 +104,9 @@ void drawCardBackdrop(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     // Frosted sheen: stacked translucent top bands give a vertical fade.
     const float height = b.y - a.y;
     const ImVec4 sheen = g_dark ? ImVec4(1, 1, 1, 0.007f) : ImVec4(1, 1, 1, 0.035f);
-    for (int k = 1; k <= 8; ++k) {
-        const float h = height * 0.07f * static_cast<float>(k);
+    const int bands = g_lowPower ? 2 : 8;
+    for (int k = 1; k <= bands; ++k) {
+        const float h = height * (g_lowPower ? 0.28f : 0.07f) * static_cast<float>(k);
         dl->AddRectFilled(a, ImVec2(b.x, a.y + h), col(sheen), r, ImDrawFlags_RoundCornersTop);
     }
 
@@ -222,9 +224,12 @@ void drawBackground() {
     const ImU32 top = ImGui::ColorConvertFloat4ToU32(p.bgTop);
     const ImU32 bottom = ImGui::ColorConvertFloat4ToU32(p.bgBottom);
     dl->AddRectFilledMultiColor(ImVec2(0, 0), size, top, top, bottom, bottom);
+    // Without a GPU, the big translucent glows cost more than the whole rest
+    // of the window -- the plain gradient has to do.
+    if (g_lowPower) return;
 
     // Slow drift -- barely perceptible, just enough to feel alive.
-    const float t = static_cast<float>(ImGui::GetTime());
+    const float t = g_lowPower ? 0.0f : static_cast<float>(ImGui::GetTime());
     softGlow(dl, ImVec2(size.x * (0.16f + 0.04f * std::sin(t * 0.13f)), size.y * (0.18f + 0.05f * std::cos(t * 0.11f))),
              size.x * 0.40f, p.glowA);
     softGlow(dl, ImVec2(size.x * (0.86f + 0.03f * std::cos(t * 0.09f)), size.y * (0.32f + 0.06f * std::sin(t * 0.12f))),
@@ -232,6 +237,8 @@ void drawBackground() {
     softGlow(dl, ImVec2(size.x * (0.52f + 0.05f * std::sin(t * 0.07f)), size.y * (0.98f + 0.04f * std::cos(t * 0.10f))),
              size.x * 0.44f, p.glowC);
 }
+
+void setLowPower(bool on) { g_lowPower = on; }
 
 void beginCard(const char* id, ImVec2 size, bool autoHeight, ImGuiWindowFlags extraFlags) {
     ImGuiChildFlags childFlags = ImGuiChildFlags_AlwaysUseWindowPadding;

@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "muuk/ctrader_fix/fix_message.hpp"
+#include "muuk/ctrader_fix/messages.hpp"
 
 using namespace muuk::ctrader_fix;
 
@@ -158,4 +159,14 @@ TEST_CASE("getString() throws for a missing tag; getOptionalString() returns nul
     FixMessage msg("0");
     REQUIRE_THROWS_AS(msg.getString(999), FixMessageError);
     REQUIRE_FALSE(msg.getOptionalString(999).has_value());
+}
+
+TEST_CASE("parseUtcTimestampMs reads FIX UTC timestamps, with or without milliseconds") {
+    using muuk::ctrader_fix::parseUtcTimestampMs;
+    REQUIRE(parseUtcTimestampMs("19700101-00:00:00").value() == 0);
+    REQUIRE(parseUtcTimestampMs("19700101-00:00:01.250").value() == 1250);
+    // 2026-09-24 14:07:30.5 UTC
+    REQUIRE(parseUtcTimestampMs("20260924-14:07:30.500").value() == 1790258850500LL);
+    REQUIRE_FALSE(parseUtcTimestampMs("garbage").has_value());
+    REQUIRE_FALSE(parseUtcTimestampMs("20261324-14:07:30").has_value());
 }

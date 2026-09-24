@@ -128,6 +128,11 @@ struct LiveSnapshot {
     std::string sessionStartedAt;
     std::string statsSince;    // lifetime statistics (speed, basket numbering) count from here -- see resetStats()
     std::string resumeNote;    // what happened to the saved basket on connect (resumed / couldn't), empty if nothing
+
+    // Connection health.
+    std::string connectedSince;          // when this connection became ready ("" before)
+    std::string disconnectReason;        // why the last session ended ("" while up)
+    std::optional<double> clockOffsetMs; // this PC's clock minus the broker's SendingTime (includes one-way latency)
     std::vector<BasketRecord> baskets;           // completed this session, oldest first
     std::optional<BasketRecord> currentBasket;   // the basket in progress, if any
 };
@@ -229,14 +234,18 @@ public:
     // on top of an unfinished one.
     //
     // closeRange(): ends the running cycle -- cancels every pending order,
-    // closes every open position, and leaves the engine Idle. The bot
-    // won't open another range on its own until openRange() is called.
+    // closes every open position, and leaves the engine Idle. With
+    // `reopen` (the default), autoContinue on and
+    // connection.manualCloseCooldownSeconds > 0, a new range opens around
+    // live price that many seconds after the account is confirmed flat
+    // (the snapshot shows the countdown); otherwise the bot waits for
+    // openRange(). reopen=false is for shutting down.
     //
     // closeAllPositions()/cancelAllPendingOrders(): each half of
     // closeRange() on its own; both also stop the cycle (engine Idle),
     // since the engine can't be told to forget only part of its state.
     bool openRange();
-    void closeRange();
+    void closeRange(bool reopen = true);
     void closeAllPositions();
     void cancelAllPendingOrders();
 
@@ -539,7 +548,18 @@ private:
     uint64_t lastWrittenSeq_ = 0;  // guarded by stateWriteMutex_
     std::string statsSince_;
     std::string resumeNote_;
-    bool holdAutoStart_ = false;  // a saved basket couldn't be resumed: the operator decides what's next
+    bool holdAutoStart_ = false;
+
+    // Connection health (see LiveSnapshot). infoMutex_ rather than
+    // engineMutex_: disconnect handlers can run while a send holds the latter.
+    mutable std::mutex infoMutex_;
+    std::string connectedSince_;
+    std::string disconnectReason_;
+    std::atomic<double> clockOffsetMs_{0.0};
+    std::atomic<bool> clockOffsetKnown_{false};
+    uint64_t quoteMessages_ = 0;  // guarded by engineMutex_
+    // Close range asked for a new range after connection.manualCloseCooldownSeconds.
+    bool reopenAfterManualClose_ = false;  // a saved basket couldn't be resumed: the operator decides what's next
 
     // Basket history.
     std::string sessionStartedAt_;

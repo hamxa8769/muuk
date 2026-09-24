@@ -36,6 +36,14 @@ LiveController::~LiveController() { stop(); }
 
 void LiveController::start(const std::string& configPath) {
     if (running_.load()) return;
+    wantConnected_ = true;
+    consecutiveFailures_ = 0;
+    reconnectScheduled_ = false;
+    if (!startRunner(configPath)) wantConnected_ = false;  // bad config: nothing to retry
+}
+
+bool LiveController::startRunner(const std::string& configPath) {
+    if (running_.load()) return true;
     // A previous run may have ended on its own (dropped connection) without
     // anyone calling stop() — join that thread before starting a new one;
     // assigning over a still-joinable std::thread calls std::terminate().
@@ -48,7 +56,7 @@ void LiveController::start(const std::string& configPath) {
         config = muuk::ctrader_fix::loadLiveConfig(configPath);
     } catch (const std::exception& ex) {
         setError(ex.what());
-        return;
+        return false;
     }
 
     attachData(configPath);
@@ -74,11 +82,67 @@ void LiveController::start(const std::string& configPath) {
             appendLog(std::string("[error] ") + ex.what());
             setError(ex.what());
         }
+        if (wantConnected_.load()) dropped_ = true;  // ended by itself, not by stop()
         running_ = false;
     });
+    return true;
+}
+
+void LiveController::tick() {
+    const auto now = std::chrono::steady_clock::now();
+    if (dropped_.exchange(false)) {
+        std::string reason;
+        if (const auto snap = snapshot(); snap && !snap->disconnectReason.empty()) reason = snap->disconnectReason;
+        if (reason.empty()) reason = lastError();
+        if (reason.empty()) reason = "connection ended";
+        lastDrop_ = reason;
+        lastDropAt_ = muuk::ctrader_fix::localTimestamp();
+        if (wantConnected_ && autoReconnect_ && !configPath_.empty()) {
+            const int delay = std::min(60, 5 << std::min(consecutiveFailures_, 4));
+            ++consecutiveFailures_;
+            reconnectAt_ = now + std::chrono::seconds(delay);
+            reconnectScheduled_ = true;
+            appendLog("[reconnect] connection lost (" + reason + ") -- reconnecting in " + std::to_string(delay) + "s");
+        } else {
+            appendLog("[reconnect] connection lost (" + reason + ") -- auto-reconnect is off");
+        }
+    }
+    if (reconnectScheduled_ && (!wantConnected_ || !autoReconnect_)) reconnectScheduled_ = false;
+    if (reconnectScheduled_ && !running_ && now >= reconnectAt_) {
+        reconnectScheduled_ = false;
+        ++reconnects_;
+        appendLog("[reconnect] attempt " + std::to_string(reconnects_));
+        if (!startRunner(configPath_)) dropped_ = true;  // try again later
+    }
+    // A connection that has stayed up for a minute resets the back-off.
+    const auto snap = running_ ? snapshot() : std::nullopt;
+    if (snap && snap->connected) {
+        if (!stableSet_) {
+            stableSet_ = true;
+            stableSince_ = now;
+        } else if (now - stableSince_ > std::chrono::seconds(60)) {
+            consecutiveFailures_ = 0;
+        }
+    } else {
+        stableSet_ = false;
+    }
+}
+
+LiveController::ConnectionHealth LiveController::connectionHealth() const {
+    ConnectionHealth h;
+    h.reconnects = reconnects_;
+    h.lastDrop = lastDrop_;
+    h.lastDropAt = lastDropAt_;
+    if (reconnectScheduled_) {
+        const auto left = std::chrono::ceil<std::chrono::seconds>(reconnectAt_ - std::chrono::steady_clock::now());
+        h.reconnectInSeconds = static_cast<int>(std::max<std::chrono::seconds::rep>(0, left.count()));
+    }
+    return h;
 }
 
 void LiveController::stop() {
+    wantConnected_ = false;
+    reconnectScheduled_ = false;
     const bool wasRunning = runner_ && (running_.load() || thread_.joinable());
     if (runner_) runner_->stop();
     if (thread_.joinable()) thread_.join();
@@ -89,8 +153,8 @@ void LiveController::stop() {
 
 bool LiveController::openRange() { return runner_ && running_.load() && runner_->openRange(); }
 
-void LiveController::closeRange() {
-    if (runner_ && running_.load()) runner_->closeRange();
+void LiveController::closeRange(bool reopen) {
+    if (runner_ && running_.load()) runner_->closeRange(reopen);
 }
 
 void LiveController::closeAllPositions() {

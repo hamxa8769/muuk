@@ -52,6 +52,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.symbolId = conn.value("symbolId", "");
     cfg.connection.autoRangeWidthPoints = conn.value("autoRangeWidthPoints", 0.0);
     cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
+    cfg.connection.manualCloseCooldownSeconds = conn.value("manualCloseCooldownSeconds", 15);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -76,6 +77,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.lotIncrement = config.strategy.lotProgression.lotIncrement.toDouble(spec);
     s.profitTarget = config.strategy.basketProfitTargetMoney;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
+    s.manualCloseCooldownSeconds = config.connection.manualCloseCooldownSeconds;
     s.maxOrders = config.strategy.riskLimits.maxOrders;
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
@@ -106,6 +108,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
 
     config.connection.autoRangeWidthPoints = s.rangeWidth;
     config.connection.basketCooldownSeconds = s.cooldownSeconds;
+    config.connection.manualCloseCooldownSeconds = s.manualCloseCooldownSeconds;
     config.connection.autoContinue = s.autoContinue;
 }
 
@@ -122,6 +125,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     auto& conn = j["connection"];
     conn["autoRangeWidthPoints"] = s.rangeWidth;
     conn["basketCooldownSeconds"] = s.cooldownSeconds;
+    conn["manualCloseCooldownSeconds"] = s.manualCloseCooldownSeconds;
     conn["autoContinue"] = s.autoContinue;
 
     auto& st = j["strategy"];

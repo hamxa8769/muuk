@@ -44,3 +44,6 @@ muuk_history/
 muuk_reports/
 muuk_logs/
 muuk_state/
+
+# VPS package built by tools/package-vps.ps1 (may contain your config)
+dist/

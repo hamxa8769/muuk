@@ -130,6 +130,12 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.sessionStartedAt = sessionStartedAt_;
     snap.statsSince = statsSince_;
     snap.resumeNote = resumeNote_;
+    {
+        std::scoped_lock infoLock(infoMutex_);
+        snap.connectedSince = connectedSince_;
+        snap.disconnectReason = disconnectReason_;
+    }
+    if (clockOffsetKnown_) snap.clockOffsetMs = clockOffsetMs_.load();
     snap.baskets = completedBaskets_;
     snap.currentBasket = currentBasket_;
     snap.syncingPositions = !activePosReqId_.empty();
@@ -223,10 +229,18 @@ void LiveRunner::run() {
 
         quoteSession_->setDisconnectHandler([this](const std::string& reason) {
             log("[quote session] ended: " + reason);
+            {
+                std::scoped_lock infoLock(infoMutex_);
+                if (disconnectReason_.empty()) disconnectReason_ = "quote session: " + reason;
+            }
             running_ = false;
         });
         tradeSession_->setDisconnectHandler([this](const std::string& reason) {
             log("[trade session] ended: " + reason);
+            {
+                std::scoped_lock infoLock(infoMutex_);
+                if (disconnectReason_.empty()) disconnectReason_ = "trade session: " + reason;
+            }
             running_ = false;
         });
 
@@ -312,6 +326,10 @@ void LiveRunner::run() {
             if (latestBid_ && latestAsk_) (void)engine_->onTick(latestTick());
             reconcileOnConnectLocked();
             stateReady_ = true;
+            {
+                std::scoped_lock infoLock(infoMutex_);
+                connectedSince_ = localTimestamp();
+            }
             markDirty();
             if (engine_->status() != EngineStatus::Idle) {
                 started = true;  // the saved basket carries on
@@ -338,6 +356,8 @@ void LiveRunner::run() {
             if (loops % 5 == 0) {
                 std::scoped_lock lock(engineMutex_);
                 checkBasketHealthLocked();
+                // Cooldowns also end on quiet markets, not only on the next quote.
+                if (engine_) maybeRestartAfterBasketClose();
             }
             flushState();
         }
@@ -725,6 +745,19 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
             }
             haveFullQuote = latestBid_.has_value() && latestAsk_.has_value();
             maybeEmitTick();
+            // Clock check, now and then: how far this PC's clock is from the
+            // broker's (a VPS with a drifting clock shows up here).
+            if (quoteMessages_++ % 20 == 0) {
+                if (const auto sent = msg.getOptionalString(tag::SendingTime)) {
+                    if (const auto brokerMs = parseUtcTimestampMs(*sent)) {
+                        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+                        clockOffsetMs_ = static_cast<double>(nowMs - *brokerMs);
+                        clockOffsetKnown_ = true;
+                    }
+                }
+            }
         }
         if (stateDirty_) flushState();  // only when the tick changed something (e.g. closed the basket)
         if (haveFullQuote) {
@@ -885,22 +918,30 @@ void LiveRunner::maybeRestartAfterBasketClose() {
     // starts a new cycle while any closing leg is still outstanding, or
     // once basketCloseFailed_ is set -- either would open a fresh range on
     // top of a position that hasn't actually been booked yet.
-    if (engine_->status() != EngineStatus::Completed || !accountFlat() || basketCloseFailed_) {
+    // Two ways here: a basket booked by the engine (Completed), or the
+    // operator's Close range asking for a new range afterwards (Idle).
+    const bool afterTarget = engine_->status() == EngineStatus::Completed;
+    const bool afterManualClose = engine_->status() == EngineStatus::Idle && reopenAfterManualClose_;
+    if ((!afterTarget && !afterManualClose) || !accountFlat() || basketCloseFailed_) {
         return;
     }
     if (!config_.connection.autoContinue) {
+        reopenAfterManualClose_ = false;
         return;  // the operator opens the next range by hand (openRange)
     }
 
-    if (config_.connection.basketCooldownSeconds > 0) {
+    const int cooldownSeconds =
+        afterManualClose ? config_.connection.manualCloseCooldownSeconds : config_.connection.basketCooldownSeconds;
+    if (cooldownSeconds > 0) {
         const auto now = std::chrono::steady_clock::now();
         if (!cooldownActive_) {
             // First call to see the basket fully flat -- start the clock
             // from right now, not from whenever it merely decided to close.
             cooldownActive_ = true;
-            cooldownUntil_ = now + std::chrono::seconds(config_.connection.basketCooldownSeconds);
-            log("[basket] fully flat; next cycle starts after a " +
-                std::to_string(config_.connection.basketCooldownSeconds) + "s cooldown");
+            cooldownUntil_ = now + std::chrono::seconds(cooldownSeconds);
+            log(std::string(afterManualClose ? "[manual] range closed and flat" : "[basket] fully flat") +
+                "; next range opens after a " + std::to_string(cooldownSeconds) + "s cooldown");
+            markDirty();
             return;
         }
         if (now < cooldownUntil_) {
@@ -910,6 +951,16 @@ void LiveRunner::maybeRestartAfterBasketClose() {
 
     cooldownActive_ = false;
     markDirty();
+    if (afterManualClose) {
+        reopenAfterManualClose_ = false;
+        if (!latestBid_ || !latestAsk_) return;  // no live price to center on
+        prepareNextCycle(true);
+        log("[manual] cooldown over -- opening a new range around " + std::to_string((*latestBid_ + *latestAsk_) / 2.0));
+        closeReason_.clear();
+        beginBasket();
+        for (const auto& cmd : engine_->start()) handleCommand(cmd);
+        return;
+    }
     prepareNextCycle(config_.connection.autoRangeWidthPoints > 0.0);
     log("basket closed; starting the next cycle");
     closeReason_.clear();
@@ -1166,6 +1217,7 @@ bool LiveRunner::openRange() {
 
     if (engine_->status() != EngineStatus::Idle) engine_->stopCycle();  // Completed / HaltedByRisk -> Idle
     cooldownActive_ = false;
+    reopenAfterManualClose_ = false;
     prepareNextCycle(true);
     log("[manual] opening a new range around " + std::to_string((*latestBid_ + *latestAsk_) / 2.0));
     closeReason_.clear();
@@ -1174,7 +1226,7 @@ bool LiveRunner::openRange() {
     return true;
 }
 
-void LiveRunner::closeRange() {
+void LiveRunner::closeRange(bool reopen) {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
     log("[manual] operator requested: close range");
@@ -1183,7 +1235,14 @@ void LiveRunner::closeRange() {
     closePositionsLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    reopenAfterManualClose_ =
+        reopen && config_.connection.autoContinue && config_.connection.manualCloseCooldownSeconds > 0;
+    if (reopenAfterManualClose_) {
+        log("[manual] a new range opens " + std::to_string(config_.connection.manualCloseCooldownSeconds) +
+            "s after everything is closed (Auto-open is on)");
+    }
     maybeFinalizeBasket();
+    maybeRestartAfterBasketClose();  // already flat (nothing was open)? start the countdown now
 }
 
 void LiveRunner::closeAllPositions() {
@@ -1193,6 +1252,7 @@ void LiveRunner::closeAllPositions() {
     closePositionsLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    reopenAfterManualClose_ = false;
     maybeFinalizeBasket();
 }
 
@@ -1203,6 +1263,7 @@ void LiveRunner::cancelAllPendingOrders() {
     cancelPendingLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
+    reopenAfterManualClose_ = false;
     maybeFinalizeBasket();
 }
 
@@ -1219,6 +1280,7 @@ bool LiveRunner::flattenAndWait(std::chrono::milliseconds timeout) {
         }
         engine_->stopCycle();  // also keeps a cooldown from opening a new range meanwhile
         cooldownActive_ = false;
+        reopenAfterManualClose_ = false;
         maybeFinalizeBasket();
         if (flat) return true;
     }

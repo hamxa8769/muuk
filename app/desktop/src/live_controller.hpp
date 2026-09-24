@@ -38,13 +38,29 @@ public:
     void start(const std::string& configPath);
 
     // Stops the running LiveRunner (if any) and joins its thread. Safe to
-    // call even if not running.
+    // call even if not running. Also ends auto-reconnect until the next start().
     void stop();
+
+    // Auto-reconnect: after start(), a connection that drops by itself
+    // (network, broker restart) is retried after 5, 10, 20, 40, then every
+    // 60 s -- the saved basket is picked up again on reconnect. Call tick()
+    // every frame (it does the retrying, on the caller's thread).
+    void setAutoReconnect(bool on) { autoReconnect_ = on; }
+    void tick();
+
+    struct ConnectionHealth {
+        int reconnects = 0;                  // reconnect attempts since the app started
+        std::optional<int> reconnectInSeconds;  // set while one is scheduled
+        std::string lastDrop;                // why the last connection ended by itself
+        std::string lastDropAt;
+    };
+    [[nodiscard]] ConnectionHealth connectionHealth() const;
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
     bool openRange();
-    void closeRange();
+    // reopen=false: don't open a new range after the cooldown (exit guard).
+    void closeRange(bool reopen = true);
     void closeAllPositions();
     void cancelAllPendingOrders();
     void closePosition(muuk::core::OrderId id);
@@ -112,6 +128,7 @@ public:
     std::optional<std::filesystem::path> saveLog(const std::string& configPath);
 
 private:
+    bool startRunner(const std::string& configPath);
     void appendLog(const std::string& line);
     void setError(const std::string& message);
     [[nodiscard]] static std::string fileStamp();
@@ -128,6 +145,19 @@ private:
     std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+
+    // Auto-reconnect (GUI thread only, except the atomics).
+    std::atomic<bool> wantConnected_{false};  // between start() and stop()
+    std::atomic<bool> autoReconnect_{true};
+    std::atomic<bool> dropped_{false};        // run() ended without stop() -- set by the runner thread
+    int reconnects_ = 0;
+    int consecutiveFailures_ = 0;
+    bool reconnectScheduled_ = false;
+    std::chrono::steady_clock::time_point reconnectAt_;
+    bool stableSet_ = false;
+    std::chrono::steady_clock::time_point stableSince_;
+    std::string lastDrop_;
+    std::string lastDropAt_;
 
     mutable std::mutex logMutex_;
     std::vector<std::string> log_;

@@ -279,6 +279,7 @@ void clampSettings(LiveSettings& s) {
     s.lotIncrement = std::max(0.0, s.lotIncrement);
     s.profitTarget = std::max(0.0, s.profitTarget);
     s.cooldownSeconds = std::max(0, s.cooldownSeconds);
+    s.manualCloseCooldownSeconds = std::max(0, s.manualCloseCooldownSeconds);
     s.maxOrders = std::max(1, s.maxOrders);
     s.maxLot = std::max(0.01, s.maxLot);
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
@@ -457,8 +458,11 @@ void DashboardWindow::render(LiveController& controller) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground |
                      ImGuiWindowFlags_NoScrollbar);
 
+    controller.setAutoReconnect(prefs_.autoReconnect);
+    controller.tick();  // reconnects a dropped connection when it's time
     const bool running = controller.isRunning();
     const std::optional<LiveSnapshot> snap = controller.snapshot();
+    samplePerformance(snap);
     const bool connected = running && snap && snap->connected;
 
     // Load the tunable settings from the config file once, so they can be
@@ -533,6 +537,10 @@ void DashboardWindow::render(LiveController& controller) {
         }
         if (ImGui::BeginTabItem("  Volume  ###volume", nullptr, tabFlags(Tab::Volume))) {
             renderVolumeTab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("  Performance  ###performance", nullptr, tabFlags(Tab::Performance))) {
+            renderPerformanceTab(controller, snap);
             ImGui::EndTabItem();
         }
         const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
@@ -796,6 +804,16 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
     const float bigHeight = ImGui::GetFrameHeight() * 1.7f;
 
+    // Text for the Close range confirmation, from the live settings.
+    if (snap && snap->settings.autoContinue && snap->settings.manualCloseCooldownSeconds > 0) {
+        manualReopenText_ = "All pending orders are cancelled and every open position is closed at market.\n"
+                            "Once everything is closed, a new range opens after " +
+                            std::to_string(snap->settings.manualCloseCooldownSeconds) +
+                            " s (Auto-open is on).";
+    } else {
+        manualReopenText_ = "All pending orders are cancelled and every open position is closed at market.\n"
+                            "The bot then waits until you press Open range.";
+    }
     const char* blocker = openRangeBlocker(snap, connected);
     ImGui::BeginDisabled(blocker != nullptr);
     if (glass::button("Open range", kGreen, ImVec2(half, bigHeight), glass::ButtonKind::Primary)) {
@@ -818,7 +836,8 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         openConfirmRequested_ = true;
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Cancels all pending orders, closes all open positions, and waits until you open a new range.");
+    ImGui::SetItemTooltip("Cancels all pending orders and closes all open positions. With Auto-open on, a new range "
+                          "opens after the 'Cooldown after Close range' (Settings); otherwise it waits for Open range.");
 
     ImGui::BeginDisabled(!connected || !snap);
     bool autoContinue = snap ? snap->settings.autoContinue : editSettings_.autoContinue;
@@ -899,6 +918,10 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &s.seedOffset, 0.01, "%.2f", &settingsDirty_);
         settingInt("Cooldown (s)", "Pause after a basket is fully closed before the next range opens.",
                    &s.cooldownSeconds, &settingsDirty_);
+        settingInt("Cooldown after Close range (s)",
+                   "After you press Close range: once everything is closed, wait this long, then open a new range "
+                   "around the live price (only with Auto-open on). 0 = wait for Open range instead.",
+                   &s.manualCloseCooldownSeconds, &settingsDirty_);
         settingInt("Max orders", "Safety limit: no more orders are placed in a range beyond this many.", &s.maxOrders,
                    &settingsDirty_);
         settingDouble("Max lot", "Safety limit on any single order's lot size.", &s.maxLot, 0.10, "%.2f",
@@ -1201,8 +1224,7 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
     switch (confirm_) {
         case Confirm::CloseRange:
             title = "Close the running range?";
-            detail = "All pending orders are cancelled and every open position is closed at market.\n"
-                     "The bot then waits until you press Open range.";
+            detail = manualReopenText_.c_str();
             action = "Close range";
             break;
         case Confirm::CloseAllPositions:
@@ -1519,7 +1541,7 @@ void DashboardWindow::renderExitPopup(LiveController& controller, const std::opt
 
     ImGui::BeginDisabled(!connected);
     if (glass::button("Close everything & exit", kRed, ImVec2(210, 0), glass::ButtonKind::Primary)) {
-        controller.closeRange();
+        controller.closeRange(false);  // and no new range afterwards
         exitClosing_ = true;
         exitClosingSince_ = ImGui::GetTime();
     }
@@ -1674,6 +1696,184 @@ void DashboardWindow::renderVolumeTab() {
     for (const auto& b : rows) row(b, false);
     row(volumeTotal_, true);
     ImGui::EndTable();
+}
+
+
+void DashboardWindow::samplePerformance(const std::optional<LiveSnapshot>& snap) {
+    monitor_.sample(LiveController::dataDirectory(configPathBuffer_.data()));
+    const double now = ImGui::GetTime();
+    if (now - perfSampledAt_ < 1.0) return;
+    const double elapsed = perfSampledAt_ < 0 ? 1.0 : now - perfSampledAt_;
+    perfSampledAt_ = now;
+    const bool connected = snap && snap->connected;
+    if (connected) {
+        const uint64_t ticks = snap->ticksProcessed;
+        quotesPerSecond_ = lastTicks_ > 0 && ticks >= lastTicks_ ? static_cast<double>(ticks - lastTicks_) / elapsed : 0.0;
+        lastTicks_ = ticks;
+        if (quotesPerSecond_ > 0.0) lastQuoteSeenAt_ = now;
+        if (snap->brokerRoundTripMs.samples > 0) rttHistory_.push_back(static_cast<float>(snap->brokerRoundTripMs.last));
+        quoteHistory_.push_back(static_cast<float>(quotesPerSecond_));
+    } else {
+        lastTicks_ = 0;
+        quotesPerSecond_ = 0.0;
+    }
+    while (rttHistory_.size() > SystemMonitor::kHistory) rttHistory_.pop_front();
+    while (quoteHistory_.size() > SystemMonitor::kHistory) quoteHistory_.pop_front();
+}
+
+void DashboardWindow::renderPerformanceTab(LiveController& controller, const std::optional<LiveSnapshot>& snap) {
+    const SystemMonitor::Sample& m = monitor_.latest();
+    const bool connected = snap && snap->connected;
+    const LiveController::ConnectionHealth health = controller.connectionHealth();
+
+    auto duration = [](double seconds) {
+        char buf[48];
+        const long long s = static_cast<long long>(seconds);
+        if (s >= 86400) {
+            std::snprintf(buf, sizeof(buf), "%lldd %lldh %02lldm", s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+        } else if (s >= 3600) {
+            std::snprintf(buf, sizeof(buf), "%lldh %02lldm", s / 3600, (s % 3600) / 60);
+        } else {
+            std::snprintf(buf, sizeof(buf), "%lldm %02llds", s / 60, s % 60);
+        }
+        return std::string(buf);
+    };
+
+    // --- Verdict: what, if anything, needs attention on this machine.
+    std::vector<std::pair<ImVec4, std::string>> issues;
+    if (!connected) {
+        issues.push_back({kGrey, health.reconnectInSeconds
+                                     ? "Not connected - reconnecting in " + std::to_string(*health.reconnectInSeconds) + " s"
+                                     : std::string("Not connected")});
+    }
+    if (connected && snap->brokerRoundTripMs.samples > 0) {
+        const double avg = snap->brokerRoundTripMs.avg;
+        if (avg > 150.0) {
+            issues.push_back({kRed, "Broker round trip is slow (" + price(avg) +
+                                        " ms avg). A VPS closer to the broker's servers (London) would help."});
+        } else if (avg > 50.0) {
+            issues.push_back({kAmber, "Broker round trip " + price(avg) + " ms avg - fine, but a closer VPS is faster."});
+        }
+    }
+    if (m.cpuSystemPct > 85.0) issues.push_back({kRed, "The machine's CPU is nearly maxed out (" + price(m.cpuSystemPct) + "%)."});
+    if (m.systemMemoryUsedPct > 90.0) issues.push_back({kRed, "Memory is nearly full (" + price(m.systemMemoryUsedPct) + "% used)."});
+    if (m.diskTotalGb > 0 && m.diskFreeGb < 2.0) issues.push_back({kRed, "Less than 2 GB free on the data drive."});
+    if (connected && snap->clockOffsetMs && std::fabs(*snap->clockOffsetMs) > 2000.0) {
+        issues.push_back({kAmber, "This machine's clock is " + price(std::fabs(*snap->clockOffsetMs) / 1000.0) +
+                                      " s off the broker's - turn on Windows time sync (Settings > Time > Sync now)."});
+    }
+    if (connected && lastQuoteSeenAt_ > 0 && ImGui::GetTime() - lastQuoteSeenAt_ > 60.0) {
+        issues.push_back({kAmber, "No quotes for over a minute (market closed, or the price feed stalled)."});
+    }
+    if (connected && issues.empty()) {
+        glass::pill("Healthy - ready for trading", kGreen);
+    } else {
+        for (const auto& [color, text] : issues) ImGui::TextColored(color, "%s", text.c_str());
+    }
+    ImGui::Spacing();
+
+    // --- Four live panels with 5-minute graphs.
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float w = (ImGui::GetContentRegionAvail().x - spacing * 3) / 4.0f;
+    const float h = ImGui::GetTextLineHeight() * 3.0f + (numberFont_ ? numberFont_->FontSize : 20.0f) +
+                    ImGui::GetStyle().WindowPadding.y * 2 + ImGui::GetStyle().ItemSpacing.y * 4 + 46.0f;
+    auto pct = [](double v) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%.0f%%", v);
+        return std::string(buf);
+    };
+    auto panel = [&](const char* id, const char* caption, const std::string& value, ImVec4 color,
+                     const std::string& sub, const std::deque<float>& graph, float graphMax, bool last) {
+        glass::beginCard(id, ImVec2(w, h), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::TextDisabled("%s", caption);
+        withFont(numberFont_, [&] { ImGui::TextColored(color, "%s", value.c_str()); });
+        ImGui::TextDisabled("%s", sub.c_str());
+        std::vector<float> values(graph.begin(), graph.end());
+        if (values.empty()) values.push_back(0.0f);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_PlotLines, color);
+        ImGui::PlotLines("##g", values.data(), static_cast<int>(values.size()), 0, nullptr, 0.0f, graphMax,
+                         ImVec2(-FLT_MIN, 42.0f));
+        ImGui::PopStyleColor(2);
+        glass::endCard();
+        if (!last) ImGui::SameLine();
+    };
+
+    const auto& rtt = snap ? snap->brokerRoundTripMs : muuk::ctrader_fix::LatencySummary{};
+    float rttMax = 20.0f;
+    for (const float v : rttHistory_) rttMax = std::max(rttMax, v * 1.2f);
+    panel("p_rtt", "BROKER ROUND TRIP", rtt.samples ? price(rtt.last) + " ms" : std::string("--"),
+          rtt.samples == 0 ? kGrey : (rtt.avg > 150 ? kRed : (rtt.avg > 50 ? kAmber : kGreen)),
+          rtt.samples ? "avg " + price(rtt.avg) + "  p99 " + price(rtt.p99) + "  max " + price(rtt.max) + " ms"
+                      : std::string("measured on every order"),
+          rttHistory_, rttMax, false);
+    panel("p_cpu", "CPU (MACHINE)", pct(m.cpuSystemPct),
+          m.cpuSystemPct > 85 ? kRed : (m.cpuSystemPct > 60 ? kAmber : kGreen),
+          "this app " + pct(m.cpuProcessPct) + " | " + std::to_string(m.cpuCores) + " cores",
+          monitor_.cpuHistory(), 100.0f, false);
+    std::deque<float> memGraph;  // flat line -- memory barely moves; the number is what matters
+    panel("p_mem", "MEMORY", pct(m.systemMemoryUsedPct),
+          m.systemMemoryUsedPct > 90 ? kRed : (m.systemMemoryUsedPct > 75 ? kAmber : kGreen),
+          "of " + price(m.systemMemoryTotalGb) + " GB | this app " +
+              std::to_string(static_cast<int>(m.processMemoryMb)) + " MB",
+          memGraph,
+          100.0f, false);
+    float qMax = 5.0f;
+    for (const float v : quoteHistory_) qMax = std::max(qMax, v * 1.2f);
+    panel("p_quotes", "QUOTES / SECOND", connected ? price(quotesPerSecond_) : std::string("--"), kBlue,
+          snap ? std::to_string(snap->ticksProcessed) + " processed" : std::string(""), quoteHistory_, qMax, true);
+
+    ImGui::Spacing();
+
+    // --- Details.
+    if (ImGui::BeginTable("perf_details", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableNextColumn();
+        withFont(boldFont_, [] { ImGui::TextUnformatted("Connection"); });
+        auto row = [](const char* label, const std::string& value, ImVec4 color = ImVec4(0, 0, 0, 0)) {
+            ImGui::TextDisabled("%s", label);
+            ImGui::SameLine(190.0f);
+            if (color.w > 0) {
+                ImGui::TextColored(color, "%s", value.c_str());
+            } else {
+                ImGui::TextUnformatted(value.c_str());
+            }
+        };
+        row("Status", connected ? "Live" : (controller.isRunning() ? "Connecting" : "Offline"),
+            connected ? kGreen : kGrey);
+        row("Connected since", connected && !snap->connectedSince.empty() ? snap->connectedSince : std::string("--"));
+        row("Reconnects", std::to_string(health.reconnects) +
+                              (health.reconnectInSeconds ? "  (next in " + std::to_string(*health.reconnectInSeconds) + " s)"
+                                                         : std::string()));
+        row("Last drop", health.lastDrop.empty() ? std::string("none") : health.lastDropAt + " - " + health.lastDrop,
+            health.lastDrop.empty() ? ImVec4(0, 0, 0, 0) : kAmber);
+        if (snap && snap->clockOffsetMs) {
+            const double off = *snap->clockOffsetMs;
+            row("Clock vs broker", (off >= 0 ? "+" : "") + price(off) + " ms",
+                std::fabs(off) > 2000 ? kAmber : ImVec4(0, 0, 0, 0));
+            ImGui::SetItemTooltip("This machine's clock minus the broker's timestamp on its quotes (so it also "
+                                  "includes the one-way network delay). Within a few hundred ms is fine.");
+        } else {
+            row("Clock vs broker", "--");
+        }
+        if (ImGui::Checkbox("Reconnect by itself if the connection drops", &prefs_.autoReconnect)) savePrefs(prefs_);
+        ImGui::SetItemTooltip("Retries after 5, 10, 20, 40, then every 60 s. The running basket is checked against "
+                              "the broker and picked up again on reconnect.");
+
+        ImGui::TableNextColumn();
+        withFont(boldFont_, [] { ImGui::TextUnformatted("Machine"); });
+        row("Machine up", duration(m.machineUptimeHours * 3600.0));
+        row("App up", duration(monitor_.appUptimeSeconds()));
+        row("Data drive", price(m.diskFreeGb) + " GB free of " + price(m.diskTotalGb) + " GB",
+            m.diskTotalGb > 0 && m.diskFreeGb < 2.0 ? kRed : ImVec4(0, 0, 0, 0));
+        if (snap) {
+            row("Decision per quote", latency(snap->tickDecisionUs.avg, snap->tickDecisionUs, true) + " avg, " +
+                                          latency(snap->tickDecisionUs.p99, snap->tickDecisionUs, true) + " p99");
+            row("Reaction to a fill", latency(snap->fillReactionUs.avg, snap->fillReactionUs, true) + " avg");
+        }
+        row("Graphics", rendererName_.empty() ? std::string("--") : rendererName_);
+        row("Data folder", LiveController::dataDirectory(configPathBuffer_.data()).string());
+        ImGui::EndTable();
+    }
 }
 
 }  // namespace muuk::desktop

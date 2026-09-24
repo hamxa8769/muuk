@@ -114,6 +114,13 @@ if(MUUK_BUILD_DESKTOP_APP)
     )
     find_package(OpenGL REQUIRED)
     target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+    if(WIN32)
+        # On Windows the desktop app draws with Direct3D 11 -- it falls back
+        # to the WARP software rasterizer where there is no GPU (typical VPS
+        # / Remote Desktop), which OpenGL 3 can't do.
+        target_sources(imgui PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp)
+        target_link_libraries(imgui PUBLIC d3d11 dxgi d3dcompiler)
+    endif()
 endif()
 
 add_subdirectory(engine/core)
