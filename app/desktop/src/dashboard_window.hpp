@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 
+#include "app_prefs.hpp"
 #include "live_controller.hpp"
+#include "muuk/ctrader_fix/volume_stats.hpp"
 
 struct ImFont;
 
@@ -22,9 +24,12 @@ namespace muuk::desktop {
 // theme); all live state comes from LiveController every frame.
 class DashboardWindow {
 public:
-    // Pre-fills the credentials-path field via findDefaultConfigPath()
-    // (config_discovery.hpp) and applies the initial (dark) theme.
+    // Opens the way it was left (app_prefs.hpp): the last config file and
+    // theme; falls back to findDefaultConfigPath() (config_discovery.hpp).
     DashboardWindow();
+
+    // "Connect when the app opens" (saved preference) -- main.cpp acts on it.
+    [[nodiscard]] bool autoConnect() const { return prefs_.autoConnect; }
 
     // Optional extra fonts (loaded by main.cpp); nullptr falls back to the
     // default font.
@@ -50,7 +55,7 @@ public:
     [[nodiscard]] bool exitApproved() const { return exitApproved_; }
 
 private:
-    enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending };
+    enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData };
 
     void setTheme(bool dark);
     void renderHeader(LiveController& controller, bool running, bool connected);
@@ -64,12 +69,16 @@ private:
     void renderLogTab(LiveController& controller);
     void renderHistoryTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void renderSpeed(const muuk::ctrader_fix::LiveSnapshot& snap);
+    void renderVolumeTab();
+    void refreshVolume();
     void renderConfirmPopup(LiveController& controller);
     void renderExitPopup(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void flash(const std::string& message);
 
     std::array<char, 512> configPathBuffer_{};
+    AppPrefs prefs_;
     bool darkMode_ = true;
+    std::string dismissedResumeNote_;
     std::function<void(bool)> onThemeChanged_;
 
     muuk::ctrader_fix::LiveSettings editSettings_;
@@ -83,6 +92,14 @@ private:
     std::vector<muuk::ctrader_fix::BasketRecord> history_;
     uint64_t historyRevision_ = ~uint64_t{0};  // forces the first copy
     std::string historyPath_;  // config path the history was loaded for
+
+    // Volume tab, recomputed when the history changes (or the day might have).
+    int volumePeriod_ = 0;  // 0 day, 1 week, 2 month
+    uint64_t volumeRevision_ = ~uint64_t{0};
+    double volumeComputedAt_ = -1000.0;
+    std::vector<muuk::ctrader_fix::VolumeBucket> volumeRows_[3];
+    muuk::ctrader_fix::VolumeBucket volumeTotal_;
+    std::string nowDay_, nowWeek_, nowMonth_;
 
     bool exitApproved_ = false;
     bool openExitRequested_ = false;

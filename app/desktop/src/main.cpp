@@ -147,7 +147,10 @@ int main(int argc, char** argv) {
     dashboard.setFonts(bold, large, numbers);
     dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
     if (!configArg.empty()) dashboard.setConfigPath(configArg);
-    if (connectOnLaunch && !dashboard.configPath().empty()) controller.start(dashboard.configPath());
+    // --connect, or the "Connect when the app opens" preference.
+    if ((connectOnLaunch || dashboard.autoConnect()) && !dashboard.configPath().empty()) {
+        controller.start(dashboard.configPath());
+    }
 
 #ifdef _WIN32
     // Installed after ImGui's backend (which subclasses the window too) and

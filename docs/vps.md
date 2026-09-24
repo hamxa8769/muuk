@@ -53,6 +53,11 @@ Use Task Scheduler → *Create Task*:
 - **Settings:** *If the task fails, restart every 1 minute*. Leave
   *Stop the task if it runs longer than* unchecked.
 
+Instead of `--connect`, you can tick **Connect when the app opens** in
+the app itself. After a restart the bot reconnects and carries on with the
+running basket. It checks the basket against the broker first; see
+`docs/ctrader-fix.md`, "Persistence".
+
 For `muuk-desktop` on a server that restarts by itself, enable automatic
 logon for that user (Sysinternals *Autologon*). Otherwise the *At log on*
 trigger never fires.
@@ -83,9 +88,11 @@ The last row is the real risk of any client-side bot. To limit it:
   once the loss reaches that amount (it does not close the basket; see
   `docs/architecture.md`).
 - The Task Scheduler restart (step 3) brings the bot back. When it
-  reconnects, it loads every open XAUUSD position from the broker
-  (*Sync from broker*). It shows them as "old", lets you close them with
-  one click, and won't start a new range on top of them.
+  reconnects, it checks the saved basket against the broker and carries
+  on with it, including any order that filled while it was down. If
+  something changed that it can't explain, it doesn't resume: it cancels
+  the basket's pending orders, lists the remaining positions, and opens
+  nothing new until they're closed.
 - Check the account from the cTrader mobile app now and then.
 
 ## Before using real money
@@ -106,9 +113,10 @@ live account:
 
 Everything the bot does is in its own files next to the config:
 
+- `muuk_state/`: the running basket, so a restart carries on with it
 - `muuk_history/baskets.jsonl`: every basket
 - `muuk_reports/`: PDF reports
-- `muuk_logs/`: logs, saved automatically on every disconnect
+- `muuk_logs/`: the running log, plus copies saved on every disconnect
 
 Copy these off the VPS, or open the desktop app over RDP to see the same
 thing live.

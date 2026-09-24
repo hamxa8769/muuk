@@ -134,6 +134,13 @@ FixMessage buildRequestForPositions(const std::string& posReqId) {
     return msg;
 }
 
+FixMessage buildOrderMassStatusRequest(const std::string& massStatusReqId) {
+    FixMessage msg(msgtype::OrderMassStatusRequest);
+    msg.set(tag::MassStatusReqID, massStatusReqId);
+    msg.set(tag::MassStatusReqType, int64_t{7});  // status for all orders
+    return msg;
+}
+
 FixMessage buildOrderCancelRequest(const std::string& clOrdId, const std::string& origClOrdId,
                                     std::optional<std::string> orderId) {
     FixMessage msg(msgtype::OrderCancelRequest);
@@ -196,6 +203,12 @@ ExecutionReportInfo parseExecutionReport(const FixMessage& msg) {
     info.commission = optionalDouble(msg.getOptionalString(tag::Commission));
     info.commType = msg.getOptionalString(tag::CommType);
     info.positionId = msg.getOptionalString(tag::PosMaintRptID);
+    info.massStatusReqId = msg.getOptionalString(tag::MassStatusReqID);
+    info.totNumReports = static_cast<int>(optionalDouble(msg.getOptionalString(tag::TotNumReports)).value_or(0.0));
+    info.symbolId = msg.getOptionalString(tag::Symbol);
+    info.side = static_cast<int>(optionalDouble(msg.getOptionalString(tag::Side)).value_or(0.0));
+    info.orderQty = optionalDouble(msg.getOptionalString(tag::OrderQty));
+    info.stopPx = optionalDouble(msg.getOptionalString(tag::StopPx));
     return info;
 }
 

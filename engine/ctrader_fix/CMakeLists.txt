@@ -5,6 +5,8 @@ add_library(muuk_ctrader_fix STATIC
     src/live_config.cpp
     src/live_runner.cpp
     src/basket_history.cpp
+    src/live_state.cpp
+    src/volume_stats.cpp
     src/pdf_writer.cpp
     src/session_report.cpp
 )
@@ -25,6 +27,7 @@ if(MUUK_BUILD_TESTS)
         tests/test_fix_message.cpp
         tests/test_fix_session.cpp
         tests/test_live_runner.cpp
+        tests/test_live_resume.cpp
         tests/test_reporting.cpp
     )
     target_link_libraries(muuk_ctrader_fix_tests PRIVATE muuk_ctrader_fix Catch2::Catch2WithMain)

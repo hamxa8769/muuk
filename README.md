@@ -98,11 +98,13 @@ see above) into the "Config file" field and click **Connect**. The app
 shows live prices, the range, every open position and pending order (each
 with its own Close/Cancel button), costs and net P/L after costs, system
 speed, the log (with **Save logs**), a **History** tab with every basket
-and its positions as a tree, and **Export PDF report**. Settings can be
-edited and saved back to the config file. Closing the window while trades
-are open asks whether to close everything first; see
-`docs/ctrader-fix.md` ("Operator controls") and `docs/vps.md` for running
-it around the clock.
+and its positions as a tree, a **Volume** tab (lots and P/L per day, week
+and month), **Export PDF report** and **Reset data**. Settings are saved
+to the config file. Everything persists: after a restart or a dropped
+connection the app opens with the same settings and data, and the running
+basket carries on where it left off (see `docs/ctrader-fix.md`,
+"Persistence"). Closing the window while trades are open asks whether to
+close everything first. See `docs/vps.md` for running it around the clock.
 
 ## Layout
 

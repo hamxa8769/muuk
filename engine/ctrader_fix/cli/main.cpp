@@ -14,6 +14,7 @@
 
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
+#include "muuk/ctrader_fix/live_state.hpp"
 
 namespace {
 muuk::ctrader_fix::LiveRunner* g_runner = nullptr;
@@ -98,6 +99,11 @@ int main(int argc, char** argv) {
     try {
         const muuk::ctrader_fix::LiveConfig config = muuk::ctrader_fix::loadLiveConfig(credentialsPath);
         muuk::ctrader_fix::LiveRunner runner(config);
+        // The running basket is saved next to the config and picked up again
+        // on the next start (see LiveRunner::setStateFile).
+        const auto stateFile = muuk::ctrader_fix::defaultStateFile(credentialsPath);
+        runner.setStateFile(stateFile);
+        std::cerr << "state file: " << stateFile.string() << "\n";
         const RunnerRegistration registration(&runner);
 
 #ifdef _WIN32

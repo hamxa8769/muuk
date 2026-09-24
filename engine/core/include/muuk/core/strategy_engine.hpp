@@ -67,6 +67,30 @@ struct StrategyConfig {
     StartSide startSide = StartSide::Both;
 };
 
+// Everything a cycle in progress needs to carry on in a new process
+// (StrategyEngine::exportState/restoreState): which orders are armed,
+// which fills make up the basket, where the sequence stands. Plain data,
+// so a live driver can save it to disk and resume the same basket after a
+// restart or reconnect instead of losing it.
+struct EngineState {
+    struct Armed {
+        PendingOrder order;
+        int retryCount = 0;
+    };
+    EngineStatus status = EngineStatus::Idle;
+    RangeConfig range{};  // the range in force (seed mode re-anchors it)
+    FixedVector<Armed, kMaxTrackedOrders> pendingOrders;
+    int64_t buyVolumeSteps = 0;
+    int64_t buySumEntryPriceTicksVolume = 0;
+    int64_t sellVolumeSteps = 0;
+    int64_t sellSumEntryPriceTicksVolume = 0;
+    int nextSequenceIndex = 1;
+    OrderId nextOrderId = 1;
+    bool seeding = false;
+    double slippageMoneyAccrued = 0.0;
+    double swapMoneyAccrued = 0.0;
+};
+
 // Deterministic, I/O-free strategy state machine implementing the
 // range-based pending-order grid described in the proposal (§3-§8):
 //   - two boundary pending orders (Buy Stop at range.upperBound,
@@ -147,6 +171,16 @@ public:
     // seed-anchor mode has re-derived it from a real fill.
     [[nodiscard]] RangeConfig currentRange() const { return config_.range; }
     [[nodiscard]] bool seeding() const { return seeding_; }
+
+    // Snapshot of the cycle in progress, and the reverse: restoreState()
+    // puts an engine (built from the same config) back exactly where
+    // exportState() left it -- status, range, armed orders, basket
+    // aggregates, sequence and order-id counters (an Idle state only
+    // carries the order-id counter forward). It emits no commands:
+    // the caller is responsible for the broker already matching the state
+    // (the orders really are still pending, the fills really are open).
+    [[nodiscard]] EngineState exportState() const;
+    void restoreState(const EngineState& state);
 
 private:
     // Running per-side accumulator backing aggregatePositionPnlMoney() —

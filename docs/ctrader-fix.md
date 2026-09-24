@@ -196,6 +196,56 @@ table of every basket, and every basket's position tree. **Save logs**
 writes `muuk_logs/muuk_<time>.log`; the log is also saved there
 automatically on every disconnect.
 
+The desktop app also has:
+- **Volume**: lots traded per day, week or month (and today / this week /
+  this month / all time at a glance): baskets won and lost, lots, broker
+  volume (both sides, i.e. twice the lots), value traded (lots x contract
+  size x entry price), lots in winning vs losing baskets, commission, net,
+  and net per lot. The same tables are in the PDF report.
+- **Reset data**: a fresh start. The history and the running log move to
+  `archive/` folders (nothing is deleted), and the statistics start over.
+
+Commission is always charged per lot actually traded: the configured
+round-turn rate x lots. At $7 per lot, 0.01 / 0.02 / 0.03 lots cost
+$0.07 / $0.14 / $0.21. Spread is half the current spread per lot, per
+position (a buy exits at the bid, a sell at the ask). The engine's
+profit-target check uses exactly these same figures.
+
+## Persistence: the bot picks up where it left off
+
+Nothing is lost when the app closes, the connection drops or the PC
+restarts. Everything lives next to the config file:
+
+| File | What's in it |
+|---|---|
+| `muuk_state/<config>.state.json` | The running basket: engine state, open positions, pending orders, closes in flight. Also id counters, so no ClOrdID is ever reused, and lifetime statistics (speed totals, basket numbering). Written on every change, atomically. |
+| `muuk_history/baskets.jsonl` | Every closed basket. |
+| `muuk_logs/muuk_live.log` | The log, line by line. The app shows its tail again on the next start. |
+| the config file itself | Settings. **Save & apply** writes them there, so they're what the app opens with. |
+| `%APPDATA%\Muuk\desktop.json` | App preferences: last config, theme, *Connect when the app opens*. |
+
+On connect, `LiveRunner` asks the broker for every open position (Request
+For Positions) and every working order (Order Mass Status Request, `35=AF`,
+`585=7`). It then compares them with the saved basket:
+
+- **Everything still there**: the basket carries on with the same lot
+  sequence, target and range. Nothing new is sent.
+- **A pending order filled while the bot was away**: the order is gone,
+  and a position with the same side and size opened near its Stop price.
+  It is processed as the fill it was, so the next order goes out at once.
+- **A close was in flight**: if the position is still open, the close is
+  sent again. If it's gone, the leg is recorded as closed while
+  disconnected (the exit price isn't reported, so its P/L can't be).
+- **Something changed that the bot can't explain** (a position closed or
+  an order cancelled in cTrader, or the broker didn't answer): the basket
+  is **not** resumed. Its pending orders are cancelled, its remaining
+  positions are listed, and no range opens by itself. The app says why.
+
+Positions and working orders on the symbol that aren't part of the saved
+basket are listed as "old", so they can be closed or cancelled from the
+app. Orders whose ClOrdID isn't a bot order id (placed by hand) are left
+alone.
+
 ## Who detects a pending order's trigger?
 
 The broker does — that's the point of placing a real Stop order. Unlike

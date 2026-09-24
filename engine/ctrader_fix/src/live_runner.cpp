@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -31,6 +34,22 @@ std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+std::string accountKey(const LiveConfig& config) {
+    return config.connection.environment + "." + config.connection.traderLogin;
+}
+
+// Seconds from a localTimestamp() string to now; 0 if it can't be parsed.
+double secondsSinceStamp(const std::string& stamp) {
+    std::tm tm{};
+    std::istringstream in(stamp);
+    in >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (in.fail()) return 0.0;
+    tm.tm_isdst = -1;
+    const std::time_t then = std::mktime(&tm);
+    if (then == static_cast<std::time_t>(-1)) return 0.0;
+    return std::max(0.0, std::difftime(std::time(nullptr), then));
 }
 }  // namespace
 
@@ -92,7 +111,7 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.pendingOrders.reserve(placedOrderInfo_.size());
     for (const auto& [orderId, leg] : placedOrderInfo_) {
         snap.pendingOrders.push_back(
-            PendingOrderInfo{orderId, leg.side, leg.volume.toDouble(spec), leg.price.toDouble(spec)});
+            PendingOrderInfo{orderId, leg.side, leg.volume.toDouble(spec), leg.price.toDouble(spec), leg.adopted});
     }
     std::sort(snap.pendingOrders.begin(), snap.pendingOrders.end(),
               [](const PendingOrderInfo& a, const PendingOrderInfo& b) { return a.id < b.id; });
@@ -104,6 +123,8 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.brokerRoundTripMs = brokerRoundTripMs_.summary();
     snap.ticksProcessed = ticksProcessed_;
     snap.sessionStartedAt = sessionStartedAt_;
+    snap.statsSince = statsSince_;
+    snap.resumeNote = resumeNote_;
     snap.baskets = completedBaskets_;
     snap.currentBasket = currentBasket_;
     snap.syncingPositions = !activePosReqId_.empty();
@@ -218,23 +239,49 @@ void LiveRunner::run() {
         quoteSession_->send(buildMarketDataRequest("md-" + config_.connection.symbolName, symbolId_, true));
         log("subscribed to quotes");
 
+        loadSavedState();
+
         if (config_.connection.syncPositionsOnConnect) {
+            // Ask the broker what is really open -- positions and working
+            // orders -- before deciding anything: the saved basket is
+            // checked against it (reconcileOnConnectLocked).
             {
                 std::scoped_lock lock(posSyncMutex_);
                 posSyncDone_ = false;
+                orderSyncDone_ = false;
+            }
+            {
+                std::scoped_lock lock(engineMutex_);
+                connectSync_ = true;
             }
             syncPositions();
+            {
+                std::scoped_lock lock(engineMutex_);
+                requestOrderStatusLocked();
+            }
             std::unique_lock lock(posSyncMutex_);
-            if (!posSyncCv_.wait_for(lock, std::chrono::seconds(8), [this] { return posSyncDone_; })) {
-                lock.unlock();
-                std::scoped_lock engineLock(engineMutex_);
+            const bool gotPositions = posSyncCv_.wait_for(lock, std::chrono::seconds(8), [this] { return posSyncDone_; });
+            const bool gotOrders = posSyncCv_.wait_for(lock, std::chrono::seconds(5), [this] { return orderSyncDone_; });
+            lock.unlock();
+            std::scoped_lock engineLock(engineMutex_);
+            if (!gotPositions) {
                 activePosReqId_.clear();
                 log("[sync] the broker didn't answer the position request -- continuing without it");
             }
+            if (!gotOrders) {
+                activeMassStatusReqId_.clear();
+                log("[sync] the broker didn't answer the order status request -- working orders can't be checked");
+            }
+            connectSync_ = false;
         }
 
+        bool resumeCandidate = false;
+        {
+            std::scoped_lock lock(engineMutex_);
+            resumeCandidate = loadedState_ && loadedState_->engine.status != EngineStatus::Idle;
+        }
         const bool autoRange = config_.connection.autoRangeWidthPoints > 0.0;
-        if (autoRange || config_.strategy.seedOffsetPoints > 0.0) {
+        if (autoRange || config_.strategy.seedOffsetPoints > 0.0 || resumeCandidate) {
             waitForFirstQuote();
         }
 
@@ -248,10 +295,18 @@ void LiveRunner::run() {
             // that tick's bid/ask, and without it they'd fall back to the
             // range midpoint and could land inside the spread.
             if (latestBid_ && latestAsk_) (void)engine_->onTick(latestTick());
-            if (!openLegs_.empty()) {
-                log("[sync] " + std::to_string(openLegs_.size()) +
-                    " position(s) already open at the broker -- no range will open until they're closed "
-                    "(Close all positions)");
+            reconcileOnConnectLocked();
+            stateReady_ = true;
+            markDirty();
+            if (engine_->status() != EngineStatus::Idle) {
+                started = true;  // the saved basket carries on
+            } else if (!accountFlat()) {
+                log("[sync] " + std::to_string(openLegs_.size()) + " position(s) and " +
+                    std::to_string(placedOrderInfo_.size()) +
+                    " pending order(s) already at the broker -- no range will open until they're closed "
+                    "(Close all positions / Cancel all pending)");
+            } else if (holdAutoStart_) {
+                log("[resume] not opening a range by itself after an interrupted basket -- press Open range");
             } else if (config_.connection.autoContinue) {
                 beginBasket();
                 for (const auto& cmd : engine_->start()) handleCommand(cmd);
@@ -260,9 +315,15 @@ void LiveRunner::run() {
         }
         log(started ? "engine is now active" : "connected -- waiting for Open range");
 
+        flushState();
+        int loops = 0;
         while (running_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (++loops % 50 == 0) markDirty();  // lifetime statistics, every ~10 s
+            flushState();
         }
+        markDirty();
+        flushState();
     } catch (...) {
         // Ensure both sessions are always torn down before an exception
         // propagates — otherwise a caller that catches it (rather than
@@ -299,6 +360,16 @@ void LiveRunner::resolveSymbol() {
 }
 
 void LiveRunner::onTradeMessage(const FixMessage& msg) {
+    // Anything from the trade session can change what's open: save it
+    // (after every lock below is released -- this is destroyed last).
+    struct SaveOnExit {
+        LiveRunner* runner;
+        ~SaveOnExit() {
+            runner->markDirty();
+            runner->flushState();
+        }
+    } saveOnExit{this};
+
     const std::string& type = msg.msgType();
 
     if (type == msgtype::SecurityList) {
@@ -317,6 +388,20 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
 
     if (type == msgtype::ExecutionReport) {
         const ExecutionReportInfo info = parseExecutionReport(msg);
+
+        // An answer to the connect-time Order Mass Status Request: one
+        // report per working order, collected until all have arrived.
+        if (info.massStatusReqId || info.execType == ExecType::OrderStatus) {
+            std::scoped_lock lock(engineMutex_);
+            if (!activeMassStatusReqId_.empty() &&
+                info.massStatusReqId.value_or(activeMassStatusReqId_) == activeMassStatusReqId_) {
+                orderReports_.push_back(info);
+                if (static_cast<int>(orderReports_.size()) >= std::max(1, info.totNumReports)) {
+                    finishOrderSync(std::exchange(orderReports_, {}), true);
+                }
+            }
+            return;
+        }
 
         // Broker round trip: order sent -> the broker's first answer about it.
         if (info.clOrdId) {
@@ -385,46 +470,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             }
             const Price fillPrice = Price::fromDouble(*info.avgPx, config_.strategy.symbol);
             std::scoped_lock lock(engineMutex_);
-            // Every real (non-close) fill becomes its own tracked open leg
-            // -- see openLegs_'s comment for why this can't just be a net
-            // aggregate on a hedging-enabled account.
-            if (const auto it = placedOrderInfo_.find(*orderId); it != placedOrderInfo_.end()) {
-                OpenLeg filled = it->second;
-                filled.price = fillPrice;
-                filled.positionId = info.positionId.value_or("");
-                if (filled.positionId.empty()) {
-                    log("[trade] WARNING: fill for ClOrdID=" + std::to_string(*orderId) +
-                        " carried no position id (tag 721) -- the bot can't close this position itself; "
-                        "close it in cTrader if needed");
-                }
-                openLegs_.push_back(filled);
-                placedOrderInfo_.erase(it);
-                recordLegOpened(filled);
-            } else if (const auto cit = cancelledOrderInfo_.find(*orderId); cit != cancelledOrderInfo_.end()) {
-                // The cancel lost the race: this order filled anyway after
-                // LiveRunner had already asked the broker to cancel it
-                // (typically a seed order right at the moment its sibling
-                // seed fills first). It's real, unexpected exposure --
-                // close it immediately rather than silently letting it
-                // ride as an extra open position until the next basket
-                // close, which is what looked like "the bot opened 2
-                // positions when the range started."
-                OpenLeg surplus = cit->second;
-                surplus.price = fillPrice;
-                surplus.positionId = info.positionId.value_or("");
-                log("[order] ClOrdID=" + std::to_string(*orderId) +
-                    " filled after its cancel was already sent -- closing this surplus leg immediately");
-                cancelledOrderInfo_.erase(cit);
-                recordLegOpened(surplus);
-                if (tradeSession_) closeLegs({surplus});
-            }
-            if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
-            const auto reactStart = std::chrono::steady_clock::now();
-            for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{*orderId, fillPrice})) {
-                handleCommand(cmd);
-            }
-            fillReactionUs_.add(
-                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - reactStart).count());
+            applyFillLocked(*orderId, fillPrice, info.positionId.value_or(""));
             return;
         }
 
@@ -538,6 +584,23 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
     }
 
     if (type == msgtype::BusinessMessageReject) {
+        // cTrader answers an Order Mass Status Request this way when there
+        // are no working orders at all. The live IC Markets server sends it
+        // without RefMsgType, just "ORDER_NOT_FOUND:no orders found" as the
+        // text, so any of the three marks it.
+        {
+            const std::string text = msg.getOptionalString(tag::Text).value_or("");
+            std::scoped_lock lock(engineMutex_);
+            if (!activeMassStatusReqId_.empty() &&
+                (msg.getOptionalString(tag::RefMsgType).value_or("") == msgtype::OrderMassStatusRequest ||
+                 msg.getOptionalString(tag::BusinessRejectRefID).value_or("") == activeMassStatusReqId_ ||
+                 text.rfind("ORDER_NOT_FOUND", 0) == 0)) {
+                log("[sync] the broker has no working orders");
+                orderReports_.clear();
+                finishOrderSync({}, true);
+                return;
+            }
+        }
         std::ostringstream oss;
         oss << "[trade] BusinessMessageReject: refMsgType=" << msg.getOptionalString(tag::RefMsgType).value_or("?")
             << " reason=" << msg.getOptionalString(tag::BusinessRejectReason).value_or("?")
@@ -547,6 +610,50 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
     }
 
     log("[trade] unhandled message type: " + type);
+}
+
+void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::string& positionId) {
+    markDirty();
+    // Every real (non-close) fill becomes its own tracked open leg
+    // -- see openLegs_'s comment for why this can't just be a net
+    // aggregate on a hedging-enabled account.
+    if (const auto it = placedOrderInfo_.find(orderId); it != placedOrderInfo_.end()) {
+        OpenLeg filled = it->second;
+        filled.price = fillPrice;
+        filled.positionId = positionId;
+        if (filled.positionId.empty()) {
+            log("[trade] WARNING: fill for ClOrdID=" + std::to_string(orderId) +
+                " carried no position id (tag 721) -- the bot can't close this position itself; "
+                "close it in cTrader if needed");
+        }
+        openLegs_.push_back(filled);
+        placedOrderInfo_.erase(it);
+        recordLegOpened(filled);
+    } else if (const auto cit = cancelledOrderInfo_.find(orderId); cit != cancelledOrderInfo_.end()) {
+        // The cancel lost the race: this order filled anyway after
+        // LiveRunner had already asked the broker to cancel it
+        // (typically a seed order right at the moment its sibling
+        // seed fills first). It's real, unexpected exposure --
+        // close it immediately rather than silently letting it
+        // ride as an extra open position until the next basket
+        // close, which is what looked like "the bot opened 2
+        // positions when the range started."
+        OpenLeg surplus = cit->second;
+        surplus.price = fillPrice;
+        surplus.positionId = positionId;
+        log("[order] ClOrdID=" + std::to_string(orderId) +
+            " filled after its cancel was already sent -- closing this surplus leg immediately");
+        cancelledOrderInfo_.erase(cit);
+        recordLegOpened(surplus);
+        if (tradeSession_) closeLegs({surplus});
+    }
+    if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
+    const auto reactStart = std::chrono::steady_clock::now();
+    for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{orderId, fillPrice})) {
+        handleCommand(cmd);
+    }
+    fillReactionUs_.add(
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - reactStart).count());
 }
 
 void LiveRunner::onQuoteMessage(const FixMessage& msg) {
@@ -567,6 +674,7 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
             haveFullQuote = latestBid_.has_value() && latestAsk_.has_value();
             maybeEmitTick();
         }
+        if (stateDirty_) flushState();  // only when the tick changed something (e.g. closed the basket)
         if (haveFullQuote) {
             std::scoped_lock lock(firstQuoteMutex_);
             if (!firstQuoteReceived_) {
@@ -654,6 +762,7 @@ void LiveRunner::maybeRestartAfterBasketClose() {
     }
 
     cooldownActive_ = false;
+    markDirty();
     prepareNextCycle(config_.connection.autoRangeWidthPoints > 0.0);
     log("basket closed; starting the next cycle");
     closeReason_.clear();
@@ -681,6 +790,7 @@ void LiveRunner::centerRangeOnLatestQuote() {
 }
 
 void LiveRunner::handleCommand(const Command& cmd) {
+    markDirty();
     if (const auto* place = std::get_if<PlaceOrderCommand>(&cmd)) {
         const std::string clOrdId = std::to_string(place->id);
         const int side = (place->side == OrderSide::BuyStop) ? 1 : 2;
@@ -739,6 +849,7 @@ void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
         log("[basket] already flat -- nothing to close");
         return;
     }
+    markDirty();
     for (const auto& leg : legs) {
         if (leg.positionId.empty()) {
             // Sending it anyway would open a *new* opposite position.
@@ -776,6 +887,19 @@ void LiveRunner::syncPositions() {
 }
 
 void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& reports) {
+    if (connectSync_) {
+        // Connecting: just collect -- reconcileOnConnectLocked() decides.
+        connectPositions_ = reports;
+        connectPositionsKnown_ = true;
+        activePosReqId_.clear();
+        {
+            std::scoped_lock lock(posSyncMutex_);
+            posSyncDone_ = true;
+        }
+        posSyncCv_.notify_all();
+        return;
+    }
+    markDirty();
     const SymbolSpec& spec = config_.strategy.symbol;
 
     std::unordered_set<std::string> atBroker;
@@ -849,10 +973,11 @@ void LiveRunner::closePositionsLocked() {
 }
 
 void LiveRunner::cancelPendingLocked() {
-    log("[manual] cancelling all pending orders (" + std::to_string(placedOrderInfo_.size()) + " order(s))");
+    markDirty();
+    log("[orders] cancelling all pending orders (" + std::to_string(placedOrderInfo_.size()) + " order(s))");
     for (const auto& [orderId, leg] : placedOrderInfo_) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
-        log("[manual] cancelling OrigClOrdID=" + std::to_string(orderId));
+        log("[orders] cancelling OrigClOrdID=" + std::to_string(orderId));
         cancelledOrderInfo_.insert({orderId, leg});  // see its comment -- a fill can still race the cancel
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(orderId)));
     }
@@ -970,12 +1095,14 @@ void LiveRunner::beginBasket() {
     b.number = ++basketCounter_;
     b.session = sessionStartedAt_;
     b.symbol = config_.connection.symbolName;
+    b.contractSize = config_.strategy.symbol.contractSize;
     b.startedAt = localTimestamp();
     const RangeConfig range = engine_ ? engine_->currentRange() : config_.strategy.range;
     b.rangeLower = range.lowerBound.toDouble(config_.strategy.symbol);
     b.rangeUpper = range.upperBound.toDouble(config_.strategy.symbol);
     currentBasket_ = std::move(b);
     currentBasketStart_ = std::chrono::steady_clock::now();
+    markDirty();
 }
 
 void LiveRunner::recordLegOpened(const OpenLeg& leg) {
@@ -999,7 +1126,8 @@ void LiveRunner::recordLegOpened(const OpenLeg& leg) {
     }
 }
 
-void LiveRunner::recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission) {
+void LiveRunner::recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission,
+                                 const std::string& note) {
     if (!currentBasket_) {
         // Closing something outside any recorded range (e.g. an adopted
         // position): record it as its own basket.
@@ -1017,6 +1145,7 @@ void LiveRunner::recordLegClosed(const OpenLeg& leg, double exitPrice, double gr
     it->commission = commission;
     it->net = gross - commission;
     it->closedAt = localTimestamp();
+    it->note = note;
 }
 
 void LiveRunner::setCloseReason(const std::string& reason) {
@@ -1028,6 +1157,7 @@ void LiveRunner::maybeFinalizeBasket() {
     if (engine_ && engine_->status() == EngineStatus::Active) return;  // range still running
     if (!openLegs_.empty() || !pendingCloses_.empty()) return;          // something still open at the broker
 
+    markDirty();
     BasketRecord b = std::move(*currentBasket_);
     currentBasket_.reset();
     if (b.legs.empty()) {
@@ -1089,10 +1219,450 @@ void LiveRunner::cancelOrder(OrderId id) {
     const auto it = placedOrderInfo_.find(id);
     if (it == placedOrderInfo_.end()) return;
     log("[manual] operator requested: cancel order id=" + std::to_string(id));
+    markDirty();
     const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
     cancelledOrderInfo_.insert({id, it->second});
     placedOrderInfo_.erase(it);
     tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(id)));
+}
+
+
+// ---------------------------------------------------------------------------
+// State persistence
+
+void LiveRunner::requestOrderStatusLocked() {
+    if (!tradeSession_) return;
+    activeMassStatusReqId_ = "ord-" + std::to_string(nextMassStatusReqId_++);
+    orderReports_.clear();
+    log("[sync] requesting working orders from the broker");
+    tradeSession_->send(buildOrderMassStatusRequest(activeMassStatusReqId_));
+}
+
+void LiveRunner::finishOrderSync(std::vector<ExecutionReportInfo> reports, bool known) {
+    connectOrders_ = std::move(reports);
+    connectOrdersKnown_ = known;
+    activeMassStatusReqId_.clear();
+    {
+        std::scoped_lock lock(posSyncMutex_);
+        orderSyncDone_ = true;
+    }
+    posSyncCv_.notify_all();
+}
+
+void LiveRunner::loadSavedState() {
+    if (stateFile_.empty()) return;
+    std::optional<PersistedState> s;
+    try {
+        s = loadState(stateFile_);
+    } catch (const std::exception& ex) {
+        // Keep the unreadable file for inspection instead of overwriting it.
+        std::filesystem::path bad = stateFile_;
+        bad += ".unreadable";
+        std::error_code ec;
+        std::filesystem::rename(stateFile_, bad, ec);
+        log(std::string("[state] could not read the saved state (") + ex.what() + ") -- moved it to " + bad.string() +
+            " and starting without it");
+        return;
+    }
+    if (!s) {
+        log("[state] no saved state yet -- it will be kept in " + stateFile_.string());
+        return;
+    }
+    if (s->account != accountKey(config_) || s->symbol != config_.connection.symbolName) {
+        log("[state] the saved state belongs to " + s->account + " / " + s->symbol + " -- ignored");
+        return;
+    }
+    log("[state] loaded the state saved at " + s->savedAt);
+    std::scoped_lock lock(engineMutex_);
+    loadedState_ = std::move(s);
+}
+
+void LiveRunner::reconcileOnConnectLocked() {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    std::optional<PersistedState> saved = std::exchange(loadedState_, std::nullopt);
+
+    auto toLeg = [](const PersistedLeg& p) {
+        OpenLeg l;
+        l.id = p.id;
+        l.side = p.buy ? OrderSide::BuyStop : OrderSide::SellStop;
+        l.volume = Volume{p.volumeSteps};
+        l.price = Price{p.priceTicks};
+        l.requestedPrice = Price{p.requestedPriceTicks};
+        l.positionId = p.positionId;
+        l.adopted = p.adopted;
+        return l;
+    };
+
+    // Counters and lifetime statistics carry over whatever happens to the basket.
+    if (saved) {
+        basketCounter_ = std::max(basketCounter_, saved->basketCounter);
+        nextCancelReqId_ = std::max<uint64_t>(nextCancelReqId_.load(), saved->nextCancelReqId);
+        nextCloseReqId_ = std::max<uint64_t>(nextCloseReqId_.load(), saved->nextCloseReqId);
+        nextAdoptedId_ = std::max<OrderId>(nextAdoptedId_, saved->nextAdoptedId);
+        statsSince_ = saved->statsSince;
+        ticksProcessed_ += saved->ticksProcessed;
+        tickDecisionUs_.carryOver(saved->tickDecisionUs);
+        fillReactionUs_.carryOver(saved->fillReactionUs);
+        brokerRoundTripMs_.carryOver(saved->brokerRoundTripMs);
+    }
+    if (statsSince_.empty()) statsSince_ = localTimestamp();
+
+    // What the broker actually has on this symbol.
+    struct BrokerPosition {
+        std::string id;
+        OrderSide side;
+        int64_t steps;
+        int64_t priceTicks;
+        bool used = false;
+    };
+    std::vector<BrokerPosition> positions;
+    for (const auto& r : connectPositions_) {
+        if (!r.positionId || (r.symbolId && *r.symbolId != symbolId_)) continue;
+        const bool buy = r.longQty > 0.0;
+        const double qty = buy ? r.longQty : r.shortQty;
+        if (qty <= 0.0) continue;
+        positions.push_back(BrokerPosition{*r.positionId, buy ? OrderSide::BuyStop : OrderSide::SellStop,
+                                           Volume::fromDouble(qty / kWireQtyPerLot, spec).steps,
+                                           Price::fromDouble(r.settlPrice.value_or(0.0), spec).ticks});
+    }
+    struct BrokerOrder {
+        OrderId id;
+        OrderSide side;
+        int64_t steps;
+        int64_t priceTicks;
+        bool used = false;
+    };
+    std::vector<BrokerOrder> orders;
+    int foreignOrders = 0;
+    OrderId maxSeenId = 0;
+    for (const auto& r : connectOrders_) {
+        if (r.symbolId && *r.symbolId != symbolId_) continue;
+        if (r.ordStatus != OrdStatus::New && r.ordStatus != OrdStatus::PartiallyFilled &&
+            r.ordStatus != OrdStatus::Unknown) {
+            continue;
+        }
+        const auto id = tryParseOrderId(r.clOrdId);
+        if (!id) {
+            ++foreignOrders;  // not placed by this bot (e.g. by hand in cTrader) -- left alone
+            continue;
+        }
+        maxSeenId = std::max(maxSeenId, *id);
+        orders.push_back(BrokerOrder{*id, r.side == 2 ? OrderSide::SellStop : OrderSide::BuyStop,
+                                     Volume::fromDouble(r.orderQty.value_or(0.0) / kWireQtyPerLot, spec).steps,
+                                     Price::fromDouble(r.stopPx.value_or(0.0), spec).ticks});
+    }
+    auto findPosition = [&](const std::string& id) -> BrokerPosition* {
+        for (auto& p : positions) {
+            if (!p.used && !id.empty() && p.id == id) return &p;
+        }
+        return nullptr;
+    };
+    auto findOrder = [&](OrderId id) -> BrokerOrder* {
+        for (auto& o : orders) {
+            if (!o.used && o.id == id) return &o;
+        }
+        return nullptr;
+    };
+    // A pending order that's gone from the broker most likely filled: its
+    // position has the same side and size and opened near the Stop price.
+    const int64_t width = saved ? saved->engine.range.upperBound.ticks - saved->engine.range.lowerBound.ticks : 0;
+    const int64_t tolerance = std::max<int64_t>(Price::fromDouble(1.0, spec).ticks, width);
+    auto matchFill = [&](const OpenLeg& order) -> BrokerPosition* {
+        BrokerPosition* best = nullptr;
+        int64_t bestDistance = tolerance + 1;
+        for (auto& p : positions) {
+            if (p.used || p.side != order.side || p.steps != order.volume.steps) continue;
+            const int64_t d = std::llabs(p.priceTicks - order.price.ticks);
+            if (d <= tolerance && d < bestDistance) {
+                best = &p;
+                bestDistance = d;
+            }
+        }
+        return best;
+    };
+
+    muuk::core::EngineState idle;
+    idle.nextOrderId = std::max<OrderId>(saved ? saved->engine.nextOrderId : 1, maxSeenId + 1);
+
+    const bool brokerKnown = connectPositionsKnown_;
+    bool consistent = brokerKnown;
+    std::vector<std::string> problems;
+    struct Fill {
+        OrderId id;
+        Price price;
+        std::string positionId;
+    };
+    std::vector<Fill> fills;
+    std::vector<OpenLeg> reclose;
+    std::vector<OrderId> stillToCancel;
+    bool hadBasket = false;
+    int basketNumber = 0;
+
+    if (saved) {
+        hadBasket = saved->engine.status != EngineStatus::Idle || !saved->openLegs.empty() ||
+                    !saved->pendingOrders.empty() || !saved->pendingCloses.empty() || !saved->cancellingOrders.empty();
+        currentBasket_ = saved->currentBasket;
+        if (currentBasket_) {
+            basketNumber = currentBasket_->number;
+            currentBasketStart_ = std::chrono::steady_clock::now() -
+                                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                      std::chrono::duration<double>(secondsSinceStamp(currentBasket_->startedAt)));
+        }
+        closeReason_ = saved->closeReason;
+        if (hadBasket && !brokerKnown) problems.push_back("the broker's open positions couldn't be checked");
+
+        for (const auto& p : saved->openLegs) {
+            const OpenLeg leg = toLeg(p);
+            if (!brokerKnown) {
+                openLegs_.push_back(leg);
+            } else if (BrokerPosition* bp = findPosition(leg.positionId)) {
+                bp->used = true;
+                openLegs_.push_back(leg);
+            } else {
+                consistent = false;
+                problems.push_back("position " + leg.positionId + " was closed outside the bot");
+                closedPositionIds_.insert(leg.positionId);
+                recordLegClosed(leg, 0.0, 0.0, 0.0, "closed outside the bot while it was disconnected");
+            }
+        }
+        for (const auto& p : saved->pendingCloses) {
+            const OpenLeg leg = toLeg(p);
+            if (!brokerKnown) {
+                openLegs_.push_back(leg);  // can't tell whether the close went through -- list it
+            } else if (BrokerPosition* bp = findPosition(leg.positionId)) {
+                bp->used = true;
+                reclose.push_back(leg);  // the close never happened: do it now
+            } else {
+                closedPositionIds_.insert(leg.positionId);
+                recordLegClosed(leg, 0.0, 0.0, 0.0, "closed while the bot was disconnected (exit price not reported)");
+            }
+        }
+        for (const auto& p : saved->pendingOrders) {
+            const OpenLeg leg = toLeg(p);
+            placedOrderInfo_[leg.id] = leg;
+            if (!brokerKnown) continue;
+            if (BrokerOrder* bo = findOrder(leg.id)) {
+                bo->used = true;  // still working -- nothing happened while away
+            } else if (BrokerPosition* bp = matchFill(leg)) {
+                bp->used = true;
+                fills.push_back(Fill{leg.id, Price{bp->priceTicks}, bp->id});
+            } else if (!connectOrdersKnown_) {
+                consistent = false;
+                problems.push_back("the broker's working orders couldn't be checked");
+            } else {
+                placedOrderInfo_.erase(leg.id);
+                consistent = false;
+                problems.push_back("pending order " + std::to_string(leg.id) + " was cancelled outside the bot");
+            }
+        }
+        for (const auto& p : saved->cancellingOrders) {
+            const OpenLeg leg = toLeg(p);
+            if (!brokerKnown) continue;
+            if (BrokerOrder* bo = findOrder(leg.id)) {
+                bo->used = true;
+                cancelledOrderInfo_[leg.id] = leg;
+                stillToCancel.push_back(leg.id);
+            } else if (BrokerPosition* bp = matchFill(leg)) {
+                bp->used = true;
+                cancelledOrderInfo_[leg.id] = leg;
+                fills.push_back(Fill{leg.id, Price{bp->priceTicks}, bp->id});  // surplus -- closed below
+            }
+        }
+        if (saved->closeFailed && !openLegs_.empty()) basketCloseFailed_ = true;
+    }
+
+    // Anything else open on this symbol isn't part of the saved basket:
+    // list it so it can be closed/cancelled from here.
+    for (auto& p : positions) {
+        if (p.used || closedPositionIds_.count(p.id) > 0) continue;
+        OpenLeg leg;
+        leg.id = nextAdoptedId_++;
+        leg.side = p.side;
+        leg.volume = Volume{p.steps};
+        leg.price = Price{p.priceTicks};
+        leg.requestedPrice = leg.price;
+        leg.positionId = p.id;
+        leg.adopted = true;
+        openLegs_.push_back(leg);
+        log("[sync] found open " + std::string(p.side == OrderSide::BuyStop ? "BUY" : "SELL") + " " +
+            std::to_string(leg.volume.toDouble(spec)) + " lot @ " + std::to_string(leg.price.toDouble(spec)) +
+            " (position " + p.id + ")");
+    }
+    for (auto& o : orders) {
+        if (o.used) continue;
+        OpenLeg leg;
+        leg.id = o.id;
+        leg.side = o.side;
+        leg.volume = Volume{o.steps};
+        leg.price = Price{o.priceTicks};
+        leg.requestedPrice = leg.price;
+        leg.adopted = true;
+        placedOrderInfo_[o.id] = leg;
+        log("[sync] found a working " + std::string(o.side == OrderSide::BuyStop ? "Buy" : "Sell") + " Stop " +
+            std::to_string(leg.volume.toDouble(spec)) + " lot @ " + std::to_string(leg.price.toDouble(spec)) +
+            " (ClOrdID=" + std::to_string(o.id) + ") from an earlier run");
+    }
+    if (foreignOrders > 0) {
+        log("[sync] " + std::to_string(foreignOrders) + " working order(s) not placed by the bot -- left alone");
+    }
+
+    const EngineStatus savedStatus = saved ? saved->engine.status : EngineStatus::Idle;
+    const bool cycleWasRunning = savedStatus != EngineStatus::Idle;
+    const bool resume = saved && cycleWasRunning && consistent;
+    if (resume) {
+        muuk::core::EngineState e = saved->engine;
+        e.nextOrderId = std::max(e.nextOrderId, idle.nextOrderId);
+        engine_->restoreState(e);
+    } else {
+        engine_->restoreState(idle);
+    }
+
+    for (const auto& f : fills) {
+        log("[resume] order " + std::to_string(f.id) + " filled while the bot was disconnected (position " +
+            f.positionId + " @ " + std::to_string(f.price.toDouble(spec)) + ")");
+        if (resume) {
+            applyFillLocked(f.id, f.price, f.positionId);  // exactly as if it had just filled
+            continue;
+        }
+        // Not resuming: keep the position listed, but don't let the engine act on it.
+        auto take = [&](std::unordered_map<OrderId, OpenLeg>& from) {
+            const auto it = from.find(f.id);
+            if (it == from.end()) return false;
+            OpenLeg leg = it->second;
+            from.erase(it);
+            leg.price = f.price;
+            leg.positionId = f.positionId;
+            openLegs_.push_back(leg);
+            recordLegOpened(leg);
+            return true;
+        };
+        if (!take(placedOrderInfo_)) (void)take(cancelledOrderInfo_);
+    }
+
+    if (!reclose.empty()) {
+        log("[resume] " + std::to_string(reclose.size()) +
+            " closing trade(s) never went through before the disconnect -- closing again");
+        closeLegs(reclose);
+    }
+    for (const OrderId id : stillToCancel) {
+        log("[resume] order " + std::to_string(id) + " was being cancelled -- cancelling again");
+        tradeSession_->send(buildOrderCancelRequest("c" + std::to_string(nextCancelReqId_++), std::to_string(id)));
+    }
+
+    const std::string basketName = basketNumber > 0 ? "basket #" + std::to_string(basketNumber) : "the saved basket";
+    if (resume) {
+        resumeNote_ = "Resumed " + basketName + " where it left off: " + std::to_string(openLegs_.size()) +
+                      " open position(s), " + std::to_string(placedOrderInfo_.size()) + " pending order(s)" +
+                      (fills.empty() ? "" : ", " + std::to_string(fills.size()) + " fill(s) that happened while away");
+        log("[resume] " + resumeNote_);
+    } else if (hadBasket && !problems.empty()) {
+        std::string why;
+        for (std::size_t i = 0; i < problems.size(); ++i) why += (i ? "; " : "") + problems[i];
+        resumeNote_ = "Could not safely resume " + basketName + " (" + why +
+                      "). Its pending orders were cancelled and its open positions are listed -- close them to "
+                      "start a new range.";
+        log("[resume] " + resumeNote_);
+        setCloseReason("interrupted: " + problems.front());
+        holdAutoStart_ = true;
+        if (!placedOrderInfo_.empty()) cancelPendingLocked();
+    } else if (hadBasket && !openLegs_.empty()) {
+        const bool allOld = std::all_of(openLegs_.begin(), openLegs_.end(), [](const OpenLeg& l) { return l.adopted; });
+        resumeNote_ = std::to_string(openLegs_.size()) + " position(s) " +
+                      (allOld ? std::string("left from before") : "of " + basketName) +
+                      " are still open at the broker -- close them to start a new range.";
+        log("[resume] " + resumeNote_);
+    }
+    maybeFinalizeBasket();  // e.g. everything was closed while away
+    markDirty();
+}
+
+PersistedState LiveRunner::buildStateLocked() const {
+    auto toPersisted = [](const OpenLeg& l, const std::string& closeClOrdId = {}) {
+        PersistedLeg p;
+        p.id = l.id;
+        p.buy = l.side == OrderSide::BuyStop;
+        p.volumeSteps = l.volume.steps;
+        p.priceTicks = l.price.ticks;
+        p.requestedPriceTicks = l.requestedPrice.ticks;
+        p.positionId = l.positionId;
+        p.adopted = l.adopted;
+        p.closeClOrdId = closeClOrdId;
+        return p;
+    };
+    auto sortedIds = [](const std::unordered_map<OrderId, OpenLeg>& m) {
+        std::vector<OrderId> ids;
+        for (const auto& [id, leg] : m) ids.push_back(id);
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+
+    PersistedState s;
+    s.account = accountKey(config_);
+    s.symbol = config_.connection.symbolName;
+    s.savedAt = localTimestamp();
+    if (engine_) s.engine = engine_->exportState();
+    for (const auto& l : openLegs_) s.openLegs.push_back(toPersisted(l));
+    for (const OrderId id : sortedIds(placedOrderInfo_)) s.pendingOrders.push_back(toPersisted(placedOrderInfo_.at(id)));
+    for (const OrderId id : sortedIds(cancelledOrderInfo_)) {
+        s.cancellingOrders.push_back(toPersisted(cancelledOrderInfo_.at(id)));
+    }
+    for (const auto& [clOrdId, leg] : pendingCloses_) s.pendingCloses.push_back(toPersisted(leg, clOrdId));
+    std::sort(s.pendingCloses.begin(), s.pendingCloses.end(),
+              [](const PersistedLeg& a, const PersistedLeg& b) { return a.closeClOrdId < b.closeClOrdId; });
+    s.closeFailed = basketCloseFailed_;
+    s.currentBasket = currentBasket_;
+    s.closeReason = closeReason_;
+    s.basketCounter = basketCounter_;
+    s.nextCancelReqId = nextCancelReqId_.load();
+    s.nextCloseReqId = nextCloseReqId_.load();
+    s.nextAdoptedId = nextAdoptedId_;
+    s.statsSince = statsSince_;
+    s.ticksProcessed = ticksProcessed_;
+    s.tickDecisionUs = tickDecisionUs_.totals();
+    s.fillReactionUs = fillReactionUs_.totals();
+    s.brokerRoundTripMs = brokerRoundTripMs_.totals();
+    return s;
+}
+
+void LiveRunner::flushState() {
+    if (stateFile_.empty()) return;
+    PersistedState state;
+    uint64_t seq = 0;
+    {
+        std::scoped_lock lock(engineMutex_);
+        if (!stateReady_ || !stateDirty_.exchange(false)) return;
+        state = buildStateLocked();
+        seq = ++stateSeq_;
+    }
+    std::scoped_lock lock(stateWriteMutex_);
+    if (seq <= lastWrittenSeq_) return;  // a newer state was already written
+    try {
+        saveState(stateFile_, state);
+        lastWrittenSeq_ = seq;
+    } catch (const std::exception& ex) {
+        stateDirty_ = true;  // try again next time
+        log(std::string("[state] could not save: ") + ex.what());
+    }
+}
+
+void LiveRunner::resetStats() {
+    {
+        std::scoped_lock lock(engineMutex_);
+        completedBaskets_.clear();
+        basketsClosed_ = 0;
+        bookedGross_ = 0.0;
+        bookedCommission_ = 0.0;
+        tickDecisionUs_.reset();
+        fillReactionUs_.reset();
+        brokerRoundTripMs_.reset();
+        ticksProcessed_ = 0;
+        basketCounter_ = 0;
+        statsSince_ = localTimestamp();
+        resumeNote_.clear();
+        markDirty();
+        log("[reset] statistics and basket numbering start over from now");
+    }
+    flushState();
 }
 
 }  // namespace muuk::ctrader_fix

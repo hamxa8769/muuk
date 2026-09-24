@@ -144,20 +144,27 @@ BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {
     // Gross P/L is computed at the theoretical mid price; the cost of
     // actually crossing the spread to exit is charged explicitly below as
     // spreadCostMoney, so it is not double-counted by also marking legs at
-    // bid/ask.
-    const Price mid{(tick.bid.ticks + tick.ask.ticks) / 2};
+    // bid/ask. Both use the exact (possibly half-tick) mid: rounding it to
+    // a whole tick made an odd spread (e.g. 5 ticks) cost only 2 ticks per
+    // side instead of 2.5, so the target could trigger a little early and
+    // disagree with the per-position figures a UI shows.
+    const double midTicks = (static_cast<double>(tick.bid.ticks) + static_cast<double>(tick.ask.ticks)) / 2.0;
+    const double moneyPerTickStep = config_.symbol.tickValue * config_.symbol.volumeStep;
 
     const double grossPnl =
-        aggregatePositionPnlMoney(OrderSide::BuyStop, buyAggregate_.totalVolumeSteps,
-                                   buyAggregate_.sumEntryPriceTicksVolume, mid, config_.symbol) +
-        aggregatePositionPnlMoney(OrderSide::SellStop, sellAggregate_.totalVolumeSteps,
-                                   sellAggregate_.sumEntryPriceTicksVolume, mid, config_.symbol);
+        (midTicks * static_cast<double>(buyAggregate_.totalVolumeSteps) -
+         static_cast<double>(buyAggregate_.sumEntryPriceTicksVolume) +
+         static_cast<double>(sellAggregate_.sumEntryPriceTicksVolume) -
+         midTicks * static_cast<double>(sellAggregate_.totalVolumeSteps)) *
+        moneyPerTickStep;
     const int64_t totalVolumeSteps = buyAggregate_.totalVolumeSteps + sellAggregate_.totalVolumeSteps;
     const double totalLots = static_cast<double>(totalVolumeSteps) * config_.symbol.volumeStep;
 
-    const int64_t halfSpreadTicks = std::max<int64_t>(0, (tick.ask.ticks - tick.bid.ticks) / 2);
-    const double spreadCostMoney =
-        static_cast<double>(halfSpreadTicks) * config_.symbol.tickValue * totalLots;
+    // Closing costs half the spread per lot either way (a buy exits at the
+    // bid, a sell at the ask, both measured from the mid).
+    const double halfSpreadTicks =
+        std::max(0.0, static_cast<double>(tick.ask.ticks - tick.bid.ticks) / 2.0);
+    const double spreadCostMoney = halfSpreadTicks * config_.symbol.tickValue * totalLots;
 
     BasketPnlInput input;
     input.grossPnlMoney = grossPnl;
@@ -167,6 +174,39 @@ BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {
     input.slippageMoney = slippageMoneyAccrued_;
 
     return computeBasketPnl(input, config_.costs);
+}
+
+EngineState StrategyEngine::exportState() const {
+    EngineState s;
+    s.status = status_;
+    s.range = config_.range;
+    for (const auto& armed : pendingOrders_) s.pendingOrders.push_back(EngineState::Armed{armed.order, armed.retryCount});
+    s.buyVolumeSteps = buyAggregate_.totalVolumeSteps;
+    s.buySumEntryPriceTicksVolume = buyAggregate_.sumEntryPriceTicksVolume;
+    s.sellVolumeSteps = sellAggregate_.totalVolumeSteps;
+    s.sellSumEntryPriceTicksVolume = sellAggregate_.sumEntryPriceTicksVolume;
+    s.nextSequenceIndex = nextSequenceIndex_;
+    s.nextOrderId = nextOrderId_;
+    s.seeding = seeding_;
+    s.slippageMoneyAccrued = slippageMoneyAccrued_;
+    s.swapMoneyAccrued = swapMoneyAccrued_;
+    return s;
+}
+
+void StrategyEngine::restoreState(const EngineState& s) {
+    resetCycleState();
+    status_ = s.status;
+    // An idle state has no range of its own -- the next start() uses the
+    // configured one, so keep it.
+    if (s.status != EngineStatus::Idle) config_.range = s.range;
+    for (const auto& armed : s.pendingOrders) pendingOrders_.push_back(ArmedOrder{armed.order, armed.retryCount});
+    buyAggregate_ = SideAggregate{s.buyVolumeSteps, s.buySumEntryPriceTicksVolume};
+    sellAggregate_ = SideAggregate{s.sellVolumeSteps, s.sellSumEntryPriceTicksVolume};
+    nextSequenceIndex_ = s.nextSequenceIndex;
+    nextOrderId_ = std::max<OrderId>(nextOrderId_, s.nextOrderId);
+    seeding_ = s.seeding;
+    slippageMoneyAccrued_ = s.slippageMoneyAccrued;
+    swapMoneyAccrued_ = s.swapMoneyAccrued;
 }
 
 CommandBatch StrategyEngine::onTick(const TickEvent& tick) {

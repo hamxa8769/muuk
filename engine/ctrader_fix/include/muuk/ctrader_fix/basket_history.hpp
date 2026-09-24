@@ -24,6 +24,7 @@ struct BasketLegRecord {
     std::string openedAt;
     std::string closedAt;         // empty while still open
     bool adopted = false;         // opened before this session, found by a position sync
+    std::string note;             // e.g. "closed while the bot was disconnected"
 };
 
 // One basket (range cycle): every position it opened and how it ended.
@@ -34,6 +35,7 @@ struct BasketRecord {
     std::string startedAt;
     std::string closedAt;
     double durationSeconds = 0.0;
+    double contractSize = 100.0;  // units per 1.0 lot (XAUUSD: 100 oz) -- for traded notional
     double rangeLower = 0.0;
     double rangeUpper = 0.0;
     std::string closeReason;      // "profit target", "manual: close range", ...

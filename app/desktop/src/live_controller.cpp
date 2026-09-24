@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "muuk/ctrader_fix/basket_history.hpp"
+#include "muuk/ctrader_fix/live_state.hpp"
 #include "muuk/ctrader_fix/session_report.hpp"
 
 namespace muuk::desktop {
@@ -50,11 +51,13 @@ void LiveController::start(const std::string& configPath) {
         return;
     }
 
+    attachData(configPath);
     appendLog("---- connecting (" + configPath + ") ----");
     configPath_ = configPath;
-    reloadHistory(configPath);
     runner_ = std::make_unique<LiveRunner>(std::move(config));
     runner_->setLogHandler([this](const std::string& line) { appendLog(line); });
+    // The running basket survives a disconnect / app restart (see LiveRunner::setStateFile).
+    runner_->setStateFile(muuk::ctrader_fix::defaultStateFile(configPath));
     const std::filesystem::path historyFile = dataDirectory(configPath) / "muuk_history" / "baskets.jsonl";
     runner_->setBasketHandler([this, historyFile](const muuk::ctrader_fix::BasketRecord& basket) {
         muuk::ctrader_fix::appendBasketHistory(historyFile, basket);  // throws on failure -- LiveRunner logs it
@@ -166,6 +169,10 @@ void LiveController::clearError() {
 void LiveController::appendLog(const std::string& line) {
     std::scoped_lock lock(logMutex_);
     log_.push_back(timestampPrefix() + line);
+    if (liveLog_.is_open()) {
+        liveLog_ << log_.back() << '\n';
+        liveLog_.flush();
+    }
     if (log_.size() > kMaxLogLines) {
         log_.erase(log_.begin(), log_.begin() + static_cast<std::ptrdiff_t>(log_.size() - kMaxLogLines));
     }
@@ -177,10 +184,87 @@ void LiveController::setError(const std::string& message) {
 }
 
 std::filesystem::path LiveController::dataDirectory(const std::string& configPath) {
+    return muuk::ctrader_fix::dataDirectoryFor(configPath);
+}
+
+void LiveController::attachData(const std::string& configPath, bool force) {
+    if (!force && dataAttachedFor_ == configPath) return;
+    dataAttachedFor_ = configPath;
+    reloadHistory(configPath);
+
+    const std::filesystem::path logDir = dataDirectory(configPath) / "muuk_logs";
+    const std::filesystem::path liveFile = logDir / "muuk_live.log";
     std::error_code ec;
-    const std::filesystem::path config(configPath);
-    if (!configPath.empty() && config.has_parent_path()) return std::filesystem::absolute(config.parent_path(), ec);
-    return std::filesystem::current_path(ec);
+    std::filesystem::create_directories(logDir, ec);
+    // Keep the running log a manageable size: start a new one past ~20 MB.
+    if (std::filesystem::exists(liveFile, ec) && std::filesystem::file_size(liveFile, ec) > 20u * 1024u * 1024u) {
+        std::filesystem::rename(liveFile, logDir / ("muuk_live_until_" + fileStamp() + ".log"), ec);
+    }
+
+    std::vector<std::string> previous;
+    {
+        std::ifstream in(liveFile);
+        std::string line;
+        while (std::getline(in, line)) {
+            previous.push_back(std::move(line));
+            if (previous.size() > 2 * kMaxLogLines) {
+                previous.erase(previous.begin(), previous.begin() + static_cast<std::ptrdiff_t>(kMaxLogLines));
+            }
+        }
+    }
+    std::scoped_lock lock(logMutex_);
+    if (liveLog_.is_open()) liveLog_.close();
+    // What's on screen: the end of the saved log, then anything logged
+    // before the path was known.
+    std::vector<std::string> merged = std::move(previous);
+    merged.insert(merged.end(), log_.begin(), log_.end());
+    if (merged.size() > kMaxLogLines) {
+        merged.erase(merged.begin(), merged.begin() + static_cast<std::ptrdiff_t>(merged.size() - kMaxLogLines));
+    }
+    log_ = std::move(merged);
+    liveLog_.open(liveFile, std::ios::app);
+}
+
+bool LiveController::resetData(const std::string& configPath) {
+    const std::string stamp = fileStamp();
+    const std::filesystem::path dir = dataDirectory(configPath);
+    std::error_code ec;
+    try {
+        const std::filesystem::path history = dir / "muuk_history" / "baskets.jsonl";
+        if (std::filesystem::exists(history, ec)) {
+            std::filesystem::create_directories(dir / "muuk_history" / "archive");
+            std::filesystem::rename(history, dir / "muuk_history" / "archive" / ("baskets_until_" + stamp + ".jsonl"));
+        }
+        {
+            std::scoped_lock lock(logMutex_);
+            if (liveLog_.is_open()) liveLog_.close();
+            const std::filesystem::path liveFile = dir / "muuk_logs" / "muuk_live.log";
+            if (std::filesystem::exists(liveFile, ec)) {
+                std::filesystem::create_directories(dir / "muuk_logs" / "archive");
+                std::filesystem::rename(liveFile, dir / "muuk_logs" / "archive" / ("muuk_live_until_" + stamp + ".log"));
+            }
+            log_.clear();
+            std::filesystem::create_directories(liveFile.parent_path(), ec);
+            liveLog_.open(liveFile, std::ios::app);
+        }
+        {
+            std::scoped_lock lock(historyMutex_);
+            history_.clear();
+            historyLoadedFor_ = configPath;
+            ++historyRevision_;
+        }
+        if (runner_ && running_.load()) {
+            runner_->resetStats();
+        } else {
+            muuk::ctrader_fix::resetStateStatistics(muuk::ctrader_fix::defaultStateFile(configPath));
+        }
+        appendLog("[reset] fresh start: basket history and log archived under muuk_history/archive and "
+                  "muuk_logs/archive; statistics start over now");
+        return true;
+    } catch (const std::exception& ex) {
+        setError(std::string("reset: ") + ex.what());
+        return false;
+    }
 }
 
 std::string LiveController::fileStamp() {
@@ -225,6 +309,14 @@ std::optional<std::filesystem::path> LiveController::exportReport(const std::str
         in.generatedAt = localTimestamp();
         in.allBaskets = history();
         try {
+            if (const auto saved = loadState(defaultStateFile(configPath))) {
+                in.statsSince = saved->statsSince;
+                in.ticksProcessed = saved->ticksProcessed;
+            }
+        } catch (const std::exception&) {
+            // The report doesn't need it.
+        }
+        try {
             const LiveConfig config = loadLiveConfig(configPath);
             in.account = config.connection.environment + " " + config.connection.traderLogin;
             in.symbol = config.connection.symbolName;
@@ -235,6 +327,7 @@ std::optional<std::filesystem::path> LiveController::exportReport(const std::str
         if (const auto snap = snapshot()) {
             in.settings = snap->settings;  // what the running bot actually uses
             in.sessionStartedAt = snap->sessionStartedAt;
+            if (!snap->statsSince.empty()) in.statsSince = snap->statsSince;
             in.tickDecisionUs = snap->tickDecisionUs;
             in.fillReactionUs = snap->fillReactionUs;
             in.brokerRoundTripMs = snap->brokerRoundTripMs;

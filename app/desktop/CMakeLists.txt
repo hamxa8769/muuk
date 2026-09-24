@@ -5,6 +5,7 @@ add_executable(muuk-desktop
     src/glass_ui.cpp
     src/config_discovery.cpp
     src/open_path.cpp
+    src/app_prefs.cpp
 )
 
 target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix imgui)

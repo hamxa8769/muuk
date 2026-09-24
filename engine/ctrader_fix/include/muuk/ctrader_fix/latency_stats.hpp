@@ -40,6 +40,7 @@ public:
         s.last = last_;
         s.avg = sum_ / static_cast<double>(count_);
         s.max = max_;
+        if (filled_ == 0) return s;  // only carried-over totals so far
         std::array<double, kWindow> sorted{};
         std::copy_n(window_.begin(), filled_, sorted.begin());
         std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(filled_));
@@ -51,6 +52,21 @@ public:
         s.p99 = at(0.99);
         return s;
     }
+
+    // All-time totals, for saving across runs; carryOver() puts them back
+    // (the percentile window starts empty again -- it's "recent" by design).
+    struct Totals {
+        uint64_t count = 0;
+        double sum = 0.0;
+        double max = 0.0;
+    };
+    [[nodiscard]] Totals totals() const { return Totals{count_, sum_, max_}; }
+    void carryOver(const Totals& t) {
+        count_ += t.count;
+        sum_ += t.sum;
+        max_ = std::max(max_, t.max);
+    }
+    void reset() { *this = LatencyTracker{}; }
 
 private:
     static constexpr std::size_t kWindow = 2048;

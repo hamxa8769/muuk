@@ -76,6 +76,13 @@ struct SecurityListEntry {
 // position (or a single "none found" report).
 [[nodiscard]] FixMessage buildRequestForPositions(const std::string& posReqId);
 
+// Order Mass Status Request (35=AF), MassStatusReqType=7 (all orders --
+// the only type cTrader supports): asks for every order still working on
+// the account. Answered by one ExecutionReport (ExecType=I) per order,
+// each echoing MassStatusReqID(584) and carrying TotNumReports(911), or by
+// a single BusinessMessageReject when there are none.
+[[nodiscard]] FixMessage buildOrderMassStatusRequest(const std::string& massStatusReqId);
+
 struct PositionReportInfo {
     std::string posReqId;
     bool anyPositions = false;          // PosReqResult(728) == 0
@@ -130,6 +137,13 @@ struct ExecutionReportInfo {
     // closed). Needed to close that exact position later on a hedging
     // account -- see buildMarketOrderSingle.
     std::optional<std::string> positionId;
+    // Set on order-status reports (answers to an Order Mass Status Request).
+    std::optional<std::string> massStatusReqId;
+    int totNumReports = 0;
+    std::optional<std::string> symbolId;
+    int side = 0;                    // 1 = buy, 2 = sell, 0 = not given
+    std::optional<double> orderQty;  // wire units (lot hundredths)
+    std::optional<double> stopPx;
 };
 
 [[nodiscard]] ExecutionReportInfo parseExecutionReport(const FixMessage& msg);

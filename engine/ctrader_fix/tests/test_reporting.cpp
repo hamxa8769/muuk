@@ -10,6 +10,7 @@
 #include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/pdf_writer.hpp"
 #include "muuk/ctrader_fix/session_report.hpp"
+#include "muuk/ctrader_fix/volume_stats.hpp"
 
 using namespace muuk::ctrader_fix;
 
@@ -150,4 +151,54 @@ TEST_CASE("The session report still builds with no baskets at all") {
     const std::string pdf = buildSessionReportPdf(in);
     requireWellFormedPdf(pdf);
     REQUIRE(pdf.find("No closed baskets yet.") != std::string::npos);
+}
+
+TEST_CASE("Volume statistics: lots, value traded, won/lost lots and P/L per day, week and month") {
+    auto basket = [](const std::string& closedAt, double net) {
+        BasketRecord b = sampleBasket(1, net);  // legs: BUY 0.01 @ 4282.05 and SELL 0.02 @ 4280.00
+        b.closedAt = closedAt;
+        return b;
+    };
+    const std::vector<BasketRecord> baskets = {
+        basket("2026-08-31 23:10:00", 1.00),   // Monday 31 Aug
+        basket("2026-09-01 09:00:00", 1.20),   // Tuesday 1 Sep, same week
+        basket("2026-09-01 15:00:00", -0.50),
+        basket("2026-09-07 10:00:00", 0.80),   // next Monday
+    };
+
+    const auto days = volumeByPeriod(baskets, VolumePeriod::Day);
+    REQUIRE(days.size() == 3);
+    REQUIRE(days[0].period == "2026-09-07");  // newest first
+    REQUIRE(days[1].period == "2026-09-01");
+    REQUIRE(days[1].baskets == 2);
+    REQUIRE(days[1].won == 1);
+    REQUIRE(days[1].lost == 1);
+    REQUIRE(days[1].positions == 4);
+    REQUIRE(days[1].lots == Catch::Approx(0.06));
+    REQUIRE(days[1].sideLots() == Catch::Approx(0.12));
+    REQUIRE(days[1].wonLots == Catch::Approx(0.03));
+    REQUIRE(days[1].lostLots == Catch::Approx(0.03));
+    REQUIRE(days[1].net == Catch::Approx(0.70));
+    REQUIRE(days[1].commission == Catch::Approx(0.42));
+    // Value traded: 0.01 x 100 x 4282.05 + 0.02 x 100 x 4280.00 per basket.
+    REQUIRE(days[1].notional == Catch::Approx(2 * (4282.05 + 2 * 4280.00)));
+    REQUIRE(days[1].netPerLot() == Catch::Approx(0.70 / 0.06));
+
+    const auto weeks = volumeByPeriod(baskets, VolumePeriod::Week);
+    REQUIRE(weeks.size() == 2);
+    REQUIRE(weeks[0].period == "Week of 2026-09-07");
+    REQUIRE(weeks[1].period == "Week of 2026-08-31");
+    REQUIRE(weeks[1].baskets == 3);  // Monday 31 Aug belongs with Tuesday 1 Sep
+
+    const auto months = volumeByPeriod(baskets, VolumePeriod::Month);
+    REQUIRE(months.size() == 2);
+    REQUIRE(months[0].period == "2026-09");
+    REQUIRE(months[0].baskets == 3);
+    REQUIRE(months[1].period == "2026-08");
+
+    const VolumeBucket total = volumeTotal(baskets);
+    REQUIRE(total.baskets == 4);
+    REQUIRE(total.lots == Catch::Approx(0.12));
+    REQUIRE(total.net == Catch::Approx(2.50));
+    REQUIRE(periodKey("garbage", VolumePeriod::Day) == "unknown");
 }

@@ -1,5 +1,7 @@
 #include "muuk/ctrader_fix/session_report.hpp"
 
+#include "muuk/ctrader_fix/volume_stats.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -187,11 +189,65 @@ void speedTable(Layout& lay, const SessionReportInput& in) {
     row("Decision per quote (microseconds)", in.tickDecisionUs, "%.1f");
     row("Reaction to a fill (microseconds)", in.fillReactionUs, "%.1f");
     row("Broker round trip (milliseconds)", in.brokerRoundTripMs, "%.1f");
-    doc.text(kLeft + 4.0f, lay.y(), "Quotes processed this session: " + std::to_string(in.ticksProcessed) +
-                                        "   |   Decision and reaction are the bot's own processing time; the round trip "
-                                        "includes the network and the broker.",
+    const std::string since = in.statsSince.empty() ? std::string("this session") : "since " + in.statsSince;
+    doc.text(kLeft + 4.0f, lay.y(), "Quotes processed " + since + ": " + std::to_string(in.ticksProcessed) +
+                                        "   |   Average, max and samples are " + since +
+                                        "; median and 99th pct cover the most recent 2048.",
+             7.0f, false, kDim);
+    lay.advance(10.0f);
+    doc.text(kLeft + 4.0f, lay.y(),
+             "Decision and reaction are the bot's own processing time; the round trip includes the network and the "
+             "broker.",
              7.0f, false, kDim);
     lay.advance(14.0f);
+}
+
+// Lots, value traded and results per period.
+void volumeTable(Layout& lay, const std::string& title, const std::vector<VolumeBucket>& buckets, std::size_t limit,
+                 const VolumeBucket& total) {
+    PdfDocument& doc = lay.doc();
+    lay.ensure(60.0f);
+    doc.text(kLeft, lay.y(), title, 9.0f, true, kDim);
+    lay.advance(14.0f);
+    // Right edges of the numeric columns.
+    const float c[] = {kLeft + 4.0f, kLeft + 125.0f, kLeft + 170.0f, kLeft + 215.0f, kLeft + 290.0f, kLeft + 335.0f,
+                       kLeft + 380.0f, kLeft + 432.0f, kLeft + 478.0f, kRight - 4.0f};
+    auto header = [&] {
+        doc.fillRect(kLeft, lay.y() - 11.0f, kRight - kLeft, 16.0f, kPanel);
+        doc.text(c[0], lay.y(), "Period", 7.5f, true, kDim);
+        const char* heads[] = {"Baskets", "Won/Lost", "Lots", "Value traded", "Won lots", "Lost lots", "Commission",
+                               "Net", "Net/lot"};
+        for (int i = 0; i < 9; ++i) doc.textRight(c[i + 1], lay.y(), heads[i], 7.5f, true, kDim);
+        lay.advance(16.0f);
+    };
+    auto row = [&](const VolumeBucket& b, bool bold) {
+        if (lay.y() + 14.0f > kBottom) {
+            lay.ensure(1000.0f);
+            header();
+        }
+        doc.text(c[0], lay.y(), b.period, 7.5f, bold, kInk);
+        doc.textRight(c[1], lay.y(), std::to_string(b.baskets), 7.5f, bold, kInk);
+        doc.textRight(c[2], lay.y(), std::to_string(b.won) + " / " + std::to_string(b.lost), 7.5f, bold, kInk);
+        doc.textRight(c[3], lay.y(), fmt("%.2f", b.lots), 7.5f, bold, kInk);
+        doc.textRight(c[4], lay.y(), fmt("$%.0f", b.notional), 7.5f, bold, kInk);
+        doc.textRight(c[5], lay.y(), fmt("%.2f", b.wonLots), 7.5f, bold, kGreen);
+        doc.textRight(c[6], lay.y(), fmt("%.2f", b.lostLots), 7.5f, bold, kRed);
+        doc.textRight(c[7], lay.y(), money(-b.commission), 7.5f, bold, b.commission > 0.005 ? kRed : kDim);
+        doc.textRight(c[8], lay.y(), money(b.net), 7.5f, true, pnlColor(b.net));
+        doc.textRight(c[9], lay.y(), money(b.netPerLot()), 7.5f, bold, pnlColor(b.netPerLot()));
+        lay.advance(5.0f);
+        doc.line(kLeft, lay.y(), kRight, lay.y(), kRule, 0.3f);
+        lay.advance(10.0f);
+    };
+    header();
+    if (buckets.empty()) {
+        doc.text(c[0], lay.y(), "No closed baskets yet.", 8.0f, false, kDim);
+        lay.advance(14.0f);
+        return;
+    }
+    for (std::size_t i = 0; i < buckets.size() && i < limit; ++i) row(buckets[i], false);
+    row(total, true);
+    lay.advance(4.0f);
 }
 
 void settingsTable(Layout& lay, const SessionReportInput& in) {
@@ -373,6 +429,7 @@ void basketTrees(Layout& lay, const std::vector<BasketRecord>& newestFirst, std:
             doc.text(trunkX + 16.0f, yy, l.buy ? "BUY" : "SELL", 8.0f, true, sideColor);
             std::string detail = fmt("%.2f lot", l.lots);
             if (l.adopted) detail += " (opened earlier)";
+            if (!l.note.empty()) detail += " - " + l.note;
             detail += "   req " + fmt("%.2f", l.requestedPrice) + "   fill " + fmt("%.2f", l.entryPrice) + "   exit " +
                       (l.exitPrice > 0 ? fmt("%.2f", l.exitPrice) : std::string("-"));
             doc.text(trunkX + 44.0f, yy, detail, 7.5f, false, kInk);
@@ -411,6 +468,7 @@ std::string buildSessionReportPdf(const SessionReportInput& in) {
     std::string sub = "Generated " + in.generatedAt;
     if (!in.account.empty()) sub += "   |   Account " + in.account;
     if (!in.sessionStartedAt.empty()) sub += "   |   Session started " + in.sessionStartedAt;
+    if (!in.statsSince.empty()) sub += "   |   Data since " + in.statsSince;
     doc.text(kLeft, 64.0f, sub, 8.5f, false, PdfColor{0.75f, 0.80f, 0.92f});
     lay.setY(108.0f);
 
@@ -437,6 +495,17 @@ std::string buildSessionReportPdf(const SessionReportInput& in) {
     lay.section("Basket results");
     chart(lay, "NET P/L PER BASKET (last " + std::to_string(recent.size()) + ")", recent, false);
     chart(lay, "CUMULATIVE NET P/L (last " + std::to_string(recent.size()) + ")", recent, true);
+
+    lay.section("Trading volume");
+    lay.ensure(20.0f);
+    doc.text(kLeft, lay.y(),
+             "Lots: every position counted once (opened and closed). Brokers usually count each side, i.e. twice this. "
+             "Value traded = lots x contract size x entry price.",
+             7.0f, false, kDim);
+    lay.advance(14.0f);
+    const VolumeBucket total = volumeTotal(in.allBaskets);
+    volumeTable(lay, "BY MONTH", volumeByPeriod(in.allBaskets, VolumePeriod::Month), 24, total);
+    volumeTable(lay, "BY DAY (most recent 31)", volumeByPeriod(in.allBaskets, VolumePeriod::Day), 31, total);
 
     std::vector<BasketRecord> newestFirst(in.allBaskets.rbegin(), in.allBaskets.rend());
     basketTable(lay, newestFirst);

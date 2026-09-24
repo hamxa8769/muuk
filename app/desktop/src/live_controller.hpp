@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -76,12 +77,26 @@ public:
     [[nodiscard]] std::string lastError() const;
     void clearError();
 
-    // --- History, reports, logs -------------------------------------------
-    // Everything is stored next to the config file:
-    //   muuk_history/baskets.jsonl   every closed basket (appended as it closes)
-    //   muuk_reports/*.pdf           exported reports
-    //   muuk_logs/*.log              saved logs (also written automatically on disconnect)
+    // --- History, reports, logs, saved state ---------------------------------
+    // Everything is stored next to the config file, so it's all still there
+    // the next time the app opens:
+    //   muuk_state/<config>.state.json  the running basket + lifetime statistics
+    //   muuk_history/baskets.jsonl      every closed basket (appended as it closes)
+    //   muuk_logs/muuk_live.log         the log, written line by line
+    //   muuk_logs/muuk_<time>.log       saved copies (Save logs, and on every disconnect)
+    //   muuk_reports/*.pdf              exported reports
     [[nodiscard]] static std::filesystem::path dataDirectory(const std::string& configPath);
+
+    // Loads the history and the tail of the running log for this config and
+    // keeps appending the log to its file. Cheap to call every frame: only
+    // does work when the path changes (or `force`).
+    void attachData(const std::string& configPath, bool force = false);
+
+    // Fresh start: the basket history and the running log are moved to
+    // archive/ folders (not deleted), and the lifetime statistics (speed,
+    // basket numbering) start over. Settings, the config file, reports,
+    // and anything open at the broker are left alone.
+    bool resetData(const std::string& configPath);
 
     // All saved baskets for this config (loaded on start / reloadHistory,
     // plus every basket closed since), oldest first.
@@ -101,6 +116,8 @@ private:
     [[nodiscard]] static std::string fileStamp();
 
     std::string configPath_;  // of the current/last connection
+    std::string dataAttachedFor_;
+    std::ofstream liveLog_;   // guarded by logMutex_
 
     mutable std::mutex historyMutex_;
     std::vector<muuk::ctrader_fix::BasketRecord> history_;

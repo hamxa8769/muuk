@@ -14,6 +14,7 @@ struct SessionReportInput {
     std::string generatedAt;
     std::string sessionStartedAt;  // empty if the bot isn't running
     std::string account;           // e.g. "demo 1234567"
+    std::string statsSince;        // lifetime numbers (speed totals, history) count from here (last reset)
     std::string symbol = "XAUUSD";
     LiveSettings settings;
 
@@ -30,8 +31,9 @@ struct SessionReportInput {
 };
 
 // Builds the full PDF report: overview (all-time and this session),
-// speed, settings, basket P/L charts, a table of every basket, and each
-// basket's position tree. Returns the PDF bytes.
+// speed, settings, basket P/L charts, trading volume by month and by day,
+// a table of every basket, and each basket's position tree. Returns the
+// PDF bytes.
 [[nodiscard]] std::string buildSessionReportPdf(const SessionReportInput& input);
 
 }  // namespace muuk::ctrader_fix

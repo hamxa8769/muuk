@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include "muuk/ctrader_fix/fix_session.hpp"
 #include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
+#include "muuk/ctrader_fix/live_state.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
 
 namespace muuk::ctrader_fix {
@@ -71,6 +73,7 @@ struct PendingOrderInfo {
     muuk::core::OrderSide side = muuk::core::OrderSide::BuyStop;
     double lots = 0.0;
     double price = 0.0;
+    bool adopted = false;  // already working at the broker when the bot connected, not from a saved basket
 };
 
 // A point-in-time read of LiveRunner's state, for a UI (or anything else)
@@ -118,6 +121,8 @@ struct LiveSnapshot {
     uint64_t ticksProcessed = 0;
 
     std::string sessionStartedAt;
+    std::string statsSince;    // lifetime statistics (speed, basket numbering) count from here -- see resetStats()
+    std::string resumeNote;    // what happened to the saved basket on connect (resumed / couldn't), empty if nothing
     std::vector<BasketRecord> baskets;           // completed this session, oldest first
     std::optional<BasketRecord> currentBasket;   // the basket in progress, if any
 };
@@ -161,6 +166,30 @@ public:
     // run()" rule as setLogHandler.
     using BasketHandler = std::function<void(const BasketRecord&)>;
     void setBasketHandler(BasketHandler handler) { basketHandler_ = std::move(handler); }
+
+    // State persistence. When set (before run()), the running basket --
+    // engine state, open positions, pending orders, closes in flight --
+    // plus id counters and lifetime statistics are saved to this file on
+    // every change. On the next connect the saved basket is checked against
+    // what the broker actually has (Request For Positions + Order Mass
+    // Status Request) and picked up where it left off:
+    //   - positions and pending orders still there: the basket simply
+    //     carries on (same lot sequence, same target);
+    //   - a pending order that filled while disconnected: matched to its
+    //     new position (same side and size, near the Stop price) and
+    //     processed as the fill it was, so the next order goes out;
+    //   - closes that were in flight: redone if the position is still open.
+    // If the broker doesn't match the saved basket in a way that can be
+    // explained (a position or order removed outside the bot), it is NOT
+    // resumed: the bot's pending orders are cancelled, the remaining
+    // positions are listed, and nothing new opens until they're closed.
+    // Needs connection.syncPositionsOnConnect (the default).
+    void setStateFile(std::filesystem::path file) { stateFile_ = std::move(file); }
+
+    // Starts the lifetime statistics over: speed totals, quote count,
+    // basket numbering and this session's booked results. Leaves the
+    // running basket, positions and orders untouched.
+    void resetStats();
 
     // Thread-safe point-in-time read of the current state, for a UI to
     // poll. Safe to call from any thread, including while run() is active
@@ -278,6 +307,27 @@ private:
     // Applies a complete set of Position Reports (see syncPositions()).
     // Caller must hold engineMutex_.
     void finishPositionSync(const std::vector<PositionReportInfo>& reports);
+    // Order Mass Status Request round trip (connect only). Caller must hold engineMutex_.
+    void requestOrderStatusLocked();
+    void finishOrderSync(std::vector<ExecutionReportInfo> reports, bool known);
+
+    // A fill for one of the bot's orders: a placed order becomes an open
+    // leg and the engine reacts (next order); one whose cancel was already
+    // sent is closed straight away as surplus. Shared by live fills and
+    // fills found on reconnect. Caller must hold engineMutex_.
+    void applyFillLocked(muuk::core::OrderId orderId, muuk::core::Price fillPrice, const std::string& positionId);
+
+    // State persistence (see setStateFile). loadSavedState: reads the file
+    // (before connecting). reconcileOnConnectLocked: matches it against the
+    // broker's positions/orders and resumes or safely winds down; engine_
+    // must exist. buildStateLocked: the current state. flushState: writes
+    // it if anything changed (never before reconcile has run, so a saved
+    // basket can't be overwritten by an empty one). markDirty: flags a change.
+    void loadSavedState();
+    void reconcileOnConnectLocked();
+    [[nodiscard]] PersistedState buildStateLocked() const;
+    void flushState();
+    void markDirty() { stateDirty_ = true; }
 
     // Basket recording (all: caller must hold engineMutex_).
     // beginBasket: a new range has just been armed.
@@ -287,7 +337,8 @@ private:
     // completedBaskets_ and hands it to basketHandler_.
     void beginBasket();
     void recordLegOpened(const OpenLeg& leg);
-    void recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission);
+    void recordLegClosed(const OpenLeg& leg, double exitPrice, double gross, double commission,
+                         const std::string& note = {});
     void setCloseReason(const std::string& reason);
     void maybeFinalizeBasket();
 
@@ -429,6 +480,30 @@ private:
     std::mutex posSyncMutex_;
     std::condition_variable posSyncCv_;
     bool posSyncDone_ = false;
+    bool orderSyncDone_ = false;  // guarded by posSyncMutex_
+
+    // Connect-time sync: while connectSync_ is set, position/order answers
+    // are only collected here, for reconcileOnConnectLocked().
+    bool connectSync_ = false;
+    bool connectPositionsKnown_ = false;
+    std::vector<PositionReportInfo> connectPositions_;
+    bool connectOrdersKnown_ = false;
+    std::vector<ExecutionReportInfo> connectOrders_;
+    std::string activeMassStatusReqId_;
+    std::vector<ExecutionReportInfo> orderReports_;
+    uint64_t nextMassStatusReqId_ = 1;
+
+    // Persistence.
+    std::filesystem::path stateFile_;
+    std::optional<PersistedState> loadedState_;
+    std::atomic<bool> stateDirty_{false};
+    bool stateReady_ = false;      // reconcile done -- saving allowed
+    std::mutex stateWriteMutex_;   // one writer at a time, newest wins
+    uint64_t stateSeq_ = 0;        // guarded by engineMutex_
+    uint64_t lastWrittenSeq_ = 0;  // guarded by stateWriteMutex_
+    std::string statsSince_;
+    std::string resumeNote_;
+    bool holdAutoStart_ = false;  // a saved basket couldn't be resumed: the operator decides what's next
 
     // Basket history.
     std::string sessionStartedAt_;

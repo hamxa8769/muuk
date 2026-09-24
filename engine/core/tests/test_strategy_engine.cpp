@@ -604,3 +604,94 @@ TEST_CASE("reArmOnFill=false takes a single fill and does not re-arm that side")
     REQUIRE(afterSecondFill.empty());
     REQUIRE(engine.activeOrderCount() == 0);
 }
+
+TEST_CASE("Commission is charged per lot actually traded: $7/lot on 0.01 + 0.02 + 0.03 lots is $0.42") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.costs.commissionPerLotRoundTurn = 7.0;
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const CommandBatch start = engine.start();  // Buy 0.01 @ 4337, Sell 0.02 @ 4336
+    const PlaceOrderCommand buy1 = placeCmd(start, 0);
+    const PlaceOrderCommand sell2 = placeCmd(start, 1);
+    REQUIRE(buy1.volume.toDouble(spec) == Catch::Approx(0.01));
+    REQUIRE(sell2.volume.toDouble(spec) == Catch::Approx(0.02));
+
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price});
+    const CommandBatch after2 = engine.onOrderConfirmed(OrderConfirmedEvent{sell2.id, sell2.price});
+    const PlaceOrderCommand buy3 = placeCmd(after2, 0);
+    REQUIRE(buy3.volume.toDouble(spec) == Catch::Approx(0.03));
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy3.id, buy3.price});
+
+    (void)engine.onTick(TickEvent{Price::fromDouble(4337.00, spec), Price::fromDouble(4337.00, spec)});
+    const BasketPnlResult pnl = engine.lastBasketPnl();
+    REQUIRE(pnl.commissionMoney == Catch::Approx(0.07 + 0.14 + 0.21));
+    REQUIRE(pnl.spreadCostMoney == Catch::Approx(0.0));  // zero-spread tick
+}
+
+TEST_CASE("Spread cost is exactly half the spread per lot, also for an odd number of ticks") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyEngine engine(baseConfig(spec));
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const CommandBatch start = engine.start();
+    const PlaceOrderCommand buy1 = placeCmd(start, 0);  // 0.01 lot @ 4337.00
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price});
+
+    // Bid 4338.00 / ask 4338.05: mid 4338.025, 5-tick spread.
+    (void)engine.onTick(TickEvent{Price::fromDouble(4338.00, spec), Price::fromDouble(4338.05, spec)});
+    const BasketPnlResult pnl = engine.lastBasketPnl();
+    REQUIRE(pnl.grossPnlMoney == Catch::Approx(1.025));     // 102.5 ticks x $1 x 0.01 lot
+    REQUIRE(pnl.spreadCostMoney == Catch::Approx(0.025));   // 2.5 ticks x $1 x 0.01 lot
+    REQUIRE(pnl.netPnlMoney == Catch::Approx(1.00));        // = selling at the bid
+}
+
+TEST_CASE("exportState/restoreState: a restored engine carries on the same basket exactly") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.basketProfitTargetMoney = 1.0;
+    StrategyEngine original(cfg);
+    (void)original.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const PlaceOrderCommand buy1 = placeCmd(original.start(), 0);
+    const PlaceOrderCommand sell2 = placeCmd(original.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price}), 0);
+    REQUIRE(sell2.side == OrderSide::SellStop);
+
+    const EngineState saved = original.exportState();
+    REQUIRE(saved.status == EngineStatus::Active);
+    REQUIRE(saved.pendingOrders.size() == 1);
+    REQUIRE(saved.buyVolumeSteps == 1);
+
+    // "New process": same config, then the saved state.
+    StrategyEngine resumed(cfg);
+    resumed.restoreState(saved);
+    REQUIRE(resumed.status() == EngineStatus::Active);
+    REQUIRE(resumed.activeOrderCount() == 1);
+    REQUIRE(resumed.nextSequenceIndex() == original.nextSequenceIndex());
+
+    // Both engines react identically to the same next fill...
+    const CommandBatch a = original.onOrderConfirmed(OrderConfirmedEvent{sell2.id, sell2.price});
+    const CommandBatch b = resumed.onOrderConfirmed(OrderConfirmedEvent{sell2.id, sell2.price});
+    REQUIRE(a.size() == 1);
+    REQUIRE(b.size() == 1);
+    REQUIRE(placeCmd(a, 0).id == placeCmd(b, 0).id);  // order ids continue, never reused
+    REQUIRE(placeCmd(a, 0).price == placeCmd(b, 0).price);
+    REQUIRE(placeCmd(a, 0).volume == placeCmd(b, 0).volume);
+
+    // ...and close the basket on the same tick.
+    const TickEvent up{Price::fromDouble(4338.20, spec), Price::fromDouble(4338.20, spec)};
+    const CommandBatch closeA = original.onTick(up);
+    const CommandBatch closeB = resumed.onTick(up);
+    REQUIRE(closeA.size() == closeB.size());
+    REQUIRE(resumed.status() == original.status());
+    REQUIRE(resumed.lastBasketPnl().netPnlMoney == Catch::Approx(original.lastBasketPnl().netPnlMoney));
+}
+
+TEST_CASE("restoreState of an idle state only carries the order-id counter forward") {
+    const SymbolSpec spec = xauusdSpec();
+    EngineState idle;
+    idle.nextOrderId = 500;
+    StrategyEngine engine(baseConfig(spec));
+    engine.restoreState(idle);
+    REQUIRE(engine.status() == EngineStatus::Idle);
+    REQUIRE(placeCmd(engine.start(), 0).id == 500);
+}

@@ -13,6 +13,7 @@
 #include "config_discovery.hpp"
 #include "glass_ui.hpp"
 #include "open_path.hpp"
+#include "muuk/ctrader_fix/basket_history.hpp"
 
 namespace muuk::desktop {
 
@@ -23,6 +24,8 @@ using muuk::ctrader_fix::BasketRecord;
 using muuk::ctrader_fix::LatencySummary;
 using muuk::ctrader_fix::LiveSettings;
 using muuk::ctrader_fix::LiveSnapshot;
+using muuk::ctrader_fix::VolumeBucket;
+using muuk::ctrader_fix::VolumePeriod;
 using glass::kAmber;
 using glass::kBlue;
 using glass::kGreen;
@@ -59,6 +62,19 @@ std::string lots(double v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.2f", v);
     return buf;
+}
+
+// "$1,464,993"
+std::string dollarsWhole(double v) {
+    char digits[32];
+    std::snprintf(digits, sizeof(digits), "%.0f", std::fabs(v));
+    std::string out;
+    const std::string d(digits);
+    for (std::size_t i = 0; i < d.size(); ++i) {
+        if (i > 0 && (d.size() - i) % 3 == 0) out += ',';
+        out += d[i];
+    }
+    return (v < -0.5 ? "-$" : "$") + out;
 }
 
 const char* sideName(OrderSide side) { return side == OrderSide::BuyStop ? "BUY" : "SELL"; }
@@ -371,13 +387,14 @@ void basketLegsTable(const BasketRecord& b, bool inProgress) {
 }
 }  // namespace
 
-DashboardWindow::DashboardWindow() {
-    if (const auto found = findDefaultConfigPath()) {
-        const std::string& path = *found;
-        const std::size_t n = std::min(path.size(), configPathBuffer_.size() - 1);
-        std::copy_n(path.begin(), n, configPathBuffer_.begin());
-        configPathBuffer_[n] = '\0';
+DashboardWindow::DashboardWindow() : prefs_(loadPrefs()) {
+    std::error_code ec;
+    if (!prefs_.configPath.empty() && std::filesystem::is_regular_file(prefs_.configPath, ec)) {
+        setConfigPath(prefs_.configPath);
+    } else if (const auto found = findDefaultConfigPath()) {
+        setConfigPath(*found);
     }
+    darkMode_ = prefs_.darkMode;
     glass::applyTheme(darkMode_);
 }
 
@@ -404,6 +421,8 @@ void DashboardWindow::setTheme(bool dark) {
     darkMode_ = dark;
     glass::applyTheme(dark);
     if (onThemeChanged_) onThemeChanged_(dark);
+    prefs_.darkMode = dark;
+    savePrefs(prefs_);
 }
 
 void DashboardWindow::flash(const std::string& message) {
@@ -443,8 +462,14 @@ void DashboardWindow::render(LiveController& controller) {
     // the controller's list only when it actually changed.
     const std::string configPath(configPathBuffer_.data());
     if (historyPath_ != configPath) {
-        if (!running) controller.reloadHistory(configPath);
-        historyPath_ = configPath;
+        std::error_code ec;
+        // Only for a real file -- not for every half-typed path.
+        if (!running && std::filesystem::is_regular_file(configPath, ec)) {
+            controller.attachData(configPath);
+            historyPath_ = configPath;
+        } else if (running) {
+            historyPath_ = configPath;
+        }
     }
     if (controller.historyRevision() != historyRevision_) {
         historyRevision_ = controller.historyRevision();
@@ -488,6 +513,10 @@ void DashboardWindow::render(LiveController& controller) {
             "  History  " + std::to_string(history_.size()) + "  ###history";
         if (ImGui::BeginTabItem(histLabel.c_str())) {
             renderHistoryTab(controller, snap);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("  Volume  ###volume")) {
+            renderVolumeTab();
             ImGui::EndTabItem();
         }
         const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
@@ -536,6 +565,11 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     }
 
     const float themeWidth = 92.0f;
+    const float autoWidth = ImGui::CalcTextSize("Connect when the app opens").x + ImGui::GetFrameHeight() + 24.0f;
+    ImGui::SameLine(ImGui::GetWindowWidth() - themeWidth - autoWidth - ImGui::GetStyle().WindowPadding.x);
+    if (ImGui::Checkbox("Connect when the app opens", &prefs_.autoConnect)) savePrefs(prefs_);
+    ImGui::SetItemTooltip("Next time the app starts it connects by itself with the same config and picks up "
+                          "the running basket -- for an unattended PC/VPS.");
     ImGui::SameLine(ImGui::GetWindowWidth() - themeWidth - ImGui::GetStyle().WindowPadding.x);
     if (glass::button(darkMode_ ? "Light mode" : "Dark mode", kViolet, ImVec2(themeWidth, 0))) {
         setTheme(!darkMode_);
@@ -556,6 +590,8 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     if (glass::button("Connect", kGreen, ImVec2(120, 0), glass::ButtonKind::Primary)) {
         settingsDirty_ = false;
         controller.start(std::string(configPathBuffer_.data()));
+        prefs_.configPath = configPathBuffer_.data();  // open with this config next time
+        savePrefs(prefs_);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -572,6 +608,14 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     }
     if (!flashMessage_.empty() && ImGui::GetTime() < flashUntil_) {
         ImGui::TextColored(kAmber, "%s", flashMessage_.c_str());
+    }
+    // What happened to the saved basket when the bot (re)connected.
+    if (const auto snap = controller.snapshot(); snap && !snap->resumeNote.empty() &&
+                                                 snap->resumeNote != dismissedResumeNote_) {
+        const bool resumed = snap->resumeNote.rfind("Resumed", 0) == 0;
+        ImGui::TextColored(resumed ? kGreen : kAmber, "%s", snap->resumeNote.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("OK")) dismissedResumeNote_ = snap->resumeNote;
     }
     glass::endCard();
 }
@@ -602,7 +646,17 @@ void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bo
     }
     const double floating = connected && snap ? floatingPnl(*snap) : 0.0;
     const double shownFloating = glass::ease("kpi_floating", static_cast<float>(floating), 12.0f);
-    const double shownBooked = snap ? glass::ease("kpi_booked", static_cast<float>(snap->realizedPnl), 8.0f) : 0.0;
+    // Booked results come from the saved history, so they survive restarts.
+    double allTimeNet = 0.0;
+    double todayNet = 0.0;
+    const std::string today = muuk::ctrader_fix::localTimestamp().substr(0, 10);
+    for (const auto& b : history_) {
+        allTimeNet += b.net;
+        if (b.closedAt.rfind(today, 0) == 0) {
+            todayNet += b.net;
+        }
+    }
+    const double shownBooked = glass::ease("kpi_booked", static_cast<float>(allTimeNet), 8.0f);
 
     card("k_price", "BID / ASK", haveQuote ? price(*snap->bid) + " / " + price(*snap->ask) : std::string("--"), text,
          snap ? snap->symbolName : "");
@@ -615,10 +669,8 @@ void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bo
          snap ? "Buy " + lots(buyLots) + "  /  Sell " + lots(sellLots) : "");
     card("k_ord", "PENDING ORDERS", snap ? std::to_string(snap->pendingOrders.size()) : std::string("--"), text,
          cycleState(snap, connected).label);
-    card("k_real", "BOOKED NET (SESSION)", snap ? money(shownBooked) : std::string("--"),
-         snap ? pnlColor(snap->realizedPnl) : kGrey,
-         snap ? std::to_string(snap->basketsClosed) + " basket(s)  |  commission $" + price(snap->bookedCommission)
-              : "",
+    card("k_real", "BOOKED NET (ALL TIME)", money(shownBooked), pnlColor(allTimeNet),
+         std::to_string(history_.size()) + " baskets  |  today " + money(todayNet),
          true);
 }
 
@@ -727,9 +779,10 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
     ImGui::BeginDisabled(!connected || !snap);
     bool autoContinue = snap ? snap->settings.autoContinue : editSettings_.autoContinue;
     if (ImGui::Checkbox("Auto-open the next range after each basket closes", &autoContinue) && snap) {
-        LiveSettings s = snap->settings;  // only this field -- other edits wait for Apply
+        LiveSettings s = snap->settings;  // only this field -- other edits wait for Save & apply
         s.autoContinue = autoContinue;
         controller.applySettings(s);
+        if (configPathBuffer_[0] != '\0') (void)controller.saveSettings(configPathBuffer_.data(), s);
         editSettings_.autoContinue = autoContinue;
     }
     ImGui::EndDisabled();
@@ -764,7 +817,8 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::SameLine();
         glass::pill("edited", kAmber);
     }
-    ImGui::TextDisabled("Changes apply from the next range - never to a running one.");
+    ImGui::TextDisabled("Saved to your config file, so the app always opens with them. They apply from the next "
+                        "range - never to a running one.");
 
     ImGui::BeginDisabled(!settingsLoaded_);
     if (ImGui::BeginTable("settings", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -817,31 +871,23 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     ImGui::EndDisabled();
 
     ImGui::Spacing();
-    const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-    ImGui::BeginDisabled(!connected || !settingsDirty_);
-    if (glass::button("Apply", kBlue, ImVec2(third, 0), glass::ButtonKind::Primary)) {
-        controller.applySettings(editSettings_);
-        settingsDirty_ = false;
-        flash("Settings applied - they take effect when the next range opens.");
-    }
-    ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Use these settings for the running bot, from its next range on.");
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!settingsLoaded_ || configPathBuffer_[0] == '\0');
-    if (glass::button("Save to file", kBlue, ImVec2(third, 0))) {
+    const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+    ImGui::BeginDisabled(!settingsDirty_ || !settingsLoaded_ || configPathBuffer_[0] == '\0');
+    if (glass::button("Save & apply", kBlue, ImVec2(half, 0), glass::ButtonKind::Primary)) {
         if (controller.saveSettings(configPathBuffer_.data(), editSettings_)) {
             if (connected) controller.applySettings(editSettings_);
             settingsDirty_ = false;
-            flash("Settings saved to the config file.");
+            flash(connected ? "Settings saved - the bot uses them from the next range, and the app opens with them."
+                            : "Settings saved - the app opens with them and the bot uses them when it connects.");
         }
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Writes these settings into the config file (credentials untouched) and applies them if connected.");
+    ImGui::SetItemTooltip("Writes these settings into the config file (credentials untouched) and, if connected, "
+                          "hands them to the bot for its next range.");
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!settingsDirty_);
-    if (glass::button("Revert", glass::palette().neutral, ImVec2(third, 0))) {
+    if (glass::button("Revert", glass::palette().neutral, ImVec2(half, 0))) {
         settingsDirty_ = false;
         if (connected && snap) {
             editSettings_ = snap->settings;
@@ -970,7 +1016,14 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%llu", static_cast<unsigned long long>(o.id));
+            if (o.adopted) {
+                ImGui::TextColored(kAmber, "old");
+                ImGui::SetItemTooltip("Already working at the broker when the bot connected (ClOrdID %llu) - not part "
+                                      "of the current range.",
+                                      static_cast<unsigned long long>(o.id));
+            } else {
+                ImGui::TextDisabled("%llu", static_cast<unsigned long long>(o.id));
+            }
             ImGui::TableNextColumn();
             ImGui::TextColored(o.side == OrderSide::BuyStop ? kGreen : kRed, "%s", orderTypeName(o.side));
             ImGui::TableNextColumn();
@@ -1092,6 +1145,13 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
             detail = "Open positions stay open. The bot stops trading until you open a new range.";
             action = "Cancel all pending";
             break;
+        case Confirm::ResetData:
+            title = "Start fresh?";
+            detail = "The basket history and the log are moved to archive folders next to your config file\n"
+                     "(nothing is deleted), and the statistics - totals, speed, basket numbers - start over.\n"
+                     "Settings, reports, and anything open at the broker are not touched.";
+            action = "Reset data";
+            break;
         case Confirm::None:
             ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
@@ -1113,6 +1173,11 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
             case Confirm::CancelAllPending:
                 controller.cancelAllPendingOrders();
                 break;
+            case Confirm::ResetData:
+                if (controller.resetData(configPathBuffer_.data())) {
+                    flash("Fresh start - old history and log are in the archive folders.");
+                }
+                break;
             case Confirm::None:
                 break;
         }
@@ -1132,7 +1197,8 @@ void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
     ImGui::Spacing();
     withFont(boldFont_, [] { ImGui::TextUnformatted("System speed"); });
     ImGui::SameLine();
-    ImGui::TextDisabled("(%llu quotes processed)", static_cast<unsigned long long>(snap.ticksProcessed));
+    ImGui::TextDisabled("(%llu quotes since %s)", static_cast<unsigned long long>(snap.ticksProcessed),
+                        snap.statsSince.empty() ? "connect" : snap.statsSince.c_str());
     if (!ImGui::BeginTable("speed", 5, ImGuiTableFlags_SizingStretchProp)) return;
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.7f);
     ImGui::TableSetupColumn("Live");
@@ -1144,7 +1210,9 @@ void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         ImGui::TextDisabled("%s", label);
-        ImGui::SetItemTooltip("%s\n%llu samples (p99 over the most recent 2048)", help,
+        ImGui::SetItemTooltip("%s\n%llu samples. Avg and max are all-time (since the last reset); live and p99 "
+                              "are the most recent 2048.",
+                              help,
                               static_cast<unsigned long long>(s.samples));
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(latency(s.last, s, micro).c_str());
@@ -1205,6 +1273,15 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
     if (glass::button("Reload", glass::palette().neutral)) controller.reloadHistory(configPath);
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Re-reads muuk_history/baskets.jsonl next to the config file.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(configPath.empty());
+    if (glass::button("Reset data", kRed)) {
+        confirm_ = Confirm::ResetData;
+        openConfirmRequested_ = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Fresh start: archives the basket history and the log, and starts the statistics over. "
+                          "Settings and anything open at the broker are not touched.");
 
     ImGui::Spacing();
     if (ImGui::BeginTable("hist_summary", 5, ImGuiTableFlags_SizingStretchSame)) {
@@ -1356,8 +1433,8 @@ void DashboardWindow::renderExitPopup(LiveController& controller, const std::opt
     withFont(boldFont_, [] { ImGui::TextUnformatted("Trades are still open at the broker"); });
     const std::string netNow = connected ? ", net now " + money(snap->live.net) : std::string();
     ImGui::TextDisabled("%zu open position(s) and %zu pending order(s)%s.", positions, pending, netNow.c_str());
-    ImGui::TextDisabled("If Muuk closes now, nothing manages them: no profit target, no next order,\n"
-                        "no risk limit - they stay open until you close them in cTrader.");
+    ImGui::TextDisabled("While Muuk is closed nothing manages them: no profit target, no next order, no risk\n"
+                        "limit. The basket is saved and carries on where it left off when you connect again.");
     ImGui::Spacing();
     ImGui::Spacing();
 
@@ -1378,6 +1455,138 @@ void DashboardWindow::renderExitPopup(LiveController& controller, const std::opt
         finish(false);
     }
     ImGui::EndPopup();
+}
+
+
+void DashboardWindow::refreshVolume() {
+    const std::string now = muuk::ctrader_fix::localTimestamp();
+    // Recompute when the history changed, or once a minute (the day may have turned).
+    if (volumeRevision_ == historyRevision_ && ImGui::GetTime() - volumeComputedAt_ < 60.0) return;
+    volumeRevision_ = historyRevision_;
+    volumeComputedAt_ = ImGui::GetTime();
+    volumeRows_[0] = muuk::ctrader_fix::volumeByPeriod(history_, VolumePeriod::Day);
+    volumeRows_[1] = muuk::ctrader_fix::volumeByPeriod(history_, VolumePeriod::Week);
+    volumeRows_[2] = muuk::ctrader_fix::volumeByPeriod(history_, VolumePeriod::Month);
+    volumeTotal_ = muuk::ctrader_fix::volumeTotal(history_);
+    nowDay_ = muuk::ctrader_fix::periodKey(now, VolumePeriod::Day);
+    nowWeek_ = muuk::ctrader_fix::periodKey(now, VolumePeriod::Week);
+    nowMonth_ = muuk::ctrader_fix::periodKey(now, VolumePeriod::Month);
+}
+
+void DashboardWindow::renderVolumeTab() {
+    refreshVolume();
+
+    auto find = [](const std::vector<VolumeBucket>& rows, const std::string& key) {
+        for (const auto& r : rows) {
+            if (r.period == key) return r;
+        }
+        VolumeBucket empty;
+        empty.period = key;
+        return empty;
+    };
+
+    // Today / this week / this month / all time at a glance.
+    if (ImGui::BeginTable("volume_summary", 4, ImGuiTableFlags_SizingStretchSame)) {
+        auto stat = [&](const char* caption, const VolumeBucket& b) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", caption);
+            withFont(boldFont_, [&] { ImGui::Text("%s lots", lots(b.lots).c_str()); });
+            ImGui::SameLine();
+            ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str());
+            ImGui::TextDisabled("%d baskets  |  %d won / %d lost", b.baskets, b.won, b.lost);
+        };
+        stat("TODAY", find(volumeRows_[0], nowDay_));
+        stat("THIS WEEK", find(volumeRows_[1], nowWeek_));
+        stat("THIS MONTH", find(volumeRows_[2], nowMonth_));
+        stat("ALL TIME", volumeTotal_);
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Group by");
+    ImGui::SameLine();
+    ImGui::RadioButton("Day", &volumePeriod_, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Week", &volumePeriod_, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton("Month", &volumePeriod_, 2);
+    ImGui::SameLine();
+    ImGui::TextDisabled("   (?)");
+    ImGui::SetItemTooltip(
+        "Lots: every position counted once - it was opened and closed (one round turn).\n"
+        "Broker volume: brokers count each side, so opening and closing = twice the lots.\n"
+        "Value traded: lots x %.0f (contract size) x entry price, in USD.\n"
+        "Won / lost lots: lots in baskets that closed in profit / in loss.\n"
+        "Commission is your configured rate x lots. Baskets count on the day they closed.",
+        history_.empty() ? 100.0 : history_.back().contractSize);
+
+    const std::vector<VolumeBucket>& rows = volumeRows_[std::clamp(volumePeriod_, 0, 2)];
+    if (rows.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("No closed baskets yet - volume shows up here as baskets close.");
+        return;
+    }
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
+    if (!ImGui::BeginTable("volume", 11, flags)) return;
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn(volumePeriod_ == 0 ? "Day" : (volumePeriod_ == 1 ? "Week" : "Month"),
+                            ImGuiTableColumnFlags_WidthStretch, 1.6f);
+    ImGui::TableSetupColumn("Baskets");
+    ImGui::TableSetupColumn("Won/Lost");
+    ImGui::TableSetupColumn("Lots");
+    ImGui::TableSetupColumn("Broker vol.");
+    ImGui::TableSetupColumn("Value traded", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+    ImGui::TableSetupColumn("Won lots");
+    ImGui::TableSetupColumn("Lost lots");
+    ImGui::TableSetupColumn("Commission");
+    ImGui::TableSetupColumn("Net");
+    ImGui::TableSetupColumn("Net/lot");
+    ImGui::TableHeadersRow();
+
+    auto row = [&](const VolumeBucket& b, bool total) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        if (total) {
+            withFont(boldFont_, [&] { ImGui::TextUnformatted("All time"); });
+        } else {
+            const bool current = b.period == nowDay_ || b.period == nowWeek_ || b.period == nowMonth_;
+            if (current) {
+                ImGui::TextColored(kBlue, "%s", b.period.c_str());
+            } else {
+                ImGui::TextUnformatted(b.period.c_str());
+            }
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%d", b.baskets);
+        ImGui::TableNextColumn();
+        ImGui::Text("%d / %d", b.won, b.lost);
+        ImGui::TableNextColumn();
+        withFont(total ? boldFont_ : nullptr, [&] { ImGui::TextUnformatted(lots(b.lots).c_str()); });
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("%s", lots(b.sideLots()).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(dollarsWhole(b.notional).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextColored(kGreen, "%s", lots(b.wonLots).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextColored(kRed, "%s", lots(b.lostLots).c_str());
+        ImGui::TableNextColumn();
+        if (b.commission > 0.005) {
+            ImGui::TextColored(kAmber, "-$%.2f", b.commission);
+        } else {
+            ImGui::TextDisabled("$0.00");
+        }
+        ImGui::TableNextColumn();
+        withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });
+        ImGui::TableNextColumn();
+        ImGui::TextColored(pnlColor(b.netPerLot()), "%s", money(b.netPerLot()).c_str());
+    };
+    for (const auto& b : rows) row(b, false);
+    row(volumeTotal_, true);
+    ImGui::EndTable();
 }
 
 }  // namespace muuk::desktop

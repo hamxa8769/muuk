@@ -22,7 +22,8 @@ nlohmann::json basketToJson(const BasketRecord& b) {
                         {"net", l.net},
                         {"openedAt", l.openedAt},
                         {"closedAt", l.closedAt},
-                        {"adopted", l.adopted}});
+                        {"adopted", l.adopted},
+                        {"note", l.note}});
     }
     return {{"number", b.number},
             {"session", b.session},
@@ -30,6 +31,7 @@ nlohmann::json basketToJson(const BasketRecord& b) {
             {"startedAt", b.startedAt},
             {"closedAt", b.closedAt},
             {"durationSeconds", b.durationSeconds},
+            {"contractSize", b.contractSize},
             {"rangeLower", b.rangeLower},
             {"rangeUpper", b.rangeUpper},
             {"closeReason", b.closeReason},
@@ -47,6 +49,7 @@ BasketRecord basketFromJson(const nlohmann::json& j) {
     b.startedAt = j.value("startedAt", std::string());
     b.closedAt = j.value("closedAt", std::string());
     b.durationSeconds = j.value("durationSeconds", 0.0);
+    b.contractSize = j.value("contractSize", 100.0);
     b.rangeLower = j.value("rangeLower", 0.0);
     b.rangeUpper = j.value("rangeUpper", 0.0);
     b.closeReason = j.value("closeReason", std::string());
@@ -69,6 +72,7 @@ BasketRecord basketFromJson(const nlohmann::json& j) {
             l.openedAt = lj.value("openedAt", std::string());
             l.closedAt = lj.value("closedAt", std::string());
             l.adopted = lj.value("adopted", false);
+            l.note = lj.value("note", std::string());
             b.legs.push_back(l);
         }
     }

@@ -13,6 +13,7 @@
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
 #include "muuk/ctrader_fix/tags.hpp"
+#include "live_test_helpers.hpp"
 #include "mock_fix_server.hpp"
 
 using namespace muuk::core;
@@ -20,72 +21,6 @@ using namespace muuk::ctrader_fix;
 using namespace muuk::ctrader_fix::test;
 using namespace std::chrono_literals;
 
-namespace {
-
-constexpr std::size_t kTradeConn = 0;  // LiveRunner connects Trade first, then Quote (live_runner.cpp)
-constexpr std::size_t kQuoteConn = 1;
-
-SymbolSpec xauusdSpec() {
-    SymbolSpec spec;
-    spec.name = "XAUUSD";
-    spec.digits = 2;
-    spec.tickSize = 0.01;
-    spec.tickValue = 1.0;
-    spec.contractSize = 100.0;
-    spec.volumeStep = 0.01;
-    spec.volumeMin = 0.01;
-    spec.volumeMax = 100.0;
-    return spec;
-}
-
-LiveConfig testConfig(const MockFixServer& server) {
-    LiveConfig cfg;
-    cfg.connection.quote = FixEndpoint{"127.0.0.1", server.port()};
-    cfg.connection.trade = FixEndpoint{"127.0.0.1", server.port()};
-    cfg.connection.environment = "demo";
-    cfg.connection.brokerUid = "testbroker";
-    cfg.connection.traderLogin = "12345";
-    cfg.connection.password = "pass";
-    cfg.connection.heartBtIntSeconds = 1;
-    cfg.connection.symbolName = "XAUUSD";
-
-    const SymbolSpec spec = xauusdSpec();
-    cfg.strategy.symbol = spec;
-    cfg.strategy.range = RangeConfig{Price::fromDouble(4336.00, spec), Price::fromDouble(4337.00, spec)};
-    cfg.strategy.lotProgression =
-        LotProgressionConfig{Volume::fromDouble(0.01, spec), Volume::fromDouble(0.01, spec)};
-    cfg.strategy.riskLimits.maxOrders = 100;
-    cfg.strategy.riskLimits.maxLot = Volume::fromDouble(10.0, spec);
-    cfg.strategy.basketProfitTargetMoney = 0.0;  // disabled: keep this test focused on order flow
-    cfg.connection.syncPositionsOnConnect = false;  // the mock broker only answers it in the sync test
-    return cfg;
-}
-
-FixMessage serverHeaderMessage(const std::string& msgType, int seqNum) {
-    FixMessage msg(msgType);
-    msg.set(tag::SenderCompID, std::string("CSERVER"));
-    msg.set(tag::TargetCompID, std::string("demo.testbroker.12345"));
-    msg.set(tag::MsgSeqNum, static_cast<int64_t>(seqNum));
-    msg.set(tag::SendingTime, nowUtcTimestamp());
-    return msg;
-}
-
-FixMessage buildSecurityListResponse() {
-    FixMessage msg = serverHeaderMessage(msgtype::SecurityList, 2);
-    msg.set(tag::SecurityReqID, std::string("sec-1"));
-    msg.set(tag::SecurityResponseID, std::string("secresp-1"));
-    msg.set(tag::SecurityRequestResult, int64_t{0});
-    msg.set(tag::NoRelatedSym, int64_t{2});
-    msg.set(tag::Symbol, std::string("1"));
-    msg.set(tag::SymbolName, std::string("XAUUSD"));
-    msg.set(tag::SymbolDigits, int64_t{2});
-    msg.set(tag::Symbol, std::string("2"));
-    msg.set(tag::SymbolName, std::string("EURUSD"));
-    msg.set(tag::SymbolDigits, int64_t{5});
-    return msg;
-}
-
-}  // namespace
 
 TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arms on a fill") {
     MockFixServer server;
@@ -916,6 +851,12 @@ TEST_CASE("LiveRunner syncs open positions from the broker on connect and can cl
     report(3, "P100", "1", "3", "0", "4280.00");  // BUY 0.03 lot
     report(4, "P200", "1", "0", "2", "4281.00");  // SELL 0.02 lot
     report(5, "P900", "2", "100000", "0", "1.10");  // EURUSD -- not ours, ignored
+    // ...and no working orders.
+    const FixMessage ordReq = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 3s);
+    FixMessage noOrders = serverHeaderMessage(msgtype::BusinessMessageReject, 6);
+    noOrders.set(tag::RefMsgType, std::string("AF"));
+    noOrders.set(tag::BusinessRejectRefID, ordReq.getString(tag::MassStatusReqID));
+    server.sendToClient(kTradeConn, noOrders);
 
     for (int i = 0; i < 50; ++i) {
         if (runner.snapshot().connected) break;
