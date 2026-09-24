@@ -128,9 +128,9 @@ powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
 - **Remote Desktop:** close the RDP window (*disconnect*). **Don't sign
   out.** Signing out ends the session. The app treats that like a shutdown
   and closes every position first.
-- **Minimize the app** when you're not watching it. Minimized it redraws
-  twice a second and uses almost no CPU. Trading is never slowed by the
-  window.
+- **Minimize the app** when you're not watching it. Minimized (or with
+  Remote Desktop disconnected) it draws nothing and uses ~0% CPU. Trading
+  is never slowed by the window.
 - **Windows Update:** set active hours and pause automatic restarts. Do
   restarts at the weekend, when gold (XAUUSD) is closed, roughly
   Friday 22:00 to Sunday 23:00 UTC.
