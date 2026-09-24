@@ -74,6 +74,10 @@ struct LiveConnectionConfig {
     // broker doesn't have it (logged as MISSED).
     int orderAckTimeoutSeconds = 8;
 
+    // How often (seconds) the bot asks the broker for all positions and
+    // working orders and compares them with its own view. 0 = only on connect.
+    int verifySeconds = 30;
+
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
     // false: only open a range when the operator asks (LiveRunner::openRange).

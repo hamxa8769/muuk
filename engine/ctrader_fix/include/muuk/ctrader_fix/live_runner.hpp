@@ -65,6 +65,7 @@ struct PositionInfo {
     double entryPrice = 0.0;      // the price it actually filled at
     double floatingPnl = 0.0;     // == pnl.net
     PnlBreakdown pnl;
+    bool verified = false;        // seen in the broker's own position list at the last check
 };
 
 // One currently working (unfilled) order, for a UI to list individually.
@@ -74,6 +75,7 @@ struct PendingOrderInfo {
     double lots = 0.0;
     double price = 0.0;
     bool adopted = false;  // already working at the broker when the bot connected, not from a saved basket
+    bool confirmed = false;  // the broker acknowledged it / listed it as working
     // Held by the bot, not at the broker yet: the market is already past its
     // price (a Buy Stop at or below the ask, a Sell Stop at or above the bid),
     // so the broker would refuse it. It's sent as soon as the price is back
@@ -87,6 +89,11 @@ struct PendingOrderInfo {
 // there's no separate state to keep in sync.
 struct LiveSnapshot {
     muuk::core::EngineStatus status = muuk::core::EngineStatus::Idle;
+    // The account this bot is logged into (from the config it was started with).
+    std::string environment;   // "demo" / "live"
+    std::string brokerUid;
+    std::string accountLogin;
+    std::string tradeHost;
     std::string symbolName;
     std::string symbolId;
     double rangeLower = 0.0;
@@ -128,6 +135,12 @@ struct LiveSnapshot {
     std::string sessionStartedAt;
     std::string statsSince;    // lifetime statistics (speed, basket numbering) count from here -- see resetStats()
     std::string resumeNote;    // what happened to the saved basket on connect (resumed / couldn't), empty if nothing
+
+    // Broker check (every connection.verifySeconds): the bot's positions and
+    // orders compared with the broker's own lists.
+    std::string brokerCheckedAt;            // time of the last complete check ("" = none yet)
+    std::vector<std::string> brokerIssues;  // what didn't match, newest last (last 20)
+    int brokerIssuesRecent = 0;             // found in the last 5 minutes
 
     // Connection health.
     std::string connectedSince;          // when this connection became ready ("" before)
@@ -321,6 +334,9 @@ private:
         // orders must carry it -- see buildMarketOrderSingle.
         std::string positionId;
         bool adopted = false;  // found by a position sync rather than opened this session
+        // Orders: acknowledged by the broker (ExecType New) or listed as
+        // working. Positions: seen in the broker's position list.
+        bool confirmed = false;
     };
 
     // Applies a complete set of Position Reports (see syncPositions()).
@@ -366,7 +382,14 @@ private:
     // riskLimits.maxSpreadTicks (a running basket is never held back by it).
     [[nodiscard]] bool spreadTooWideLocked();
     // The answer to a mass status request sent for unconfirmed orders.
-    void finishAckCheckLocked(const std::vector<ExecutionReportInfo>& reports);
+    // The answer to a mass status request sent while running (unconfirmed
+    // orders, or the periodic broker check): every placed order must be
+    // working at the broker -- a missing one is placed again, an unknown
+    // one is listed and reported.
+    void finishRuntimeOrderCheckLocked(const std::vector<ExecutionReportInfo>& reports);
+    // Records a mismatch between the bot and the broker (log + snapshot).
+    void noteBrokerIssueLocked(const std::string& issue);
+    void noteMissedLocked();
     [[nodiscard]] PersistedState buildStateLocked() const;
     void flushState();
     void markDirty() { stateDirty_ = true; }
@@ -494,6 +517,12 @@ private:
     // market is already past their price -- see PendingOrderInfo::waiting.
     std::unordered_map<muuk::core::OrderId, OpenLeg> waitingOrders_;
     int healthRearms_ = 0;
+    // Broker check.
+    std::chrono::steady_clock::time_point orderStatusRequestedAt_;
+    std::string brokerCheckedAt_;
+    std::vector<std::pair<std::chrono::steady_clock::time_point, std::string>> brokerIssues_;
+    std::unordered_set<muuk::core::OrderId> reportedForeignOrders_;
+    bool manualPositionSync_ = true;  // periodic checks set it false: their "[sync] done" line is skipped when nothing changed
     // Orders the operator cancelled one by one (cancelOrder): the watchdog
     // leaves them cancelled.
     std::unordered_set<muuk::core::OrderId> operatorCancelled_;  // watchdog re-arms since the last fill -- capped, so a rejecting broker isn't spammed

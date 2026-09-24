@@ -1,6 +1,7 @@
 // State persistence: a basket in progress survives the bot being stopped
 // and started again (LiveRunner::setStateFile).
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <filesystem>
@@ -694,6 +695,209 @@ TEST_CASE("Stop loss: the basket is closed and recorded as a stop loss") {
     sendFill(server, seq++, close.getString(tag::ClOrdID), 4335.80, 1.0, "P1");
     REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }));
     REQUIRE(bot.runner().snapshot().baskets[0].closeReason == "stop loss");
+
+    bot.finish();
+    bot.rethrow();
+}
+
+namespace {
+// Answers a Request For Positions / Order Mass Status Request the way the
+// live IC Markets server does. Returns the next sequence number.
+int answerPositions(MockFixServer& server, int seq, const FixMessage& request,
+                    const std::vector<BrokerPosition>& positions) {
+    if (positions.empty()) {
+        FixMessage none = serverHeaderMessage(msgtype::PositionReport, seq++);
+        none.set(tag::PosReqID, request.getString(tag::PosReqID));
+        none.set(tag::PosReqResult, std::string("2"));
+        server.sendToClient(kTradeConn, none);
+    }
+    for (const auto& p : positions) {
+        FixMessage r = serverHeaderMessage(msgtype::PositionReport, seq++);
+        r.set(tag::PosReqID, request.getString(tag::PosReqID));
+        r.set(tag::PosMaintRptID, p.id);
+        r.set(tag::TotalNumPosReports, static_cast<int64_t>(positions.size()));
+        r.set(tag::PosReqResult, std::string("0"));
+        r.set(tag::Symbol, std::string("1"));
+        r.set(tag::LongQty, p.buy ? p.lots * 100.0 : 0.0, 2);
+        r.set(tag::ShortQty, p.buy ? 0.0 : p.lots * 100.0, 2);
+        r.set(tag::SettlPrice, p.price, 2);
+        server.sendToClient(kTradeConn, r);
+    }
+    return seq;
+}
+
+int answerOrders(MockFixServer& server, int seq, const FixMessage& request, const std::vector<BrokerOrder>& orders) {
+    if (orders.empty()) {
+        FixMessage none = serverHeaderMessage(msgtype::BusinessMessageReject, seq++);
+        none.set(tag::BusinessRejectReason, int64_t{0});
+        none.set(tag::Text, std::string("ORDER_NOT_FOUND:no orders found"));
+        server.sendToClient(kTradeConn, none);
+    }
+    for (const auto& o : orders) {
+        FixMessage r = serverHeaderMessage(msgtype::ExecutionReport, seq++);
+        r.set(tag::OrderID, "B" + o.clOrdId);
+        r.set(tag::ClOrdID, o.clOrdId);
+        r.set(tag::MassStatusReqID, request.getString(tag::MassStatusReqID));
+        r.set(tag::TotNumReports, static_cast<int64_t>(orders.size()));
+        r.set(tag::ExecType, std::string("I"));
+        r.set(tag::OrdStatus, std::string("0"));
+        r.set(tag::Symbol, std::string("1"));
+        r.set(tag::Side, static_cast<int64_t>(o.buy ? 1 : 2));
+        r.set(tag::OrderQty, o.lots * 100.0, 2);
+        r.set(tag::OrdType, int64_t{3});
+        r.set(tag::StopPx, o.stopPx, 2);
+        server.sendToClient(kTradeConn, r);
+    }
+    return seq;
+}
+
+void sendNewAck(MockFixServer& server, int seq, const std::string& clOrdId) {
+    FixMessage ack = serverHeaderMessage(msgtype::ExecutionReport, seq);
+    ack.set(tag::OrderID, "B" + clOrdId);
+    ack.set(tag::ClOrdID, clOrdId);
+    ack.set(tag::ExecType, std::string("0"));
+    ack.set(tag::OrdStatus, std::string("0"));
+    server.sendToClient(kTradeConn, ack);
+}
+}  // namespace
+
+TEST_CASE("Order ids are unique per connect (time-based), so another copy's reports are never taken as ours") {
+    MockFixServer server;
+    Bot bot(resumeConfig(server), freshStateFile("unique_ids"));
+    (void)handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(std::stoull(buy.getString(tag::ClOrdID)) >= 1'000'000'000'000ULL);
+
+    // A fill for an id this bot never used (another copy's order "7") is ignored.
+    sendFill(server, 3, "7", 4337.00, 1.0, "P-OTHER");
+    std::this_thread::sleep_for(300ms);
+    REQUIRE(bot.runner().snapshot().positions.empty());
+
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.accountLogin == "12345");
+    REQUIRE(snap.brokerUid == "testbroker");
+    REQUIRE(snap.environment == "demo");
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Broker check: an order the broker does not have is placed again, and the check is shown") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.verifySeconds = 1;
+    Bot bot(cfg, freshStateFile("verify_missing"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, buy.getString(tag::ClOrdID));
+    REQUIRE(waitUntil([&] {
+        const auto s = bot.runner().snapshot();
+        return !s.pendingOrders.empty() && s.pendingOrders[0].confirmed;
+    }));
+
+    // The periodic check: the broker has no positions and -- wrongly -- no orders.
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {});
+    const FixMessage ordReq = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 4s);
+    seq = answerOrders(server, seq, ordReq, {});
+
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::Side) == 1);
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(buy.getDouble(tag::StopPx)));
+    REQUIRE(again.getString(tag::ClOrdID) != buy.getString(tag::ClOrdID));
+    REQUIRE(waitUntil([&] { return !bot.runner().snapshot().brokerCheckedAt.empty(); }));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.brokerIssuesRecent >= 1);
+    REQUIRE(snap.brokerIssues.back().find("MISSED") != std::string::npos);
+    REQUIRE(snap.currentBasket->ordersMissed == 1);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Broker check: a basket position closed outside the bot stops the basket safely") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.verifySeconds = 1;
+    Bot bot(cfg, freshStateFile("verify_gone"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sell = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sell.getString(tag::ClOrdID));
+
+    // P1 was closed by hand in cTrader; the Sell Stop is still working.
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {});
+    const FixMessage ordReq = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 4s);
+    seq = answerOrders(server, seq, ordReq, {{sell.getString(tag::ClOrdID), false, 0.02, 4336.00}});
+
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == sell.getString(tag::ClOrdID));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.status == EngineStatus::Idle);
+    REQUIRE(snap.positions.empty());
+    REQUIRE(snap.baskets[0].outcome == "interrupted");
+    REQUIRE(snap.baskets[0].legs[0].note == "closed outside the bot");
+    // Nothing new opens by itself after that.
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Broker check: a working order this bot did not place is listed and reported") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.verifySeconds = 1;
+    Bot bot(cfg, freshStateFile("verify_foreign"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, buy.getString(tag::ClOrdID));
+
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {});
+    const FixMessage ordReq = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 4s);
+    seq = answerOrders(server, seq, ordReq,
+                       {{buy.getString(tag::ClOrdID), true, 0.01, buy.getDouble(tag::StopPx)},
+                        {"555", false, 0.50, 4300.00}});  // someone else's
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().pendingOrders.size() == 2; }));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    const auto foreign = std::find_if(snap.pendingOrders.begin(), snap.pendingOrders.end(),
+                                      [](const PendingOrderInfo& o) { return o.id == 555; });
+    REQUIRE(foreign != snap.pendingOrders.end());
+    REQUIRE(foreign->adopted);
+    REQUIRE(snap.brokerIssues.back().find("didn't place") != std::string::npos);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Each basket records how it ended and how it went: orders, fills, deepest drawdown") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 0.50;
+    Bot bot(cfg, freshStateFile("measure"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // Sell Stop
+    sendQuote(server, 2, 4336.60, 4336.70);                                 // the low point
+    sendQuote(server, 3, 4337.60, 4337.70);                                 // target
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getInt(tag::OrdType) == 1);
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4337.60, 1.0, "P1");
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }));
+    const BasketRecord b = bot.runner().snapshot().baskets[0];
+    REQUIRE(b.outcome == "target");
+    REQUIRE(b.ordersPlaced == 2);
+    REQUIRE(b.ordersFilled == 1);
+    REQUIRE(b.ordersMissed == 0);
+    REQUIRE(b.worstNet == Catch::Approx(-0.40));  // mid 4336.65 vs 4337 = -0.35, minus half the spread
+    REQUIRE(b.maxOpenLots == Catch::Approx(0.01));
 
     bot.finish();
     bot.rethrow();

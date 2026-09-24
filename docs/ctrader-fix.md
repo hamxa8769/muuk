@@ -221,6 +221,45 @@ $0.07 / $0.14 / $0.21. Spread is half the current spread per lot, per
 position (a buy exits at the bid, a sell at the ask). The engine's
 profit-target check uses exactly these same figures.
 
+## Broker check: the app always matches the broker
+
+Every `connection.verifySeconds` (default 30 s), and on every connect, the
+bot asks the broker for all open positions (Request For Positions) and all
+working orders (Order Mass Status Request), and compares them with its own
+view:
+- **A pending order the broker doesn't have** is placed again (`MISSED`).
+- **A position of the running basket that the broker no longer has**
+  (closed in cTrader) stops the basket: its pending orders are cancelled,
+  the rest is listed, and nothing new opens by itself. Its P/L and next
+  order can't be trusted after that.
+- **An order or position the bot didn't make** is listed as "old" and
+  reported. This usually means Muuk is also running on another PC/VPS with
+  the same account.
+- Orders the broker hasn't acknowledged within 8 s are checked the same
+  way.
+
+In the app:
+- The header shows "Broker verified HH:MM:SS" (green), or "Broker check:
+  issues" (red, with the details).
+- Positions show the broker's own position id, green once confirmed (it's
+  the same id cTrader shows).
+- Pending orders show *confirmed* / *sent...* / *not sent*.
+- The header also shows which broker and account the bot is logged into,
+  and DEMO / LIVE MONEY.
+
+**ClOrdIDs start from a time-based number on every connect**
+(e.g. 1790270000001). Another copy of the bot on the same account never
+uses the same ids, so the broker's reports for its orders are never
+mistaken for this one's.
+
+**Every basket is measured:**
+- how it ended: target / stop loss / manual / interrupted / failed;
+- orders placed, filled, rejected, and missed and re-placed;
+- its deepest drawdown and best point;
+- the most lots open at once.
+
+The History tab sums these up: outcomes, success rate, deepest drawdown.
+
 ## Lot sizes
 
 `strategy.lotProgression`:

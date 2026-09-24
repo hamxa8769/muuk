@@ -39,6 +39,16 @@ struct BasketRecord {
     double rangeLower = 0.0;
     double rangeUpper = 0.0;
     std::string closeReason;      // "profit target", "manual: close range", ...
+    // How it ended, in one word: "target", "stop loss", "manual", "interrupted",
+    // "guard" (closed on app exit), "failed" (a close was rejected), "closed".
+    std::string outcome;
+    int ordersPlaced = 0;         // pending orders sent to the broker
+    int ordersFilled = 0;
+    int ordersRejected = 0;
+    int ordersMissed = 0;         // found missing at the broker and placed again
+    double worstNet = 0.0;        // lowest floating net P/L while it ran (its deepest drawdown)
+    double bestNet = 0.0;
+    double maxOpenLots = 0.0;     // most lots open at once
     std::vector<BasketLegRecord> legs;
     double gross = 0.0;
     double commission = 0.0;

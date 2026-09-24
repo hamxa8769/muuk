@@ -35,6 +35,14 @@ nlohmann::json basketToJson(const BasketRecord& b) {
             {"rangeLower", b.rangeLower},
             {"rangeUpper", b.rangeUpper},
             {"closeReason", b.closeReason},
+            {"outcome", b.outcome},
+            {"ordersPlaced", b.ordersPlaced},
+            {"ordersFilled", b.ordersFilled},
+            {"ordersRejected", b.ordersRejected},
+            {"ordersMissed", b.ordersMissed},
+            {"worstNet", b.worstNet},
+            {"bestNet", b.bestNet},
+            {"maxOpenLots", b.maxOpenLots},
             {"gross", b.gross},
             {"commission", b.commission},
             {"net", b.net},
@@ -53,6 +61,14 @@ BasketRecord basketFromJson(const nlohmann::json& j) {
     b.rangeLower = j.value("rangeLower", 0.0);
     b.rangeUpper = j.value("rangeUpper", 0.0);
     b.closeReason = j.value("closeReason", std::string());
+    b.outcome = j.value("outcome", std::string());
+    b.ordersPlaced = j.value("ordersPlaced", 0);
+    b.ordersFilled = j.value("ordersFilled", 0);
+    b.ordersRejected = j.value("ordersRejected", 0);
+    b.ordersMissed = j.value("ordersMissed", 0);
+    b.worstNet = j.value("worstNet", 0.0);
+    b.bestNet = j.value("bestNet", 0.0);
+    b.maxOpenLots = j.value("maxOpenLots", 0.0);
     b.gross = j.value("gross", 0.0);
     b.commission = j.value("commission", 0.0);
     b.net = j.value("net", 0.0);

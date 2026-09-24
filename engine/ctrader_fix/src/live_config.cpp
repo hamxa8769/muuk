@@ -54,6 +54,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
     cfg.connection.manualCloseCooldownSeconds = conn.value("manualCloseCooldownSeconds", 15);
     cfg.connection.orderAckTimeoutSeconds = conn.value("orderAckTimeoutSeconds", 8);
+    cfg.connection.verifySeconds = conn.value("verifySeconds", 30);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 

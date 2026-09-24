@@ -581,14 +581,44 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
 
     // Row 1: brand, connection pill, theme toggle.
     withFont(largeFont_, [] { ImGui::TextColored(kBlue, "MUUK"); });
-    ImGui::SameLine(0.0f, 10.0f);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("XAUUSD range bot  |  IC Markets FIX");
-    ImGui::SameLine(0.0f, 20.0f);
-    if (account_.loaded) {
-        glass::pill(account_.live ? "LIVE MONEY" : "DEMO", account_.live ? kRed : kBlue);
-        ImGui::SetItemTooltip("Account %s (%s) - change it in Settings > Account.", account_.traderLogin.data(),
-                              account_.live ? "live, real money" : "demo");
+    ImGui::SameLine(0.0f, 14.0f);
+    // Which broker and account: while connected, what the running bot is
+    // really logged into; otherwise what the config file will connect to.
+    const auto live = controller.snapshot();
+    const bool fromBot = running && live && !live->accountLogin.empty();
+    const std::string broker = fromBot ? live->brokerUid : std::string(account_.brokerUid.data());
+    const std::string login = fromBot ? live->accountLogin : std::string(account_.traderLogin.data());
+    const bool isLive = fromBot ? live->environment == "live" : account_.live;
+    const std::string symbol = fromBot ? live->symbolName : std::string(account_.symbolName.data());
+    const std::string host = fromBot ? live->tradeHost : std::string(account_.tradeHost.data());
+    if (fromBot || account_.loaded) {
+        glass::pill(isLive ? "LIVE MONEY" : "DEMO", isLive ? kRed : kBlue);
+        ImGui::SameLine(0.0f, 10.0f);
+        ImGui::AlignTextToFramePadding();
+        withFont(boldFont_, [&] {
+            ImGui::Text("%s  #%s", broker.empty() ? "?" : broker.c_str(), login.empty() ? "?" : login.c_str());
+        });
+        ImGui::SetItemTooltip("%s account %s at %s\nServer: %s\nSymbol: %s\n%s", isLive ? "LIVE" : "Demo", login.c_str(),
+                              broker.c_str(), host.c_str(), symbol.c_str(),
+                              fromBot ? "This is the account the running bot is logged into."
+                                      : "Not connected: this is the account Connect will use (Settings > Account).");
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::TextDisabled("%s  |  %s", symbol.c_str(), host.c_str());
+        ImGui::SameLine(0.0f, 14.0f);
+    }
+    // Broker check: the bot's positions/orders compared with the broker's own lists.
+    if (connected && live && !live->brokerCheckedAt.empty()) {
+        if (live->brokerIssuesRecent > 0) {
+            glass::pill("Broker check: issues", kRed);
+            std::string all;
+            for (const auto& issue : live->brokerIssues) all += issue + "\n";
+            ImGui::SetItemTooltip("Found in the last 5 minutes (details in the Log):\n%s", all.c_str());
+        } else {
+            glass::pill(("Broker verified " + live->brokerCheckedAt.substr(11)).c_str(), kGreen);
+            ImGui::SetItemTooltip("Every position and pending order shown here matched the broker's own lists at %s. "
+                                  "Checked every 30 s.",
+                                  live->brokerCheckedAt.c_str());
+        }
         ImGui::SameLine(0.0f, 10.0f);
     }
     if (connected) {
@@ -1027,10 +1057,11 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
     const float footer = ImGui::GetFrameHeightWithSpacing() * 1.3f;
-    if (ImGui::BeginTable("positions", 10, flags, ImVec2(0, -footer))) {
+    if (ImGui::BeginTable("positions", 11, flags, ImVec2(0, -footer))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 40.0f);
         ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+        ImGui::TableSetupColumn("Broker ID");
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Entry");
         ImGui::TableSetupColumn("Slippage");
@@ -1054,6 +1085,16 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::SetItemTooltip("Broker position id: %s", p.positionId.empty() ? "(unknown)" : p.positionId.c_str());
             ImGui::TableNextColumn();
             ImGui::TextColored(p.side == OrderSide::BuyStop ? kGreen : kRed, "%s", sideName(p.side));
+            ImGui::TableNextColumn();
+            // The broker's own position id -- the same "ID" cTrader shows for the position.
+            if (p.positionId.empty()) {
+                ImGui::TextColored(kRed, "unknown");
+            } else {
+                ImGui::TextColored(p.verified ? kGreen : kAmber, "%s", p.positionId.c_str());
+            }
+            ImGui::SetItemTooltip("%s", p.verified ? "Confirmed by the broker (its fill report / position list)."
+                                                   : "Not confirmed by the broker yet -- the next check (every 30 s) "
+                                                     "will tell.");
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(lots(p.lots).c_str());
             ImGui::TableNextColumn();
@@ -1115,10 +1156,11 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
 
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
-    if (ImGui::BeginTable("orders", 6, flags)) {
+    if (ImGui::BeginTable("orders", 7, flags)) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+        ImGui::TableSetupColumn("At broker");
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Price");
         ImGui::TableSetupColumn("Distance", ImGuiTableColumnFlags_WidthStretch, 1.6f);
@@ -1140,6 +1182,18 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
             }
             ImGui::TableNextColumn();
             ImGui::TextColored(o.side == OrderSide::BuyStop ? kGreen : kRed, "%s", orderTypeName(o.side));
+            ImGui::TableNextColumn();
+            if (o.waiting) {
+                ImGui::TextDisabled("not sent");
+                ImGui::SetItemTooltip("Held by the bot: the market is already past its price.");
+            } else if (o.confirmed) {
+                ImGui::TextColored(kGreen, "confirmed");
+                ImGui::SetItemTooltip("The broker accepted it and lists it as working -- you'll see it in cTrader.");
+            } else {
+                ImGui::TextColored(kAmber, "sent...");
+                ImGui::SetItemTooltip("Sent, the broker hasn't confirmed it yet. If it doesn't within 8 s the bot asks "
+                                      "the broker and places it again if it's missing.");
+            }
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(lots(o.lots).c_str());
             ImGui::TableNextColumn();
@@ -1493,6 +1547,43 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
         stat("BEST / WORST", money(best) + "  /  " + money(worst), text);
         ImGui::EndTable();
     }
+    {
+        // How the baskets ended, and how rough they got on the way.
+        int target = 0, stop = 0, manual = 0, interrupted = 0, failed = 0, other = 0, missed = 0;
+        double deepest = 0.0;
+        double fillsTotal = 0.0;
+        for (const auto& b : history_) {
+            if (b.outcome == "target") ++target;
+            else if (b.outcome == "stop loss") ++stop;
+            else if (b.outcome == "manual" || b.outcome == "guard") ++manual;
+            else if (b.outcome == "interrupted") ++interrupted;
+            else if (b.outcome == "failed") ++failed;
+            else ++other;
+            missed += b.ordersMissed;
+            deepest = std::min(deepest, b.worstNet);
+            fillsTotal += static_cast<double>(b.legs.size());
+        }
+        const int n = static_cast<int>(history_.size());
+        ImGui::TextDisabled("Outcomes:");
+        ImGui::SameLine();
+        ImGui::TextColored(kGreen, "target %d", target);
+        ImGui::SameLine();
+        ImGui::TextColored(stop > 0 ? kRed : glass::palette().textDim, "stop loss %d", stop);
+        ImGui::SameLine();
+        ImGui::TextDisabled("manual %d", manual);
+        ImGui::SameLine();
+        ImGui::TextColored(interrupted > 0 ? kAmber : glass::palette().textDim, "interrupted %d", interrupted);
+        ImGui::SameLine();
+        ImGui::TextColored(failed > 0 ? kRed : glass::palette().textDim, "failed %d", failed);
+        if (other > 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("older/other %d", other);
+        }
+        ImGui::TextDisabled("Success rate (target reached) %.0f%%   |   deepest drawdown in a basket %s   |   avg %.1f "
+                            "positions per basket   |   missed orders re-placed %d",
+                            n > 0 ? 100.0 * target / n : 0.0, money(deepest).c_str(), n > 0 ? fillsTotal / n : 0.0,
+                            missed);
+    }
     if (snap) {
         ImGui::TextDisabled("This session (since %s): %zu basket(s), booked net %s",
                             snap->sessionStartedAt.empty() ? "--" : snap->sessionStartedAt.c_str(),
@@ -1544,8 +1635,15 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
         ImGui::SameLine(150.0f);
         withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });
         ImGui::SameLine(240.0f);
-        ImGui::TextDisabled("%zu position(s)  |  %s  |  %s  |  closed %s", b.legs.size(), b.closeReason.c_str(),
+        ImGui::TextDisabled("%zu position(s)  |  %s  |  worst %s  |  %s  |  closed %s", b.legs.size(),
+                            b.outcome.empty() ? b.closeReason.c_str() : b.outcome.c_str(), money(b.worstNet).c_str(),
                             duration(b.durationSeconds).c_str(), b.closedAt.c_str());
+        if (b.ordersPlaced > 0) {
+            ImGui::SetItemTooltip("%s\nOrders placed %d, filled %d, rejected %d, missed and re-placed %d\nMost lots open "
+                                  "at once %.2f, best point %s",
+                                  b.closeReason.c_str(), b.ordersPlaced, b.ordersFilled, b.ordersRejected,
+                                  b.ordersMissed, b.maxOpenLots, money(b.bestNet).c_str());
+        }
         if (open) {
             ImGui::TextDisabled("Range %s - %s   |   gross %s   commission $%.2f   net %s", price(b.rangeLower).c_str(),
                                 price(b.rangeUpper).c_str(), money(b.gross).c_str(), b.commission,
