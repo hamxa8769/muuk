@@ -398,11 +398,12 @@ price against a pending order's `StopPx` itself.
 
 ## Auto profit target
 
-`strategy.autoProfitTarget: {"enabled": true, "percent": 60}` (the gear next
+`strategy.autoProfitTarget: {"enabled": true, "percent": 150}` (the gear next
 to the net P/L bar): instead of a fixed dollar target, the basket is booked
 once its net profit reaches *percent* of what the open positions cost --
 commission (open + close) plus the full spread. One 0.01 lot aims low; every
-fill raises the target. 20 / 40 / 60 / 80 / 100 % in the app. Target, stop
+fill raises the target. 100 / 120 / 140 / 160 / 180 / 200 % in the app
+(also in Settings > Auto profit target). Target, stop
 loss and the auto target apply at once, also to a running basket.
 
 ## Market hours, sessions and the news guard

@@ -407,7 +407,7 @@ void clampSettings(LiveSettings& s) {
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
     s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
-    s.autoTargetPercent = std::clamp(s.autoTargetPercent, 1, 1000);
+    s.autoTargetPercent = std::clamp(s.autoTargetPercent, 100, 200);
     s.market.pauseMinutesBefore = std::clamp(s.market.pauseMinutesBefore, 0, 240);
     s.market.pauseMinutesAfter = std::clamp(s.market.pauseMinutesAfter, 0, 240);
     s.market.newsMinutesBefore = std::clamp(s.market.newsMinutesBefore, 0, 240);
@@ -939,6 +939,8 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (w - ts.x) / 2, p.y + (chartHeight - ts.y) / 2),
                                             ImGui::GetColorU32(glass::palette().textDim), msg);
     }
+    // Net P/L vs target (and its gear) right under the chart, so it's always in view.
+    if (snap && connected) renderTargetBar(controller, *snap, connected);
 
     if (snap && connected) {
         ImGui::Spacing();
@@ -979,7 +981,6 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                               "(bid for buys, ask for sells) -- slippage and spread are already inside it.");
     }
 
-    if (snap && connected) renderTargetBar(controller, *snap, connected);
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -1089,8 +1090,29 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
 
         settingDouble("Range width ($)", "Distance between the Buy Stop (top) and Sell Stop (bottom) of a range.",
                       &s.rangeWidth, 0.10, "%.2f", &settingsDirty_);
+        ImGui::BeginDisabled(s.autoTarget);
         settingDouble("Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
                       &s.profitTarget, 0.25, "%.2f", &settingsDirty_);
+        ImGui::EndDisabled();
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Auto profit target");
+        ImGui::SetItemTooltip("On: the target is this %% of what the open positions cost (commission open + close + "
+                              "spread) -- small for one 0.01 lot, bigger with every fill. Replaces the $ target.");
+        ImGui::TableNextColumn();
+        if (ImGui::Checkbox("On##autotarget", &s.autoTarget)) settingsDirty_ = true;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!s.autoTarget);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        const char* pctItems[] = {"100% of cost", "120% of cost", "140% of cost", "160% of cost", "180% of cost",
+                                  "200% of cost"};
+        int pctIndex = std::clamp((s.autoTargetPercent - 100) / 20, 0, 5);
+        if (ImGui::Combo("##autopct", &pctIndex, pctItems, 6)) {
+            s.autoTargetPercent = 100 + pctIndex * 20;
+            settingsDirty_ = true;
+        }
+        ImGui::EndDisabled();
         settingDouble("Stop loss ($)",
                       "Hard loss cap: when the basket's net P/L falls to minus this, every position is closed and "
                       "every pending order cancelled -- the loss is taken instead of growing. 0 = off.",
@@ -2930,7 +2952,18 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     const double target = snap.targetNow > 0.0 ? snap.targetNow : s.profitTarget;
     const float h = ImGui::GetFrameHeight();
 
-    if (gearButton("##targetgear", h)) ImGui::OpenPopup("target_popup");
+    if (gearButton("##targetgear", h)) {
+        ImGui::OpenPopup("target_popup");
+        // Open below the gear if it fits, otherwise above it -- never off the bottom of the window.
+        const ImVec2 gearMin = ImGui::GetItemRectMin();
+        const ImVec2 gearMax = ImGui::GetItemRectMax();
+        const float displayH = ImGui::GetIO().DisplaySize.y;
+        const bool below = displayH - gearMax.y > 300.0f;
+        ImGui::SetNextWindowPos(below ? ImVec2(gearMin.x, gearMax.y + 4.0f) : ImVec2(gearMin.x, gearMin.y - 4.0f),
+                                ImGuiCond_Always, below ? ImVec2(0.0f, 0.0f) : ImVec2(0.0f, 1.0f));
+    }
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+                                        ImVec2(FLT_MAX, std::max(200.0f, ImGui::GetIO().DisplaySize.y - 24.0f)));
     ImGui::SetItemTooltip("Profit target: fixed, or automatic from what the open positions cost.");
     ImGui::SameLine(0.0f, 6.0f);
     const double lossScale =
@@ -2951,11 +2984,11 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
         if (ImGui::Checkbox("Auto - from what the open positions cost", &autoOn)) {
             quickApply(controller, opt, connected, [autoOn](LiveSettings& x) { x.autoTarget = autoOn; });
         }
-        ImGui::TextDisabled("Cost = commission (open + close) + the spread, of every open position. With one 0.01 lot\n"
-                            "the target is small; each new fill raises it.");
+        ImGui::TextDisabled("Target = this %% of the cost (commission open + close + spread) of every open\n"
+                            "position: small for one 0.01 lot, bigger with every fill. 200%% = twice the cost.");
         ImGui::BeginDisabled(!autoOn);
-        for (int p : {20, 40, 60, 80, 100}) {
-            if (p != 20) ImGui::SameLine();
+        for (int p : {100, 120, 140, 160, 180, 200}) {
+            if (p != 100) ImGui::SameLine();
             const std::string label = std::to_string(p) + "%";
             if (ImGui::RadioButton(label.c_str(), s.autoTargetPercent == p)) {
                 quickApply(controller, opt, connected, [p](LiveSettings& x) { x.autoTargetPercent = p; });

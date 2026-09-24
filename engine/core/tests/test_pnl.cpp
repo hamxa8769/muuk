@@ -110,3 +110,10 @@ TEST_CASE("cTrader commission: $30 per $1M each side, rounded to the cent, charg
     costs.commissionPerLotRoundTurn = 7.0;
     REQUIRE(roundTurnCommissionMoney(0.32, 4270.80, spec, costs) == Catch::Approx(2.24));
 }
+
+TEST_CASE("Auto target: a percentage of the cost, never below one cent") {
+    REQUIRE(autoTargetMoney(0.36, 100.0) == Catch::Approx(0.36));
+    REQUIRE(autoTargetMoney(0.36, 200.0) == Catch::Approx(0.72));
+    REQUIRE(autoTargetMoney(0.50, 150.0) == Catch::Approx(0.75));
+    REQUIRE(autoTargetMoney(0.0, 200.0) == Catch::Approx(0.01));  // nothing open yet
+}

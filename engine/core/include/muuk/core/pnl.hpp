@@ -75,6 +75,10 @@ struct BasketPnlResult {
     double targetMoney = 0.0;
 };
 
+// Auto profit target: `percent` % of what the open positions cost to trade
+// (commission open + close, plus the full spread), never below one cent.
+[[nodiscard]] double autoTargetMoney(double costMoney, double percent);
+
 [[nodiscard]] BasketPnlResult computeBasketPnl(const BasketPnlInput& input,
                                                 const CostInputs& costs);
 

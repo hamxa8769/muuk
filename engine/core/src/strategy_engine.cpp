@@ -154,8 +154,7 @@ double StrategyEngine::effectiveTargetMoney(const BasketPnlResult& pnl) const {
     if (!config_.autoProfitTarget) return config_.basketProfitTargetMoney;
     // Full cost of the open positions: commission (open + close) and the
     // whole spread (half paid getting in, half getting out).
-    const double cost = pnl.commissionMoney + 2.0 * pnl.spreadCostMoney;
-    return std::max(0.01, cost * std::clamp(config_.autoTargetPercent, 1.0, 1000.0) / 100.0);
+    return autoTargetMoney(pnl.commissionMoney + 2.0 * pnl.spreadCostMoney, config_.autoTargetPercent);
 }
 
 BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {

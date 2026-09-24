@@ -35,6 +35,12 @@ double roundTurnCommissionMoney(double lots, double entryPrice, const SymbolSpec
     return lots * costs.commissionPerLotRoundTurn;
 }
 
+double autoTargetMoney(double costMoney, double percent) {
+    const double p = percent < 1.0 ? 1.0 : (percent > 1000.0 ? 1000.0 : percent);
+    const double target = costMoney * p / 100.0;
+    return target > 0.01 ? target : 0.01;
+}
+
 BasketPnlResult computeBasketPnl(const BasketPnlInput& input, const CostInputs& costs) {
     BasketPnlResult result;
     result.grossPnlMoney = input.grossPnlMoney;

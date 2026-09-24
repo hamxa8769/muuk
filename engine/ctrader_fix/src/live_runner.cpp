@@ -164,8 +164,12 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.settings = settingsFromConfig(config_);
     snap.market = marketStatus_;
     snap.marketKnown = marketKnown_;
-    snap.targetNow = engine_ && engine_->status() == EngineStatus::Active
-                         ? engine_->effectiveTargetMoney(engine_->lastBasketPnl())
+    // Worked out from the positions as they stand (the same formula the
+    // engine applies on every quote) -- also right after a resume, before
+    // the first new quote (e.g. during the daily break).
+    snap.targetNow = config_.strategy.autoProfitTarget
+                         ? muuk::core::autoTargetMoney(snap.live.commission + 2.0 * snap.live.spread,
+                                                       config_.strategy.autoTargetPercent)
                          : config_.strategy.basketProfitTargetMoney;
     return snap;
 }

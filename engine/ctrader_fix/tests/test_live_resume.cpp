@@ -995,6 +995,8 @@ TEST_CASE("Auto profit target: a percentage of what the open positions cost, gro
         return s.bid && *s.bid == Catch::Approx(4337.20);
     }));
     REQUIRE(bot.runner().snapshot().targetNow == Catch::Approx(0.36));
+    // The same figure the engine uses on this quote.
+    REQUIRE(bot.runner().snapshot().live.commission == Catch::Approx(0.26));
     sendQuote(server, 3, 4337.70, 4337.80);  // net 0.70 - 0.26 = 0.44 >= 0.36: booked
     const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close.getInt(tag::OrdType) == 1);
