@@ -166,6 +166,6 @@ powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
 - This is built and tested against the IC Markets **demo** account.
 - **TLS:** the FIX connection is plain TCP today, so your FIX password
   crosses the network unencrypted. Add TLS before any live account.
-- Set your real commission rate in Settings.
+- Set your real commission rate in Settings: "Commission ($ per $1M)" (IC Markets Raw = 30). Compare a position's Commission with cTrader's.
 - Run on demo, on the VPS, for a week or two. Compare the PDF report with
   cTrader's own history.

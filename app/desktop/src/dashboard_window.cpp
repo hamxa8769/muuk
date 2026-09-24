@@ -286,6 +286,7 @@ void clampSettings(LiveSettings& s) {
     s.maxLot = std::max(0.01, s.maxLot);
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
+    s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
 }
 
 
@@ -811,7 +812,8 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
             breakdownRow("Slippage", "Fills worse (+) or better (-) than the requested Stop price.", b.slippage, true);
             breakdownRow("Spread", "Cost of closing at bid/ask instead of mid, right now.", b.spread, true);
             breakdownRow("Commission",
-                         "Your configured round-turn commission x lots. Set it in Strategy settings to match your broker.",
+                         "Open + close, worked out per position exactly as the broker does (Settings > Commission). "
+                         "Same figure as cTrader's Commission column.",
                          b.commission, true);
             breakdownRow("Swap", "Overnight financing - not tracked yet.", b.swap, true);
             ImGui::TableNextRow();
@@ -823,9 +825,16 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                          boldFont_);
             ImGui::EndTable();
         }
-        if (snap->settings.commissionPerLot <= 0.0) {
+        if (snap->settings.commissionPerLot <= 0.0 && snap->settings.commissionPerMillion <= 0.0) {
             ImGui::TextColored(kAmber, "Commission is set to $0 - enter your broker's rate in Strategy settings.");
         }
+        // The same numbers in cTrader's own columns, to compare side by side.
+        const auto& b = snap->live;
+        ImGui::TextDisabled("As cTrader shows it:  Gross %s   Commission %s   Net %s",
+                            money(b.net + b.commission + b.swap).c_str(), money(-b.commission).c_str(),
+                            money(b.net).c_str());
+        ImGui::SetItemTooltip("cTrader's Gross is the move from each actual fill to the price it would close at now "
+                              "(bid for buys, ask for sells) -- slippage and spread are already inside it.");
     }
 
     if (snap && connected && snap->settings.profitTarget > 0.0) {
@@ -994,15 +1003,23 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &settingsDirty_);
         settingDouble("Max basket loss ($)", "Safety limit: stop placing new orders past this floating loss. 0 = off.",
                       &s.maxBasketLoss, 10.0, "%.2f", &settingsDirty_);
-        settingDouble("Commission ($/lot)",
-                      "Round-turn commission (open + close) per 1.00 lot, as your broker charges it on XAUUSD. "
-                      "Deducted from net P/L and counted before the profit target is reached.",
+        settingDouble("Commission ($ per $1M)",
+                      "How cTrader brokers charge: $ per 1,000,000 USD traded, once when a position opens and again "
+                      "when it closes. IC Markets Raw = 30 ($3 per $100k). One side = lots x 100 oz x entry price x "
+                      "rate / 1,000,000, rounded to the cent -- exactly what cTrader shows in a position's "
+                      "Commission. Used when above 0 (replaces the $/lot rate).",
+                      &s.commissionPerMillion, 1.0, "%.2f", &settingsDirty_);
+        ImGui::BeginDisabled(s.commissionPerMillion > 0.0);
+        settingDouble("Commission ($/lot, flat)",
+                      "Only for brokers that charge a fixed amount per lot: open + close per 1.00 lot. Ignored while "
+                      "the $ per $1M rate is set.",
                       &s.commissionPerLot, 0.50, "%.2f", &settingsDirty_);
+        ImGui::EndDisabled();
         clampSettings(s);
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
-    renderLotPreview(editSettings_);
+    renderLotPreview(editSettings_, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -1067,7 +1084,7 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
         ImGui::TableSetupColumn("Slippage");
         ImGui::TableSetupColumn("Now");
         ImGui::TableSetupColumn("Gross");
-        ImGui::TableSetupColumn("Costs");
+        ImGui::TableSetupColumn("Commission");
         ImGui::TableSetupColumn("Net");
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 76.0f);
         ImGui::TableHeadersRow();
@@ -1118,12 +1135,22 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
                 ImGui::TextDisabled("--");
             }
             ImGui::TableNextColumn();
-            ImGui::TextColored(pnlColor(p.pnl.gross), "%s", money(p.pnl.gross).c_str());
+            // Same columns as cTrader: Gross = actual fill -> closing price now
+            // (bid for a buy, ask for a sell), then commission, then net.
+            const double brokerGross = p.pnl.net + p.pnl.commission + p.pnl.swap;
+            ImGui::TextColored(pnlColor(brokerGross), "%s", money(brokerGross).c_str());
+            ImGui::SetItemTooltip("Actual fill %.2f -> closing price now, same as cTrader's Gross.\n"
+                                  "  price move from the order price to mid  %s\n"
+                                  "  slippage on the fill                    %s\n"
+                                  "  spread (mid -> bid/ask)                 %s",
+                                  p.entryPrice, money(p.pnl.gross).c_str(), money(-p.pnl.slippage).c_str(),
+                                  money(-p.pnl.spread).c_str());
             ImGui::TableNextColumn();
-            ImGui::TextColored(p.pnl.costs() > 0.005 ? kAmber : glass::palette().textDim, "-$%.2f", p.pnl.costs());
-            ImGui::SetItemTooltip("Slippage %s\nSpread     %s\nCommission %s\nSwap       %s",
-                                  money(-p.pnl.slippage).c_str(), money(-p.pnl.spread).c_str(),
-                                  money(-p.pnl.commission).c_str(), money(-p.pnl.swap).c_str());
+            ImGui::TextColored(p.pnl.commission > 0.005 ? kAmber : glass::palette().textDim, "%s",
+                               money(-p.pnl.commission).c_str());
+            ImGui::SetItemTooltip("Open + close for %.2f lot filled at %.2f, at your Settings rate -- the same as "
+                                  "this position's Commission in cTrader.",
+                                  p.lots, p.entryPrice);
             ImGui::TableNextColumn();
             withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(p.pnl.net), "%s", money(p.pnl.net).c_str()); });
             ImGui::TableNextColumn();
@@ -1141,8 +1168,9 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
     const double total = floatingPnl(snap);
     ImGui::Separator();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("Buy %s  /  Sell %s lots   |   Gross %s   Costs -$%.2f   Net", lots(buyLots).c_str(),
-                        lots(sellLots).c_str(), money(snap.live.gross).c_str(), snap.live.costs());
+    ImGui::TextDisabled("Buy %s  /  Sell %s lots   |   Gross %s   Commission %s   Net", lots(buyLots).c_str(),
+                        lots(sellLots).c_str(), money(snap.live.net + snap.live.commission + snap.live.swap).c_str(),
+                        money(-snap.live.commission).c_str());
     ImGui::SameLine();
     withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(total), "%s", money(total).c_str()); });
 }
@@ -1393,7 +1421,7 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
 }
 
 
-void DashboardWindow::renderLotPreview(const LiveSettings& s) {
+void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) {
     // What the settings will actually place, order by order: lot, total
     // lots open, and where a limit stops the basket from adding more.
     const muuk::core::SymbolSpec spec;  // XAUUSD: 0.01 lot steps
@@ -1428,6 +1456,28 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s) {
         limitWhy = "Max orders";
     }
     ImGui::TextDisabled("Total open if all of these fill: %.2f lots", total);
+    {
+        // The commission the bot will book, worked out exactly like the
+        // broker does -- compare with a position's Commission in cTrader.
+        muuk::core::CostInputs costs;
+        costs.commissionPerLotRoundTurn = s.commissionPerLot;
+        costs.commissionPerMillionPerSide = s.commissionPerMillion;
+        const double at = livePrice > 0.0 ? livePrice : 4000.0;
+        const double first = muuk::core::roundTurnCommissionMoney(s.initialLot, at, spec, costs);
+        double all = 0.0;
+        for (int n = 1; n <= std::min(s.maxOrders, 16); ++n) {
+            const double lot = muuk::core::computeSequenceLot(lp, n, spec).toDouble(spec);
+            if (lot > s.maxLot + 1e-9) break;
+            all += muuk::core::roundTurnCommissionMoney(lot, at, spec, costs);
+        }
+        if (s.commissionPerMillion <= 0.0 && s.commissionPerLot <= 0.0) {
+            ImGui::TextColored(kAmber, "Commission is 0 - net P/L will look better than your broker's.");
+        } else {
+            ImGui::TextDisabled("Commission at %s%.2f: %.2f lot = $%.2f round trip (open + close), all of the above = "
+                                "$%.2f -- should equal cTrader's Commission column.",
+                                livePrice > 0.0 ? "" : "e.g. ", at, s.initialLot, first, all);
+        }
+    }
     if (limitAt > 0) {
         ImGui::TextColored(kAmber, "Order #%d would break %s -- from there the basket adds nothing more%s.", limitAt,
                            limitWhy, s.stopLoss > 0.0 ? " (the stop loss still closes it)" : ": set a Stop loss");
@@ -1644,6 +1694,17 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
                                   b.closeReason.c_str(), b.ordersPlaced, b.ordersFilled, b.ordersRejected,
                                   b.ordersMissed, b.maxOpenLots, money(b.bestNet).c_str());
         }
+        if (b.outcome == "target" || b.outcome == "stop loss") {
+            // What the bot saw when it fired vs what the closing fills really booked.
+            const double exitSlip = b.net - b.netAtTrigger;
+            ImGui::TextColored(std::fabs(exitSlip) < 0.005 ? glass::palette().textDim : (exitSlip < 0 ? kAmber : kGreen),
+                               "%s fired at %s net, booked %s  (closing fills %s)",
+                               b.outcome == "target" ? "Target" : "Stop loss", money(b.netAtTrigger).c_str(),
+                               money(b.net).c_str(), money(exitSlip).c_str());
+            ImGui::SetItemTooltip("Booked = what the broker really credited: every position's actual entry and exit "
+                                  "fill, minus commission (open + close). It differs from the trigger only by how far "
+                                  "the market moved while the closing orders were filled.");
+        }
         if (open) {
             ImGui::TextDisabled("Range %s - %s   |   gross %s   commission $%.2f   net %s", price(b.rangeLower).c_str(),
                                 price(b.rangeUpper).c_str(), money(b.gross).c_str(), b.commission,
@@ -1807,7 +1868,7 @@ void DashboardWindow::renderVolumeTab() {
         "Broker volume: brokers count each side, so opening and closing = twice the lots.\n"
         "Value traded: lots x %.0f (contract size) x entry price, in USD.\n"
         "Won / lost lots: lots in baskets that closed in profit / in loss.\n"
-        "Commission is your configured rate x lots. Baskets count on the day they closed.",
+        "Commission is worked out per position like the broker does (Settings). Baskets count on the day they closed.",
         history_.empty() ? 100.0 : history_.back().contractSize);
 
     const std::vector<VolumeBucket>& rows = volumeRows_[std::clamp(volumePeriod_, 0, 2)];

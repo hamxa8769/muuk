@@ -49,6 +49,10 @@ struct BasketRecord {
     double worstNet = 0.0;        // lowest floating net P/L while it ran (its deepest drawdown)
     double bestNet = 0.0;
     double maxOpenLots = 0.0;     // most lots open at once
+    // Net P/L the bot saw from the live quotes when the target / stop loss
+    // fired (0 = closed some other way). net - netAtTrigger is what the
+    // closing market orders gained or lost to slippage on the way out.
+    double netAtTrigger = 0.0;
     std::vector<BasketLegRecord> legs;
     double gross = 0.0;
     double commission = 0.0;

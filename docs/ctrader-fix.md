@@ -215,11 +215,31 @@ The desktop app also has:
 - **Reset data**: a fresh start. The history and the running log move to
   `archive/` folders (nothing is deleted), and the statistics start over.
 
-Commission is always charged per lot actually traded: the configured
-round-turn rate x lots. At $7 per lot, 0.01 / 0.02 / 0.03 lots cost
-$0.07 / $0.14 / $0.21. Spread is half the current spread per lot, per
-position (a buy exits at the bid, a sell at the ask). The engine's
-profit-target check uses exactly these same figures.
+**Commission is worked out exactly like cTrader does**, because FIX can't
+report it: neither the Execution Report nor the Position Report carries
+commission, swap or balance (see the cTrader FIX specification). cTrader
+brokers charge per value traded, not per lot:
+`costs.commissionPerMillionPerSide` (Settings > "Commission ($ per $1M)";
+IC Markets Raw = 30, i.e. $3 per $100k). For each position:
+
+    one side  = lots x contract size x entry price x rate / 1,000,000, rounded to the cent
+    commission = 2 x one side   (open + close -- cTrader's "Commission" column)
+
+0.32 lot of XAUUSD filled at 4270.80: 0.32 x 100 x 4270.80 x 30 / 1M =
+4.0999 -> $4.10 a side, $8.20 round trip -- the figure cTrader shows. A
+flat `$ per lot` rate (`commissionPerLotRoundTurn`) is only used when no
+per-million rate is set. At gold ~4270 the real cost is ~$25.6 per lot, so
+the old flat $7 made every basket look ~$18.6 per lot traded better than
+the broker's balance. The profit target and stop loss count exactly this
+commission, so a $20 target is $20 after commission.
+
+The Positions tab uses cTrader's own columns: **Gross** = actual fill ->
+the price it would close at now (bid for a buy, ask for a sell; spread and
+slippage are inside it), **Commission**, **Net**. Each basket in History
+shows the net when the target fired and the net the closing fills really
+booked -- the booked figure is what the broker credits. Swap (only for a
+basket held past the daily rollover) is not reported over FIX and is not
+included.
 
 ## Broker check: the app always matches the broker
 

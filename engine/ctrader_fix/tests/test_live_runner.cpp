@@ -1077,6 +1077,7 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     s.autoContinue = false;
     s.startSide = StartSide::BuyOnly;
     s.commissionPerLot = 7.0;
+    s.commissionPerMillion = 30.0;
     saveLiveSettings(path, s);
 
     const LiveConfig reloaded = loadLiveConfig(path);
@@ -1095,6 +1096,8 @@ TEST_CASE("saveLiveSettings rewrites only the tunable fields and round-trips thr
     REQUIRE_FALSE(back.autoContinue);
     REQUIRE(back.startSide == StartSide::BuyOnly);
     REQUIRE(back.commissionPerLot == Catch::Approx(7.0));
+    REQUIRE(back.commissionPerMillion == Catch::Approx(30.0));
+    REQUIRE(reloaded.strategy.costs.commissionPerMillionPerSide == Catch::Approx(30.0));
 
     std::filesystem::remove(path);
 }

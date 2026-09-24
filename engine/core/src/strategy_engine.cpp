@@ -18,6 +18,7 @@ void StrategyEngine::resetCycleState() {
     nextSequenceIndex_ = 1;
     slippageMoneyAccrued_ = 0.0;
     swapMoneyAccrued_ = 0.0;
+    commissionAccrued_ = 0.0;
     lastBasketPnl_ = BasketPnlResult{};
     seeding_ = false;
 }
@@ -171,6 +172,7 @@ BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {
     BasketPnlInput input;
     input.grossPnlMoney = grossPnl;
     input.totalVolumeLots = totalLots;
+    input.commissionMoney = commissionAccrued_;
     input.spreadCostMoney = spreadCostMoney;
     input.swapMoney = swapMoneyAccrued_;
     input.slippageMoney = slippageMoneyAccrued_;
@@ -192,6 +194,7 @@ EngineState StrategyEngine::exportState() const {
     s.seeding = seeding_;
     s.slippageMoneyAccrued = slippageMoneyAccrued_;
     s.swapMoneyAccrued = swapMoneyAccrued_;
+    s.commissionAccrued = commissionAccrued_;
     return s;
 }
 
@@ -209,6 +212,19 @@ void StrategyEngine::restoreState(const EngineState& s) {
     seeding_ = s.seeding;
     slippageMoneyAccrued_ = s.slippageMoneyAccrued;
     swapMoneyAccrued_ = s.swapMoneyAccrued;
+    if (s.commissionAccrued >= 0.0) {
+        commissionAccrued_ = s.commissionAccrued;
+    } else {
+        // Not saved (older state file): charge each side at its average entry.
+        auto side = [&](const SideAggregate& a) {
+            if (a.totalVolumeSteps <= 0) return 0.0;
+            const double avgTicks =
+                static_cast<double>(a.sumEntryPriceTicksVolume) / static_cast<double>(a.totalVolumeSteps);
+            return roundTurnCommissionMoney(static_cast<double>(a.totalVolumeSteps) * config_.symbol.volumeStep,
+                                            avgTicks * config_.symbol.tickSize, config_.symbol, config_.costs);
+        };
+        commissionAccrued_ = side(buyAggregate_) + side(sellAggregate_);
+    }
 }
 
 CommandBatch StrategyEngine::armNextAfter(OrderSide lastFilled) {
@@ -297,6 +313,12 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
                                       : armed.order.price.ticks - event.fillPrice.ticks;
     slippageMoneyAccrued_ += static_cast<double>(slippageTicks) * config_.symbol.tickValue *
                               armed.order.volume.toDouble(config_.symbol);
+
+    // Commission is fixed the moment the position opens (cTrader charges
+    // the close at the same rate as the open, off the entry price).
+    commissionAccrued_ += roundTurnCommissionMoney(armed.order.volume.toDouble(config_.symbol),
+                                                   event.fillPrice.toDouble(config_.symbol), config_.symbol,
+                                                   config_.costs);
 
     SideAggregate& agg = (armed.order.side == OrderSide::BuyStop) ? buyAggregate_ : sellAggregate_;
     agg.totalVolumeSteps += armed.order.volume.steps;

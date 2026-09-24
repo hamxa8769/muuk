@@ -92,6 +92,10 @@ struct EngineState {
     bool seeding = false;
     double slippageMoneyAccrued = 0.0;
     double swapMoneyAccrued = 0.0;
+    // Round-turn commission of every position filled so far (worked out
+    // at each fill price). <0 = unknown (an older state file): estimated
+    // from the average entry prices on restore.
+    double commissionAccrued = -1.0;
 };
 
 // Deterministic, I/O-free strategy state machine implementing the
@@ -247,6 +251,7 @@ private:
     TickEvent lastTick_{};
     double slippageMoneyAccrued_ = 0.0;
     double swapMoneyAccrued_ = 0.0;
+    double commissionAccrued_ = 0.0;
     BasketPnlResult lastBasketPnl_{};
 };
 

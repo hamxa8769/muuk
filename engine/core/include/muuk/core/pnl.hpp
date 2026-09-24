@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "muuk/core/orders.hpp"
 #include "muuk/core/types.hpp"
@@ -10,9 +11,21 @@ namespace muuk::core {
 // Cost model inputs used to turn a raw price move into money and to derive
 // the deductions in the basket P/L formula. Proposal §6/§7.
 struct CostInputs {
-    double commissionPerLotRoundTurn = 0.0; // money, charged per 1.0 lot traded
+    double commissionPerLotRoundTurn = 0.0; // flat rate: money per 1.0 lot, open + close together
+    // cTrader-style rate (IC Markets Raw: 30): money per 1,000,000 of
+    // traded value (lots x contract size x price), charged once for the
+    // open and once for the close. >0 replaces the flat per-lot rate.
+    double commissionPerMillionPerSide = 0.0;
     double slippageBufferTicks = 0.0;       // conservative pre-trade estimate
 };
+
+// Commission for one position, open + close together, booked the way
+// cTrader books it: one side = lots x contract size x entry price x
+// rate / 1,000,000, rounded to the cent, and the close is charged the same
+// again (cTrader's "Commission" column shows exactly this). With only a
+// flat rate set: lots x commissionPerLotRoundTurn.
+[[nodiscard]] double roundTurnCommissionMoney(double lots, double entryPrice, const SymbolSpec& spec,
+                                              const CostInputs& costs);
 
 // Gross P/L (in account money) for a single filled position between its
 // entry and a mark price (current price for floating, exit price for
@@ -42,6 +55,9 @@ struct CostInputs {
 struct BasketPnlInput {
     double grossPnlMoney = 0.0;
     double totalVolumeLots = 0.0; // sum of traded lots, for commission calc
+    // Exact commission already worked out per position (see
+    // roundTurnCommissionMoney); unset = totalVolumeLots x the flat rate.
+    std::optional<double> commissionMoney;
     double spreadCostMoney = 0.0;
     double swapMoney = 0.0;
     double slippageMoney = 0.0; // pass actual when known, else an estimate

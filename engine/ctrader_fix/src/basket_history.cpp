@@ -43,6 +43,7 @@ nlohmann::json basketToJson(const BasketRecord& b) {
             {"worstNet", b.worstNet},
             {"bestNet", b.bestNet},
             {"maxOpenLots", b.maxOpenLots},
+            {"netAtTrigger", b.netAtTrigger},
             {"gross", b.gross},
             {"commission", b.commission},
             {"net", b.net},
@@ -69,6 +70,7 @@ BasketRecord basketFromJson(const nlohmann::json& j) {
     b.worstNet = j.value("worstNet", 0.0);
     b.bestNet = j.value("bestNet", 0.0);
     b.maxOpenLots = j.value("maxOpenLots", 0.0);
+    b.netAtTrigger = j.value("netAtTrigger", 0.0);
     b.gross = j.value("gross", 0.0);
     b.commission = j.value("commission", 0.0);
     b.net = j.value("net", 0.0);

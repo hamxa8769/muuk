@@ -116,7 +116,10 @@ struct LiveSettings {
     int maxOrders = 20;
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit
-    double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close), as your broker charges it
+    double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close) -- flat-rate brokers
+    // $ per $1,000,000 traded, charged on the open and again on the close
+    // (cTrader's own commission type; IC Markets Raw: 30). >0 replaces commissionPerLot.
+    double commissionPerMillion = 0.0;
     bool autoContinue = true;
     muuk::core::StartSide startSide = muuk::core::StartSide::Both;  // first order(s) of each range
 };

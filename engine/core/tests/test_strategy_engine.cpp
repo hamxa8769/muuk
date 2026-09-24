@@ -813,3 +813,34 @@ TEST_CASE("Lot multiplier x2: 0.01, 0.02, 0.04, 0.08, 0.16 -- and the basket fol
         order = placeCmd(engine.onOrderConfirmed(OrderConfirmedEvent{order.id, order.price}), 0);
     }
 }
+
+TEST_CASE("Per-million commission is worked out per position at its fill price, and survives export/restore") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.costs.commissionPerMillionPerSide = 30.0;
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const CommandBatch start = engine.start();  // Buy 0.01 @ 4337, Sell 0.02 @ 4336
+    const PlaceOrderCommand buy1 = placeCmd(start, 0);
+    const PlaceOrderCommand sell2 = placeCmd(start, 1);
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, Price::fromDouble(4337.10, spec)});
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{sell2.id, sell2.price});
+
+    // 0.01 x 100 x 4337.10 x 30e-6 = 0.1301 -> 0.13 (x2 = 0.26); 0.02 x 100 x 4336 x 30e-6 = 0.2602 -> 0.26 (x2 = 0.52).
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    REQUIRE(engine.lastBasketPnl().commissionMoney == Catch::Approx(0.26 + 0.52));
+
+    EngineState saved = engine.exportState();
+    REQUIRE(saved.commissionAccrued == Catch::Approx(0.78));
+    StrategyEngine restored(cfg);
+    restored.restoreState(saved);
+    (void)restored.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    REQUIRE(restored.lastBasketPnl().commissionMoney == Catch::Approx(0.78));
+
+    // An older state file without it: estimated from the average entry prices.
+    saved.commissionAccrued = -1.0;
+    StrategyEngine old(cfg);
+    old.restoreState(saved);
+    (void)old.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    REQUIRE(old.lastBasketPnl().commissionMoney == Catch::Approx(0.78).margin(0.02));
+}

@@ -49,6 +49,8 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
         const auto& costs = j.at("costs");
         cfg.costs.commissionPerLotRoundTurn =
             costs.value("commissionPerLotRoundTurn", cfg.costs.commissionPerLotRoundTurn);
+        cfg.costs.commissionPerMillionPerSide =
+            costs.value("commissionPerMillionPerSide", cfg.costs.commissionPerMillionPerSide);
         cfg.costs.slippageBufferTicks = costs.value("slippageBufferTicks", cfg.costs.slippageBufferTicks);
     }
 

@@ -93,3 +93,20 @@ TEST_CASE("computeBasketPnl applies the proposal section 6 formula exactly") {
     REQUIRE(result.netPnlMoney == Catch::Approx(expectedNet));
     REQUIRE(result.netPnlMoney == Catch::Approx(39.15).epsilon(0.001));
 }
+
+TEST_CASE("cTrader commission: $30 per $1M each side, rounded to the cent, charged for open and close") {
+    const SymbolSpec spec = xauusdSpec();
+    CostInputs costs;
+    costs.commissionPerMillionPerSide = 30.0;
+    // The broker's own figure: 0.32 lot of XAUUSD at ~4270.8 shows Commission -8.20 in cTrader.
+    // One side = 0.32 x 100 oz x 4270.80 x 30 / 1,000,000 = 4.0999 -> 4.10; open + close = 8.20.
+    REQUIRE(roundTurnCommissionMoney(0.32, 4270.80, spec, costs) == Catch::Approx(8.20));
+    // 0.01 lot at 4270.00: 0.1281 -> 0.13 per side.
+    REQUIRE(roundTurnCommissionMoney(0.01, 4270.00, spec, costs) == Catch::Approx(0.26));
+    // 1 lot at 4270.00: 12.81 per side.
+    REQUIRE(roundTurnCommissionMoney(1.00, 4270.00, spec, costs) == Catch::Approx(25.62));
+    // A flat per-lot rate is used only when no per-million rate is set.
+    costs.commissionPerMillionPerSide = 0.0;
+    costs.commissionPerLotRoundTurn = 7.0;
+    REQUIRE(roundTurnCommissionMoney(0.32, 4270.80, spec, costs) == Catch::Approx(2.24));
+}

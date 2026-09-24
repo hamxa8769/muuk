@@ -40,7 +40,7 @@
       "maxSpreadTicks": 50,
       "maxSlippageTicks": 20
     },
-    "costs": { "commissionPerLotRoundTurn": 0.0, "slippageBufferTicks": 0.0 },
+    "costs": { "commissionPerMillionPerSide": 30.0, "commissionPerLotRoundTurn": 0.0, "slippageBufferTicks": 0.0 },
     "basketProfitTargetMoney": 5.0,
     "maxRejectRetries": 3,
     "seedOffsetPoints": 0.05

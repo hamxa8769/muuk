@@ -182,7 +182,8 @@ PnlBreakdown LiveRunner::legPnl(const OpenLeg& leg) const {
                                          : leg.requestedPrice.ticks - leg.price.ticks) *
                  moneyPerTick;
     p.spread = (buy ? mid - static_cast<double>(bid.ticks) : static_cast<double>(ask.ticks) - mid) * moneyPerTick;
-    p.commission = lotsHeld * config_.strategy.costs.commissionPerLotRoundTurn;
+    p.commission = muuk::core::roundTurnCommissionMoney(lotsHeld, leg.price.toDouble(spec), spec,
+                                                        config_.strategy.costs);
     p.swap = 0.0;
     p.net = p.gross - p.slippage - p.spread - p.commission - p.swap;
     return p;
@@ -546,7 +547,8 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                         const int64_t moveTicks = (leg.side == OrderSide::BuyStop) ? exitPrice.ticks - leg.price.ticks
                                                                                     : leg.price.ticks - exitPrice.ticks;
                         const double gross = static_cast<double>(moveTicks) * spec.tickValue * lotsClosed;
-                        const double commission = lotsClosed * config_.strategy.costs.commissionPerLotRoundTurn;
+                        const double commission = muuk::core::roundTurnCommissionMoney(
+                            lotsClosed, leg.price.toDouble(spec), spec, config_.strategy.costs);
                         bookedGross_ += gross;
                         bookedCommission_ += commission;
                         booked = ", booked " + std::to_string(gross - commission) + " net (gross " +
@@ -1222,6 +1224,7 @@ void LiveRunner::handleCommand(const Command& cmd) {
             " leg(s) to flatten");
         ++basketsClosed_;  // booked P/L itself comes from the real closing fills (see onTradeMessage)
         setCloseReason(close->stopLoss ? "stop loss" : "profit target");
+        if (currentBasket_) currentBasket_->netAtTrigger = close->netPnlMoney;
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
@@ -2155,6 +2158,7 @@ bool LiveRunner::adoptBasketFromBrokerLocked(std::string& why) {
     e.buyVolumeSteps = e.buySumEntryPriceTicksVolume = e.sellVolumeSteps = e.sellSumEntryPriceTicksVolume = 0;
     e.slippageMoneyAccrued = 0.0;
     e.swapMoneyAccrued = 0.0;
+    e.commissionAccrued = 0.0;
     e.seeding = false;
     for (auto& leg : legs) {
         const bool buy = leg.side == OrderSide::BuyStop;
@@ -2166,6 +2170,8 @@ bool LiveRunner::adoptBasketFromBrokerLocked(std::string& why) {
         const int64_t slipTicks =
             buy ? leg.price.ticks - leg.requestedPrice.ticks : leg.requestedPrice.ticks - leg.price.ticks;
         e.slippageMoneyAccrued += static_cast<double>(slipTicks) * spec.tickValue * leg.volume.toDouble(spec);
+        e.commissionAccrued += muuk::core::roundTurnCommissionMoney(leg.volume.toDouble(spec), leg.price.toDouble(spec),
+                                                                    spec, config_.strategy.costs);
     }
     e.nextSequenceIndex = static_cast<int>(legs.size()) + 1;
     if (keptOrder) {

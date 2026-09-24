@@ -106,7 +106,8 @@ nlohmann::json engineToJson(const EngineState& e) {
             {"nextOrderId", e.nextOrderId},
             {"seeding", e.seeding},
             {"slippageMoneyAccrued", e.slippageMoneyAccrued},
-            {"swapMoneyAccrued", e.swapMoneyAccrued}};
+            {"swapMoneyAccrued", e.swapMoneyAccrued},
+            {"commissionAccrued", e.commissionAccrued}};
 }
 
 EngineState engineFromJson(const nlohmann::json& j) {
@@ -136,6 +137,7 @@ EngineState engineFromJson(const nlohmann::json& j) {
     e.seeding = j.value("seeding", false);
     e.slippageMoneyAccrued = j.value("slippageMoneyAccrued", 0.0);
     e.swapMoneyAccrued = j.value("swapMoneyAccrued", 0.0);
+    e.commissionAccrued = j.value("commissionAccrued", -1.0);
     return e;
 }
 

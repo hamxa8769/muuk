@@ -25,10 +25,21 @@ double aggregatePositionPnlMoney(OrderSide side,
     return static_cast<double>(tickWeightedDelta) * spec.tickValue * spec.volumeStep;
 }
 
+double roundTurnCommissionMoney(double lots, double entryPrice, const SymbolSpec& spec, const CostInputs& costs) {
+    if (costs.commissionPerMillionPerSide > 0.0) {
+        const double oneSide = lots * spec.contractSize * entryPrice * costs.commissionPerMillionPerSide / 1'000'000.0;
+        // The broker keeps money in whole cents; + a hair so 4.105 isn't read as 4.10499999.
+        const double cents = static_cast<double>(detail::roundToInt64(oneSide * 100.0 + 1e-7));
+        return 2.0 * cents / 100.0;
+    }
+    return lots * costs.commissionPerLotRoundTurn;
+}
+
 BasketPnlResult computeBasketPnl(const BasketPnlInput& input, const CostInputs& costs) {
     BasketPnlResult result;
     result.grossPnlMoney = input.grossPnlMoney;
-    result.commissionMoney = input.totalVolumeLots * costs.commissionPerLotRoundTurn;
+    result.commissionMoney = input.commissionMoney ? *input.commissionMoney
+                                                   : input.totalVolumeLots * costs.commissionPerLotRoundTurn;
     result.spreadCostMoney = input.spreadCostMoney;
     result.swapMoney = input.swapMoney;
     result.slippageMoney = input.slippageMoney;

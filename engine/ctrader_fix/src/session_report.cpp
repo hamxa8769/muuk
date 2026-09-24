@@ -262,7 +262,8 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Profit target (net)", fmt("$%.2f", s.profitTarget)},
         {"First lot / increment", fmt("%.2f", s.initialLot) + " / " + fmt("%.2f", s.lotIncrement)},
         {"Entry offset", fmt("$%.2f", s.seedOffset)},
-        {"Commission (per lot, round turn)", fmt("$%.2f", s.commissionPerLot)},
+        {"Commission", s.commissionPerMillion > 0 ? fmt("$%.2f per $1M traded, each side", s.commissionPerMillion)
+                                                : fmt("$%.2f per lot, round turn", s.commissionPerLot)},
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
         {"Max orders / max lot", std::to_string(s.maxOrders) + " / " + fmt("%.2f", s.maxLot)},
         {"Max basket loss", s.maxBasketLoss > 0 ? fmt("$%.2f", s.maxBasketLoss) : "off"},

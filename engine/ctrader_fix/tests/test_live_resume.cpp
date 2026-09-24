@@ -902,3 +902,45 @@ TEST_CASE("Each basket records how it ended and how it went: orders, fills, deep
     bot.finish();
     bot.rethrow();
 }
+
+TEST_CASE("Broker-exact commission: the target waits for it, and the booked net is what the broker credits") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 0.50;
+    cfg.strategy.costs.commissionPerLotRoundTurn = 7.0;     // ignored: the per-million rate wins
+    cfg.strategy.costs.commissionPerMillionPerSide = 30.0;  // IC Markets cTrader Raw
+    Bot bot(cfg, freshStateFile("broker_commission"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // Sell Stop
+
+    // 0.01 lot x 100 oz x 4337.00 x 30 / 1M = 0.13 a side -> 0.26 open + close (a flat $7/lot would say 0.07).
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 1; }));
+    sendQuote(server, 2, 4337.60, 4337.70);  // gross 0.60 - 0.26 = 0.34: not there yet
+    REQUIRE(waitUntil([&] {
+        const auto s = bot.runner().snapshot();
+        return !s.positions.empty() && s.bid && *s.bid == Catch::Approx(4337.60);
+    }));
+    const LiveSnapshot mid = bot.runner().snapshot();
+    REQUIRE(mid.positions[0].pnl.commission == Catch::Approx(0.26));
+    REQUIRE(mid.positions[0].pnl.net == Catch::Approx(0.34));
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 800ms), std::runtime_error);
+
+    sendQuote(server, 3, 4337.90, 4338.00);  // 0.90 - 0.26 = 0.64: target
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getInt(tag::OrdType) == 1);
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4337.85, 1.0, "P1");  // filled 5 cents lower
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }));
+    const BasketRecord b = bot.runner().snapshot().baskets[0];
+    REQUIRE(b.outcome == "target");
+    REQUIRE(b.netAtTrigger == Catch::Approx(0.64));
+    REQUIRE(b.legs[0].commission == Catch::Approx(0.26));
+    REQUIRE(b.gross == Catch::Approx(0.85));
+    REQUIRE(b.net == Catch::Approx(0.59));  // = the balance change at the broker
+    REQUIRE(bot.runner().snapshot().realizedPnl == Catch::Approx(0.59));
+
+    bot.finish();
+    bot.rethrow();
+}
