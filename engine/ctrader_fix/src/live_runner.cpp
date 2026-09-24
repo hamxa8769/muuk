@@ -113,6 +113,11 @@ LiveSnapshot LiveRunner::snapshot() const {
         snap.pendingOrders.push_back(
             PendingOrderInfo{orderId, leg.side, leg.volume.toDouble(spec), leg.price.toDouble(spec), leg.adopted});
     }
+    for (const auto& [orderId, leg] : waitingOrders_) {
+        PendingOrderInfo info{orderId, leg.side, leg.volume.toDouble(spec), leg.price.toDouble(spec), leg.adopted};
+        info.waiting = true;
+        snap.pendingOrders.push_back(info);
+    }
     std::sort(snap.pendingOrders.begin(), snap.pendingOrders.end(),
               [](const PendingOrderInfo& a, const PendingOrderInfo& b) { return a.id < b.id; });
 
@@ -276,13 +281,23 @@ void LiveRunner::run() {
         }
 
         bool resumeCandidate = false;
+        bool positionsAtBroker = false;
         {
             std::scoped_lock lock(engineMutex_);
             resumeCandidate = loadedState_ && loadedState_->engine.status != EngineStatus::Idle;
+            positionsAtBroker = !connectPositions_.empty();
         }
         const bool autoRange = config_.connection.autoRangeWidthPoints > 0.0;
         if (autoRange || config_.strategy.seedOffsetPoints > 0.0 || resumeCandidate) {
             waitForFirstQuote();
+        } else if (positionsAtBroker) {
+            // Picking up a basket from the broker needs to know where the
+            // market is (is its next order already passed?) -- but don't
+            // fail the connection over it.
+            std::unique_lock lock(firstQuoteMutex_);
+            if (!firstQuoteCv_.wait_for(lock, std::chrono::seconds(10), [this] { return firstQuoteReceived_; })) {
+                log("[sync] no live quote yet -- continuing without one");
+            }
         }
 
         bool started = false;
@@ -320,6 +335,10 @@ void LiveRunner::run() {
         while (running_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (++loops % 50 == 0) markDirty();  // lifetime statistics, every ~10 s
+            if (loops % 5 == 0) {
+                std::scoped_lock lock(engineMutex_);
+                checkBasketHealthLocked();
+            }
             flushState();
         }
         markDirty();
@@ -521,8 +540,23 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             // to only fire for a cancel that's still genuinely in flight.
             if (const auto orderId = tryParseOrderId(info.clOrdId)) {
                 std::scoped_lock lock(engineMutex_);
-                placedOrderInfo_.erase(*orderId);
-                cancelledOrderInfo_.erase(*orderId);
+                const bool weCancelledIt = cancelledOrderInfo_.erase(*orderId) > 0;
+                if (const auto it = placedOrderInfo_.find(*orderId); it != placedOrderInfo_.end()) {
+                    const OpenLeg order = it->second;
+                    placedOrderInfo_.erase(it);
+                    // Not a cancel the bot sent: the broker cancelled/expired
+                    // it, or it was cancelled by hand in cTrader. The running
+                    // basket still needs it.
+                    if (!weCancelledIt && !order.adopted && engine_ && engine_->status() == EngineStatus::Active) {
+                        log("[order] MISSED: pending " + std::string(order.side == OrderSide::BuyStop ? "Buy" : "Sell") +
+                            " Stop " + std::to_string(order.volume.toDouble(config_.strategy.symbol)) + " lot @ " +
+                            std::to_string(order.price.toDouble(config_.strategy.symbol)) + " (ClOrdID=" +
+                            std::to_string(*orderId) + ") was " +
+                            (info.execType == ExecType::Expired ? "expired" : "cancelled") +
+                            " outside the bot -- placing it again");
+                        for (const auto& cmd : engine_->replaceOrder(*orderId)) handleCommand(cmd);
+                    }
+                }
             }
         }
 
@@ -629,6 +663,24 @@ void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::st
         openLegs_.push_back(filled);
         placedOrderInfo_.erase(it);
         recordLegOpened(filled);
+        healthRearms_ = 0;
+        {
+            const SymbolSpec& spec = config_.strategy.symbol;
+            const bool buy = filled.side == OrderSide::BuyStop;
+            const int64_t slipTicks = buy ? filled.price.ticks - filled.requestedPrice.ticks
+                                          : filled.requestedPrice.ticks - filled.price.ticks;
+            const double lots = filled.volume.toDouble(spec);
+            std::ostringstream oss;
+            oss.setf(std::ios::fixed);
+            oss.precision(2);
+            oss << "[fill] " << (buy ? "BUY " : "SELL ") << lots << " lot @ " << filled.price.toDouble(spec)
+                << " (order price " << filled.requestedPrice.toDouble(spec) << "), slippage "
+                << (slipTicks > 0 ? "+" : "") << static_cast<double>(slipTicks) * spec.tickSize << " = "
+                << (slipTicks > 0 ? "-$" : (slipTicks < 0 ? "+$" : "$"))
+                << std::abs(static_cast<double>(slipTicks) * spec.tickValue * lots)
+                << (slipTicks > 0 ? " (worse)" : (slipTicks < 0 ? " (better)" : ""));
+            log(oss.str());
+        }
     } else if (const auto cit = cancelledOrderInfo_.find(orderId); cit != cancelledOrderInfo_.end()) {
         // The cancel lost the race: this order filled anyway after
         // LiveRunner had already asked the broker to cancel it
@@ -708,11 +760,106 @@ void LiveRunner::maybeEmitTick() {
         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - decideStart).count());
     ++ticksProcessed_;
     for (const auto& cmd : commands) handleCommand(cmd);
+    releaseWaitingOrdersLocked();
     maybeRestartAfterBasketClose();
 }
 
 bool LiveRunner::accountFlat() const {
-    return openLegs_.empty() && placedOrderInfo_.empty() && pendingCloses_.empty();
+    return openLegs_.empty() && placedOrderInfo_.empty() && pendingCloses_.empty() && waitingOrders_.empty();
+}
+
+bool LiveRunner::stopIsMarketable(OrderSide side, Price price) const {
+    if (!latestBid_ || !latestAsk_) return false;
+    const double px = price.toDouble(config_.strategy.symbol);
+    return side == OrderSide::BuyStop ? px <= *latestAsk_ : px >= *latestBid_;
+}
+
+void LiveRunner::sendStopOrderLocked(const OpenLeg& leg, int sequenceIndex) {
+    const std::string clOrdId = std::to_string(leg.id);
+    const int side = (leg.side == OrderSide::BuyStop) ? 1 : 2;
+    const double lots = leg.volume.toDouble(config_.strategy.symbol);
+    // cTrader's FIX OrderQty(38) is in "lot hundredths" (its
+    // platform-wide volume convention), not raw lots -- confirmed
+    // empirically: sending OrderQty=2/3 opened 0.02/0.03-lot
+    // positions, and the broker's stated minimum ("1.00") turned out
+    // to mean 0.01 lot, not 1.00 lot. engine/core's SymbolSpec/Volume
+    // stay in real lots throughout (P&L, risk checks); this scaling
+    // is purely a wire-format detail of this one broker/dialect, so it
+    // belongs here rather than in engine/core.
+    const double qty = lots * kWireQtyPerLot;
+    const double stopPx = leg.price.toDouble(config_.strategy.symbol);
+    std::ostringstream oss;
+    oss << "[order] placing seq=" << sequenceIndex << " side=" << side << " lots=" << lots << " stopPx=" << stopPx
+        << " (ClOrdID=" << clOrdId << ")";
+    log(oss.str());
+    placedOrderInfo_[leg.id] = leg;
+    orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
+    tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
+}
+
+void LiveRunner::releaseWaitingOrdersLocked() {
+    if (waitingOrders_.empty() || !tradeSession_) return;
+    for (auto it = waitingOrders_.begin(); it != waitingOrders_.end();) {
+        if (stopIsMarketable(it->second.side, it->second.price)) {
+            ++it;
+            continue;
+        }
+        log("[order] the price is back on the right side of waiting order " + std::to_string(it->first) +
+            " -- placing it now");
+        const OpenLeg leg = it->second;
+        it = waitingOrders_.erase(it);
+        sendStopOrderLocked(leg, 0);
+        markDirty();
+    }
+}
+
+void LiveRunner::checkBasketHealthLocked() {
+    if (!engine_ || !tradeSession_ || engine_->status() != EngineStatus::Active || engine_->seeding() ||
+        !pendingCloses_.empty()) {
+        return;
+    }
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const muuk::core::EngineState st = engine_->exportState();
+    for (const auto& armed : st.pendingOrders) {
+        const OrderId id = armed.order.id;
+        if (placedOrderInfo_.count(id) > 0 || waitingOrders_.count(id) > 0 || cancelledOrderInfo_.count(id) > 0 ||
+            operatorCancelled_.count(id) > 0) {
+            continue;
+        }
+        log("[guard] MISSED: pending " + std::string(armed.order.side == OrderSide::BuyStop ? "Buy" : "Sell") +
+            " Stop " + std::to_string(armed.order.volume.toDouble(spec)) + " lot @ " +
+            std::to_string(armed.order.price.toDouble(spec)) + " (ClOrdID=" + std::to_string(id) +
+            ") isn't at the broker -- placing it again");
+        for (const auto& cmd : engine_->replaceOrder(id)) handleCommand(cmd);
+    }
+    if (engine_->activeOrderCount() == 0 && !openLegs_.empty() && config_.strategy.reArmOnFill && healthRearms_ < 3) {
+        const auto last = std::max_element(openLegs_.begin(), openLegs_.end(), [](const OpenLeg& a, const OpenLeg& b) {
+            return a.adopted != b.adopted ? a.adopted : a.id < b.id;
+        });
+        ++healthRearms_;
+        log("[guard] MISSED: the running basket has " + std::to_string(openLegs_.size()) +
+            " position(s) but no pending order -- placing its next one");
+        for (const auto& cmd : engine_->armNextAfter(last->side)) handleCommand(cmd);
+    }
+}
+
+void LiveRunner::placeWaitingOrderNow(OrderId id) {
+    std::scoped_lock lock(engineMutex_);
+    if (!tradeSession_) return;
+    const auto it = waitingOrders_.find(id);
+    if (it == waitingOrders_.end()) return;
+    const OpenLeg leg = it->second;
+    waitingOrders_.erase(it);
+    const std::string clOrdId = std::to_string(id);
+    const double lots = leg.volume.toDouble(config_.strategy.symbol);
+    log("[manual] operator requested: place waiting " + std::string(leg.side == OrderSide::BuyStop ? "Buy" : "Sell") +
+        " " + std::to_string(lots) + " lot now at market (ClOrdID=" + clOrdId + ")");
+    // Tracked like any placed order: its fill is processed as this order's fill.
+    placedOrderInfo_[id] = leg;
+    orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
+    tradeSession_->send(
+        buildMarketOrderSingle(clOrdId, symbolId_, leg.side == OrderSide::BuyStop ? 1 : 2, lots * kWireQtyPerLot));
+    markDirty();
 }
 
 void LiveRunner::prepareNextCycle(bool recenter) {
@@ -792,27 +939,24 @@ void LiveRunner::centerRangeOnLatestQuote() {
 void LiveRunner::handleCommand(const Command& cmd) {
     markDirty();
     if (const auto* place = std::get_if<PlaceOrderCommand>(&cmd)) {
-        const std::string clOrdId = std::to_string(place->id);
-        const int side = (place->side == OrderSide::BuyStop) ? 1 : 2;
-        const double lots = place->volume.toDouble(config_.strategy.symbol);
-        // cTrader's FIX OrderQty(38) is in "lot hundredths" (its
-        // platform-wide volume convention), not raw lots -- confirmed
-        // empirically: sending OrderQty=2/3 opened 0.02/0.03-lot
-        // positions, and the broker's stated minimum ("1.00") turned out
-        // to mean 0.01 lot, not 1.00 lot. engine/core's SymbolSpec/Volume
-        // stay in real lots throughout (P&L, risk checks); this scaling
-        // is purely a wire-format detail of this one broker/dialect, so it
-        // belongs here rather than in engine/core.
-        const double qty = lots * kWireQtyPerLot;
-        const double stopPx = place->price.toDouble(config_.strategy.symbol);
-        std::ostringstream oss;
-        oss << "[order] placing seq=" << place->sequenceIndex << " side=" << side << " lots=" << lots
-            << " stopPx=" << stopPx << " (ClOrdID=" << clOrdId << ")";
-        log(oss.str());
-        placedOrderInfo_[place->id] = OpenLeg{place->id, place->side, place->volume, place->price, place->price};
-        orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
-        tradeSession_->send(buildNewOrderSingle(clOrdId, symbolId_, side, qty, stopPx));
+        const OpenLeg leg{place->id, place->side, place->volume, place->price, place->price};
+        if (stopIsMarketable(place->side, place->price)) {
+            // The broker would refuse a Stop the market has already passed:
+            // hold it until the price is back (releaseWaitingOrdersLocked).
+            waitingOrders_[place->id] = leg;
+            log("[order] " + std::string(place->side == OrderSide::BuyStop ? "Buy" : "Sell") + " Stop " +
+                std::to_string(place->volume.toDouble(config_.strategy.symbol)) + " lot @ " +
+                std::to_string(place->price.toDouble(config_.strategy.symbol)) +
+                " is already past the market (bid " + std::to_string(*latestBid_) + " / ask " +
+                std::to_string(*latestAsk_) + ") -- waiting for the price to come back before placing it");
+            return;
+        }
+        sendStopOrderLocked(leg, place->sequenceIndex);
     } else if (const auto* cancel = std::get_if<CancelOrderCommand>(&cmd)) {
+        if (waitingOrders_.erase(cancel->id) > 0) {
+            log("[order] dropped waiting order " + std::to_string(cancel->id) + " (never sent to the broker)");
+            return;
+        }
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
         log("[order] cancelling OrigClOrdID=" + std::to_string(cancel->id));
         // Moved, not erased: the cancel can still lose the race against a
@@ -974,6 +1118,10 @@ void LiveRunner::closePositionsLocked() {
 
 void LiveRunner::cancelPendingLocked() {
     markDirty();
+    if (!waitingOrders_.empty()) {
+        log("[orders] dropping " + std::to_string(waitingOrders_.size()) + " waiting order(s) (never sent)");
+        waitingOrders_.clear();
+    }
     log("[orders] cancelling all pending orders (" + std::to_string(placedOrderInfo_.size()) + " order(s))");
     for (const auto& [orderId, leg] : placedOrderInfo_) {
         const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
@@ -1216,6 +1364,12 @@ void LiveRunner::closePosition(OrderId id) {
 void LiveRunner::cancelOrder(OrderId id) {
     std::scoped_lock lock(engineMutex_);
     if (!tradeSession_) return;
+    operatorCancelled_.insert(id);
+    if (waitingOrders_.erase(id) > 0) {
+        log("[manual] operator requested: cancel order id=" + std::to_string(id) + " (waiting, never sent)");
+        markDirty();
+        return;
+    }
     const auto it = placedOrderInfo_.find(id);
     if (it == placedOrderInfo_.end()) return;
     log("[manual] operator requested: cancel order id=" + std::to_string(id));
@@ -1393,6 +1547,7 @@ void LiveRunner::reconcileOnConnectLocked() {
         std::string positionId;
     };
     std::vector<Fill> fills;
+    std::vector<OrderId> toReplace;  // pending orders gone from the broker without a fill
     std::vector<OpenLeg> reclose;
     std::vector<OrderId> stillToCancel;
     bool hadBasket = false;
@@ -1450,9 +1605,11 @@ void LiveRunner::reconcileOnConnectLocked() {
                 consistent = false;
                 problems.push_back("the broker's working orders couldn't be checked");
             } else {
+                // Not working any more and no position for it: it was
+                // cancelled (or expired). The basket still needs it -- place
+                // it again once the engine is restored.
                 placedOrderInfo_.erase(leg.id);
-                consistent = false;
-                problems.push_back("pending order " + std::to_string(leg.id) + " was cancelled outside the bot");
+                toReplace.push_back(leg.id);
             }
         }
         for (const auto& p : saved->cancellingOrders) {
@@ -1470,6 +1627,7 @@ void LiveRunner::reconcileOnConnectLocked() {
         }
         if (saved->closeFailed && !openLegs_.empty()) basketCloseFailed_ = true;
     }
+    const bool hadWaiting = saved && !saved->waitingOrders.empty();
 
     // Anything else open on this symbol isn't part of the saved basket:
     // list it so it can be closed/cancelled from here.
@@ -1539,6 +1697,27 @@ void LiveRunner::reconcileOnConnectLocked() {
         if (!take(placedOrderInfo_)) (void)take(cancelledOrderInfo_);
     }
 
+    if (resume) {
+        if (hadWaiting) {
+            for (const auto& p : saved->waitingOrders) waitingOrders_[p.id] = toLeg(p);  // still held back
+        }
+        for (const OrderId id : toReplace) {
+            log("[resume] pending order " + std::to_string(id) + " is no longer at the broker -- placing it again");
+            for (const auto& cmd : engine_->replaceOrder(id)) handleCommand(cmd);
+        }
+        // A running basket must always have its next order: if none is
+        // pending (or waiting), arm the one after the most recent fill.
+        if (engine_->status() == EngineStatus::Active && !engine_->seeding() && engine_->activeOrderCount() == 0 &&
+            !openLegs_.empty()) {
+            const auto last = std::max_element(openLegs_.begin(), openLegs_.end(),
+                                               [](const OpenLeg& a, const OpenLeg& b) {
+                                                   return a.adopted != b.adopted ? a.adopted : a.id < b.id;
+                                               });
+            log("[resume] the basket has no pending order -- placing its next one");
+            for (const auto& cmd : engine_->armNextAfter(last->side)) handleCommand(cmd);
+        }
+    }
+
     if (!reclose.empty()) {
         log("[resume] " + std::to_string(reclose.size()) +
             " closing trade(s) never went through before the disconnect -- closing again");
@@ -1565,6 +1744,20 @@ void LiveRunner::reconcileOnConnectLocked() {
         setCloseReason("interrupted: " + problems.front());
         holdAutoStart_ = true;
         if (!placedOrderInfo_.empty()) cancelPendingLocked();
+    } else if (std::string why; !openLegs_.empty() && engine_->status() == EngineStatus::Idle &&
+                                pendingCloses_.empty() && waitingOrders_.empty() &&
+                                (!currentBasket_ || currentBasket_->legs.empty()) &&
+                                std::all_of(openLegs_.begin(), openLegs_.end(),
+                                            [](const OpenLeg& l) { return l.adopted; })) {
+        // Positions at the broker that the bot has no basket for: if they
+        // are one of its baskets (e.g. left by an older version, or the
+        // state file was lost), pick it up and carry on.
+        if (!adoptBasketFromBrokerLocked(why)) {
+            resumeNote_ = std::to_string(openLegs_.size()) +
+                          " position(s) left from before are still open at the broker (not picked up as a basket: " +
+                          why + ") -- close them to start a new range.";
+            log("[resume] " + resumeNote_);
+        }
     } else if (hadBasket && !openLegs_.empty()) {
         const bool allOld = std::all_of(openLegs_.begin(), openLegs_.end(), [](const OpenLeg& l) { return l.adopted; });
         resumeNote_ = std::to_string(openLegs_.size()) + " position(s) " +
@@ -1572,8 +1765,129 @@ void LiveRunner::reconcileOnConnectLocked() {
                       " are still open at the broker -- close them to start a new range.";
         log("[resume] " + resumeNote_);
     }
+    if (resume && !waitingOrders_.empty() && !resumeNote_.empty()) {
+        resumeNote_ += ". Its next order is already past the market, so it waits for the price to come back "
+                       "(or place it now at market from Pending orders).";
+    }
     maybeFinalizeBasket();  // e.g. everything was closed while away
     markDirty();
+}
+
+bool LiveRunner::adoptBasketFromBrokerLocked(std::string& why) {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    std::vector<OpenLeg> legs = openLegs_;
+    std::sort(legs.begin(), legs.end(), [](const OpenLeg& a, const OpenLeg& b) {
+        return a.volume.steps != b.volume.steps ? a.volume.steps < b.volume.steps : a.positionId < b.positionId;
+    });
+
+    // Lots must be exactly the sequence 1, 2, 3... of the current settings, with alternating sides.
+    const StartSide startSide = config_.strategy.startSide;
+    for (std::size_t k = 0; k < legs.size(); ++k) {
+        const Volume expected = computeSequenceLot(config_.strategy.lotProgression, static_cast<int>(k) + 1, spec);
+        if (legs[k].volume != expected) {
+            why = "their lots aren't " + std::to_string(computeSequenceLot(config_.strategy.lotProgression, 1, spec)
+                                                            .toDouble(spec)) +
+                  ", " + std::to_string(computeSequenceLot(config_.strategy.lotProgression, 2, spec).toDouble(spec)) +
+                  "... as the current lot settings would place them";
+            return false;
+        }
+        if (k > 0 && legs[k].side == legs[k - 1].side) {
+            why = "buys and sells don't alternate";
+            return false;
+        }
+    }
+    if ((startSide == StartSide::BuyOnly && legs.front().side != OrderSide::BuyStop) ||
+        (startSide == StartSide::SellOnly && legs.front().side != OrderSide::SellStop)) {
+        why = "the first position isn't on the side the settings start with";
+        return false;
+    }
+
+    // The next order: opposite the last fill, next lot. A working order from
+    // an earlier run that is exactly that one is kept; any other working
+    // order means this isn't a basket the bot can take over cleanly.
+    const OrderSide lastSide = legs.back().side;
+    const OrderSide nextSide = lastSide == OrderSide::BuyStop ? OrderSide::SellStop : OrderSide::BuyStop;
+    const Volume nextLot =
+        computeSequenceLot(config_.strategy.lotProgression, static_cast<int>(legs.size()) + 1, spec);
+    std::optional<OpenLeg> keptOrder;
+    for (const auto& [id, order] : placedOrderInfo_) {
+        if (!keptOrder && order.side == nextSide && order.volume == nextLot) {
+            keptOrder = order;
+        } else {
+            why = "there are other working orders at the broker";
+            return false;
+        }
+    }
+
+    // The range hangs off the first fill: a Buy anchors the top, a Sell the bottom.
+    const int64_t width = std::max<int64_t>(1, config_.strategy.range.upperBound.ticks - config_.strategy.range.lowerBound.ticks);
+    const Price anchor = legs.front().price;
+    const RangeConfig range = legs.front().side == OrderSide::BuyStop ? RangeConfig{Price{anchor.ticks - width}, anchor}
+                                                                      : RangeConfig{anchor, Price{anchor.ticks + width}};
+
+    muuk::core::EngineState e = engine_->exportState();
+    e.status = EngineStatus::Active;
+    e.range = range;
+    e.pendingOrders.clear();
+    e.buyVolumeSteps = e.buySumEntryPriceTicksVolume = e.sellVolumeSteps = e.sellSumEntryPriceTicksVolume = 0;
+    e.slippageMoneyAccrued = 0.0;
+    e.swapMoneyAccrued = 0.0;
+    e.seeding = false;
+    for (auto& leg : legs) {
+        const bool buy = leg.side == OrderSide::BuyStop;
+        leg.requestedPrice = buy ? range.upperBound : range.lowerBound;
+        leg.adopted = false;
+        (buy ? e.buyVolumeSteps : e.sellVolumeSteps) += leg.volume.steps;
+        (buy ? e.buySumEntryPriceTicksVolume : e.sellSumEntryPriceTicksVolume) +=
+            leg.requestedPrice.ticks * leg.volume.steps;
+        const int64_t slipTicks =
+            buy ? leg.price.ticks - leg.requestedPrice.ticks : leg.requestedPrice.ticks - leg.price.ticks;
+        e.slippageMoneyAccrued += static_cast<double>(slipTicks) * spec.tickValue * leg.volume.toDouble(spec);
+    }
+    e.nextSequenceIndex = static_cast<int>(legs.size()) + 1;
+    if (keptOrder) {
+        muuk::core::EngineState::Armed armed;
+        armed.order = PendingOrder{keptOrder->id, e.nextSequenceIndex, nextSide, keptOrder->price, nextLot,
+                                   OrderState::Pending};
+        e.pendingOrders.push_back(armed);
+        e.nextSequenceIndex += 1;
+        e.nextOrderId = std::max<OrderId>(e.nextOrderId, keptOrder->id + 1);
+        placedOrderInfo_[keptOrder->id].adopted = false;
+    }
+    engine_->restoreState(e);
+
+    openLegs_ = legs;
+    closeReason_.clear();
+    beginBasket();
+    currentBasket_->startedAt.clear();  // unknown -- opened before the bot connected
+    for (const auto& leg : legs) {
+        recordLegOpened(leg);
+        currentBasket_->legs.back().adopted = true;
+        currentBasket_->legs.back().openedAt.clear();
+        currentBasket_->legs.back().note = "opened before the bot connected";
+    }
+    if (!keptOrder) {
+        for (const auto& cmd : engine_->armNextAfter(lastSide)) handleCommand(cmd);
+    }
+
+    const double lastLots = legs.back().volume.toDouble(spec);
+    std::ostringstream note;
+    note.setf(std::ios::fixed);
+    note.precision(2);
+    note << "Picked up the basket already open at the broker: " << legs.size() << " positions ("
+         << legs.front().volume.toDouble(spec) << " to " << lastLots << " lot), range "
+         << range.lowerBound.toDouble(spec) << " - " << range.upperBound.toDouble(spec) << "; next order "
+         << (nextSide == OrderSide::BuyStop ? "Buy" : "Sell") << " Stop " << nextLot.toDouble(spec) << " @ "
+         << (nextSide == OrderSide::BuyStop ? range.upperBound : range.lowerBound).toDouble(spec);
+    if (keptOrder) {
+        note << " (already working)";
+    } else if (!waitingOrders_.empty()) {
+        note << " is already past the market, so it waits for the price to come back (or place it now at market "
+                "from Pending orders)";
+    }
+    resumeNote_ = note.str();
+    log("[resume] " + resumeNote_);
+    return true;
 }
 
 PersistedState LiveRunner::buildStateLocked() const {
@@ -1607,6 +1921,7 @@ PersistedState LiveRunner::buildStateLocked() const {
         s.cancellingOrders.push_back(toPersisted(cancelledOrderInfo_.at(id)));
     }
     for (const auto& [clOrdId, leg] : pendingCloses_) s.pendingCloses.push_back(toPersisted(leg, clOrdId));
+    for (const OrderId id : sortedIds(waitingOrders_)) s.waitingOrders.push_back(toPersisted(waitingOrders_.at(id)));
     std::sort(s.pendingCloses.begin(), s.pendingCloses.end(),
               [](const PersistedLeg& a, const PersistedLeg& b) { return a.closeClOrdId < b.closeClOrdId; });
     s.closeFailed = basketCloseFailed_;

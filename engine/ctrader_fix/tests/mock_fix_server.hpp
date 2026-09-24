@@ -37,10 +37,11 @@ public:
     // pass this as FixSession's `port` argument.
     [[nodiscard]] std::string port() const { return port_; }
 
-    // Blocks until a message of the given MsgType has arrived on
-    // `connectionIndex` (searching forward from the last message this call
-    // (or a previous one) consumed — see class comment), or throws on
-    // timeout.
+    // Returns the oldest message of the given MsgType on `connectionIndex`
+    // that no earlier call has returned, waiting for one to arrive; throws
+    // on timeout. Messages of other types or connections are never skipped
+    // over, so the order of the test's waits doesn't have to match the
+    // exact arrival order across connections.
     [[nodiscard]] FixMessage waitForMessage(const std::string& msgType, std::size_t connectionIndex,
                                              std::chrono::milliseconds timeout = std::chrono::seconds(2));
 
@@ -76,11 +77,11 @@ private:
     struct ReceivedMessage {
         std::size_t connectionIndex;
         FixMessage message;
+        bool consumed = false;  // already returned by waitForMessage
     };
     std::mutex receivedMutex_;
     std::condition_variable receivedCv_;
     std::vector<ReceivedMessage> received_;
-    std::size_t searchCursor_ = 0;
 
     std::atomic<bool> running_{true};
 };

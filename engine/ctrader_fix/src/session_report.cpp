@@ -432,6 +432,9 @@ void basketTrees(Layout& lay, const std::vector<BasketRecord>& newestFirst, std:
             if (!l.note.empty()) detail += " - " + l.note;
             detail += "   req " + fmt("%.2f", l.requestedPrice) + "   fill " + fmt("%.2f", l.entryPrice) + "   exit " +
                       (l.exitPrice > 0 ? fmt("%.2f", l.exitPrice) : std::string("-"));
+            if (const double slip = legSlippage(l, b.contractSize); std::fabs(slip) >= 0.005) {
+                detail += "   slip " + money(-slip);
+            }
             doc.text(trunkX + 44.0f, yy, detail, 7.5f, false, kInk);
             doc.textRight(kRight - 110.0f, yy, "gross " + money(l.gross), 7.5f, false, pnlColor(l.gross));
             doc.textRight(kRight - 56.0f, yy, "comm " + money(-l.commission), 7.5f, false, kDim);

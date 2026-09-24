@@ -151,6 +151,7 @@ nlohmann::json stateToJson(const PersistedState& s) {
                         {"pendingOrders", legsToJson(s.pendingOrders)},
                         {"cancellingOrders", legsToJson(s.cancellingOrders)},
                         {"pendingCloses", legsToJson(s.pendingCloses)},
+                        {"waitingOrders", legsToJson(s.waitingOrders)},
                         {"closeFailed", s.closeFailed},
                         {"closeReason", s.closeReason},
                         {"basketCounter", s.basketCounter},
@@ -180,6 +181,7 @@ PersistedState stateFromJson(const nlohmann::json& j) {
     s.pendingOrders = legsFromJson(j, "pendingOrders");
     s.cancellingOrders = legsFromJson(j, "cancellingOrders");
     s.pendingCloses = legsFromJson(j, "pendingCloses");
+    s.waitingOrders = legsFromJson(j, "waitingOrders");
     s.closeFailed = j.value("closeFailed", false);
     if (j.contains("currentBasket") && !j.at("currentBasket").is_null()) {
         s.currentBasket = basketFromJson(j.at("currentBasket"));

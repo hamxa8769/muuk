@@ -201,4 +201,10 @@ TEST_CASE("Volume statistics: lots, value traded, won/lost lots and P/L per day,
     REQUIRE(total.lots == Catch::Approx(0.12));
     REQUIRE(total.net == Catch::Approx(2.50));
     REQUIRE(periodKey("garbage", VolumePeriod::Day) == "unknown");
+
+    // Slippage: BUY 0.01 ordered at 4282.00, filled 4282.05 -> $0.05 worse;
+    // SELL 0.02 ordered and filled at 4280.00 -> none.
+    REQUIRE(legSlippage(baskets[0].legs[0], 100.0) == Catch::Approx(0.05));
+    REQUIRE(legSlippage(baskets[0].legs[1], 100.0) == Catch::Approx(0.0));
+    REQUIRE(total.slippage == Catch::Approx(4 * 0.05));
 }

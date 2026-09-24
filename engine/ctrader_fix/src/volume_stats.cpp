@@ -7,6 +7,12 @@
 
 namespace muuk::ctrader_fix {
 
+double legSlippage(const BasketLegRecord& leg, double contractSize) {
+    if (leg.requestedPrice <= 0.0 || leg.entryPrice <= 0.0) return 0.0;
+    const double diff = leg.buy ? leg.entryPrice - leg.requestedPrice : leg.requestedPrice - leg.entryPrice;
+    return diff * leg.lots * contractSize;
+}
+
 void VolumeBucket::add(const BasketRecord& basket) {
     ++baskets;
     double basketLots = 0.0;
@@ -14,6 +20,7 @@ void VolumeBucket::add(const BasketRecord& basket) {
         ++positions;
         basketLots += leg.lots;
         notional += leg.lots * basket.contractSize * leg.entryPrice;
+        slippage += legSlippage(leg, basket.contractSize);
     }
     lots += basketLots;
     if (basket.net > 0.005) {

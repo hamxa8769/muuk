@@ -209,6 +209,31 @@ void StrategyEngine::restoreState(const EngineState& s) {
     swapMoneyAccrued_ = s.swapMoneyAccrued;
 }
 
+CommandBatch StrategyEngine::armNextAfter(OrderSide lastFilled) {
+    CommandBatch out;
+    if (status_ != EngineStatus::Active || seeding_ || !config_.reArmOnFill) return out;
+    const OrderSide opposite = (lastFilled == OrderSide::BuyStop) ? OrderSide::SellStop : OrderSide::BuyStop;
+    for (const auto& p : pendingOrders_) {
+        if (p.order.side == opposite) return out;
+    }
+    const int seq = nextSequenceIndex_++;
+    tryArmOrder(out, opposite, seq);
+    return out;
+}
+
+CommandBatch StrategyEngine::replaceOrder(OrderId id) {
+    CommandBatch out;
+    if (status_ != EngineStatus::Active) return out;
+    for (std::size_t i = 0; i < pendingOrders_.size(); ++i) {
+        if (pendingOrders_[i].order.id != id) continue;
+        const PendingOrder old = pendingOrders_[i].order;
+        pendingOrders_.erase_at(i);
+        tryArmOrder(out, old.side, old.sequenceIndex, 0, old.price);
+        break;
+    }
+    return out;
+}
+
 CommandBatch StrategyEngine::onTick(const TickEvent& tick) {
     lastTick_ = tick;
     CommandBatch out;

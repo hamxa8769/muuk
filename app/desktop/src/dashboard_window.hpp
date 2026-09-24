@@ -55,7 +55,10 @@ public:
     [[nodiscard]] bool exitApproved() const { return exitApproved_; }
 
 private:
-    enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData };
+    enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
+    // The tabs on the right; a KPI card click selects one.
+    enum class Tab { None, Positions, Orders, History, Volume, Settings, Log };
+    [[nodiscard]] int tabFlags(Tab tab) const;
 
     void setTheme(bool dark);
     void renderHeader(LiveController& controller, bool running, bool connected);
@@ -105,6 +108,9 @@ private:
     bool openExitRequested_ = false;
     bool exitClosing_ = false;      // "Close everything & exit" in progress
     double exitClosingSince_ = 0.0;
+
+    Tab selectTab_ = Tab::None;  // switch to this tab on the next frame
+    muuk::core::OrderId placeNowId_ = muuk::core::kInvalidOrderId;  // waiting order awaiting "Place now" confirmation
 
     Confirm confirm_ = Confirm::None;
     bool openConfirmRequested_ = false;

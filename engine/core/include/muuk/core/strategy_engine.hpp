@@ -182,6 +182,16 @@ public:
     [[nodiscard]] EngineState exportState() const;
     void restoreState(const EngineState& state);
 
+    // For a driver resuming a basket whose next order is missing at the
+    // broker. armNextAfter: arms what onOrderConfirmed would have armed
+    // after a fill on `lastFilled` -- the next lot of the sequence on the
+    // opposite side -- unless that side already has an order pending.
+    // replaceOrder: drops pending order `id` and arms a fresh one in its
+    // place (same side, price and place in the sequence, new id). Both only
+    // act while Active, and emit the PlaceOrderCommand to send.
+    CommandBatch armNextAfter(OrderSide lastFilled);
+    CommandBatch replaceOrder(OrderId id);
+
 private:
     // Running per-side accumulator backing aggregatePositionPnlMoney() —
     // deliberately not a list of individual fills: a basket can accumulate

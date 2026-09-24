@@ -109,6 +109,10 @@ void LiveController::cancelOrder(muuk::core::OrderId id) {
     if (runner_ && running_.load()) runner_->cancelOrder(id);
 }
 
+void LiveController::placeWaitingOrderNow(muuk::core::OrderId id) {
+    if (runner_ && running_.load()) runner_->placeWaitingOrderNow(id);
+}
+
 void LiveController::syncPositions() {
     if (runner_ && running_.load()) runner_->syncPositions();
 }

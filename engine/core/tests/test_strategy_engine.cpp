@@ -695,3 +695,46 @@ TEST_CASE("restoreState of an idle state only carries the order-id counter forwa
     REQUIRE(engine.status() == EngineStatus::Idle);
     REQUIRE(placeCmd(engine.start(), 0).id == 500);
 }
+
+TEST_CASE("armNextAfter arms the missing next order of a resumed basket; replaceOrder re-arms a lost one") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    StrategyEngine engine(cfg);
+
+    // A basket rebuilt from the broker: BUY 0.01, SELL 0.02, BUY 0.03 open, nothing pending.
+    EngineState s;
+    s.status = EngineStatus::Active;
+    s.range = cfg.range;
+    s.buyVolumeSteps = 4;
+    s.buySumEntryPriceTicksVolume = cfg.range.upperBound.ticks * 4;
+    s.sellVolumeSteps = 2;
+    s.sellSumEntryPriceTicksVolume = cfg.range.lowerBound.ticks * 2;
+    s.nextSequenceIndex = 4;
+    s.nextOrderId = 10;
+    engine.restoreState(s);
+
+    const CommandBatch next = engine.armNextAfter(OrderSide::BuyStop);
+    REQUIRE(next.size() == 1);
+    const PlaceOrderCommand sell4 = placeCmd(next, 0);
+    REQUIRE(sell4.side == OrderSide::SellStop);
+    REQUIRE(sell4.price == cfg.range.lowerBound);
+    REQUIRE(sell4.volume.toDouble(spec) == Catch::Approx(0.04));
+    REQUIRE(sell4.id == 10);
+    REQUIRE(engine.armNextAfter(OrderSide::BuyStop).empty());  // already pending: never twice
+
+    const CommandBatch again = engine.replaceOrder(sell4.id);
+    REQUIRE(again.size() == 1);
+    const PlaceOrderCommand replacement = placeCmd(again, 0);
+    REQUIRE(replacement.id != sell4.id);
+    REQUIRE(replacement.side == OrderSide::SellStop);
+    REQUIRE(replacement.price == sell4.price);
+    REQUIRE(replacement.volume == sell4.volume);
+    REQUIRE(replacement.sequenceIndex == sell4.sequenceIndex);
+    REQUIRE(engine.activeOrderCount() == 1);
+
+    // Its fill carries the sequence on as usual: next is a Buy Stop 0.05.
+    const CommandBatch after = engine.onOrderConfirmed(OrderConfirmedEvent{replacement.id, replacement.price});
+    REQUIRE(placeCmd(after, 0).side == OrderSide::BuyStop);
+    REQUIRE(placeCmd(after, 0).volume.toDouble(spec) == Catch::Approx(0.05));
+}

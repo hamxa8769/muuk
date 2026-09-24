@@ -246,6 +246,35 @@ basket are listed as "old", so they can be closed or cancelled from the
 app. Orders whose ClOrdID isn't a bot order id (placed by hand) are left
 alone.
 
+**A basket found at the broker with no saved state** (left by an older
+version, or the state file was lost) is picked up if it looks exactly
+like one of the bot's baskets. That means lots in the configured sequence
+(0.01, 0.02, 0.03...), sides alternating, and the first on the configured
+start side. The range is rebuilt from the first fill, and the next order
+is placed.
+
+**Every running basket always has its next order.** Three things make sure
+of it, and each one logs `MISSED`:
+- A pending order the broker cancels or expires, or that is cancelled by
+  hand in cTrader, is placed again. Cancelling one from the app is left
+  alone.
+- A watchdog, about once a second: if an order the engine counts on isn't
+  at the broker, it is placed again. If the basket has positions but no
+  pending order at all, its next order is placed (at most 3 tries per
+  fill, so a rejecting broker isn't flooded).
+- On reconnect: a saved pending order that is gone without a fill is
+  placed again.
+
+**Orders the market has already passed wait.** A Buy Stop at or below the
+ask, or a Sell Stop at or above the bid, would be refused by the broker.
+Such an order is held ("waiting" in Pending orders) and sent as soon as
+the price is back on the right side. **Place now** sends it at market
+instead; its fill then carries the basket on like any other.
+
+**Slippage** (fill vs the order's own price) is logged on every fill
+(`[fill] ... slippage`). It is shown per position (Positions tab), per
+leg (History tab), per period (Volume tab) and in the PDF position trees.
+
 ## Who detects a pending order's trigger?
 
 The broker does — that's the point of placing a real Stop order. Unlike

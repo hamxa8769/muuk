@@ -203,8 +203,16 @@ void drawRangeChart(const LiveSnapshot& snap, float height) {
         const std::string hiText = price(snap.rangeUpper);
         const float labelY = trackY + 30.0f;
         const ImU32 dim = ImGui::GetColorU32(pal.textDim);
-        dl->AddText(ImVec2(x0 - ImGui::CalcTextSize(loText.c_str()).x / 2, labelY), dim, loText.c_str());
-        dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(hiText.c_str()).x / 2, labelY), dim, hiText.c_str());
+        const float loW = ImGui::CalcTextSize(loText.c_str()).x;
+        const float hiW = ImGui::CalcTextSize(hiText.c_str()).x;
+        float loX = x0 - loW / 2;
+        float hiX = x1 - hiW / 2;
+        if (loX + loW + 8.0f > hiX) {  // a narrow range on this scale: put them either side instead
+            loX = x0 - loW - 4.0f;
+            hiX = x1 + 4.0f;
+        }
+        dl->AddText(ImVec2(std::max(left, loX), labelY), dim, loText.c_str());
+        dl->AddText(ImVec2(std::min(right - hiW, hiX), labelY), dim, hiText.c_str());
     }
 
     for (const auto& o : snap.pendingOrders) {
@@ -329,12 +337,13 @@ void treeConnector(bool buy, bool last) {
 void basketLegsTable(const BasketRecord& b, bool inProgress) {
     const ImGuiTableFlags flags =
         ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX;
-    if (!ImGui::BeginTable("legs", 9, flags)) return;
+    if (!ImGui::BeginTable("legs", 10, flags)) return;
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 30.0f);
     ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 46.0f);
     ImGui::TableSetupColumn("Lots");
     ImGui::TableSetupColumn("Stop at");
     ImGui::TableSetupColumn("Filled");
+    ImGui::TableSetupColumn("Slippage");
     ImGui::TableSetupColumn("Closed");
     ImGui::TableSetupColumn("Gross");
     ImGui::TableSetupColumn("Net");
@@ -359,6 +368,13 @@ void basketLegsTable(const BasketRecord& b, bool inProgress) {
         }
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(price(leg.entryPrice).c_str());
+        ImGui::TableNextColumn();
+        if (const double slip = muuk::ctrader_fix::legSlippage(leg, b.contractSize); std::fabs(slip) < 0.005) {
+            ImGui::TextDisabled("$0.00");
+        } else {
+            ImGui::TextColored(slip > 0 ? kRed : kGreen, "%s", money(-slip).c_str());
+            ImGui::SetItemTooltip("Filled %+.2f from the order price", leg.entryPrice - leg.requestedPrice);
+        }
         ImGui::TableNextColumn();
         if (open) {
             ImGui::TextColored(inProgress ? kAmber : kRed, "%s", inProgress ? "open" : "not closed");
@@ -491,7 +507,7 @@ void DashboardWindow::render(LiveController& controller) {
     if (ImGui::BeginTabBar("tabs")) {
         const std::string posLabel =
             "  Positions  " + std::to_string(snap ? snap->positions.size() : 0) + "  ###positions";
-        if (ImGui::BeginTabItem(posLabel.c_str())) {
+        if (ImGui::BeginTabItem(posLabel.c_str(), nullptr, tabFlags(Tab::Positions))) {
             if (snap) {
                 renderPositionsTab(controller, *snap, connected);
             } else {
@@ -501,7 +517,7 @@ void DashboardWindow::render(LiveController& controller) {
         }
         const std::string ordLabel =
             "  Pending orders  " + std::to_string(snap ? snap->pendingOrders.size() : 0) + "  ###orders";
-        if (ImGui::BeginTabItem(ordLabel.c_str())) {
+        if (ImGui::BeginTabItem(ordLabel.c_str(), nullptr, tabFlags(Tab::Orders))) {
             if (snap) {
                 renderOrdersTab(controller, *snap, connected);
             } else {
@@ -511,24 +527,25 @@ void DashboardWindow::render(LiveController& controller) {
         }
         const std::string histLabel =
             "  History  " + std::to_string(history_.size()) + "  ###history";
-        if (ImGui::BeginTabItem(histLabel.c_str())) {
+        if (ImGui::BeginTabItem(histLabel.c_str(), nullptr, tabFlags(Tab::History))) {
             renderHistoryTab(controller, snap);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("  Volume  ###volume")) {
+        if (ImGui::BeginTabItem("  Volume  ###volume", nullptr, tabFlags(Tab::Volume))) {
             renderVolumeTab();
             ImGui::EndTabItem();
         }
         const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
-        if (ImGui::BeginTabItem(settingsLabel.c_str())) {
+        if (ImGui::BeginTabItem(settingsLabel.c_str(), nullptr, tabFlags(Tab::Settings))) {
             renderSettingsPanel(controller, snap, connected);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("  Log  ###log")) {
+        if (ImGui::BeginTabItem("  Log  ###log", nullptr, tabFlags(Tab::Log))) {
             renderLogTab(controller);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
+        selectTab_ = Tab::None;
     }
     glass::endCard();
 
@@ -620,20 +637,35 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     glass::endCard();
 }
 
+int DashboardWindow::tabFlags(Tab tab) const {
+    return selectTab_ == tab ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+}
+
 void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bool connected) {
-    constexpr int kCount = 6;
+    constexpr int kCount = 7;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float width = (ImGui::GetContentRegionAvail().x - spacing * (kCount - 1)) / kCount;
     const float numberH = numberFont_ ? numberFont_->FontSize : ImGui::GetTextLineHeight();
     const float height = ImGui::GetTextLineHeight() * 2.0f + numberH + ImGui::GetStyle().WindowPadding.y * 2 + 10.0f;
 
+    // `target`: the tab a click opens (Tab::None = not clickable).
     auto card = [&](const char* id, const char* caption, const std::string& value, ImVec4 valueColor,
-                    const std::string& sub, bool last = false) {
+                    const std::string& sub, Tab target, const char* targetName, bool last = false) {
+        const ImVec2 min = ImGui::GetCursorScreenPos();
         glass::beginCard(id, ImVec2(width, height), false, ImGuiWindowFlags_NoScrollbar);
         ImGui::TextDisabled("%s", caption);
         withFont(numberFont_, [&] { ImGui::TextColored(valueColor, "%s", value.c_str()); });
         if (!sub.empty()) ImGui::TextDisabled("%s", sub.c_str());
         glass::endCard();
+        const ImVec2 max(min.x + width, min.y + height);
+        if (target != Tab::None && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+            ImGui::IsMouseHoveringRect(min, max)) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::GetWindowDrawList()->AddRect(min, max, ImGui::GetColorU32(withAlpha(kBlue, 0.75f)),
+                                                ImGui::GetStyle().ChildRounding, 0, 1.5f);
+            ImGui::SetTooltip("Open %s", targetName);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) selectTab_ = target;
+        }
         if (!last) ImGui::SameLine();
     };
 
@@ -657,21 +689,33 @@ void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bo
         }
     }
     const double shownBooked = glass::ease("kpi_booked", static_cast<float>(allTimeNet), 8.0f);
+    refreshVolume();
+    auto bucket = [](const std::vector<VolumeBucket>& rows, const std::string& key) {
+        for (const auto& r : rows) {
+            if (r.period == key) return r;
+        }
+        return VolumeBucket{};
+    };
+    const VolumeBucket volToday = bucket(volumeRows_[0], nowDay_);
+    const VolumeBucket volMonth = bucket(volumeRows_[2], nowMonth_);
 
     card("k_price", "BID / ASK", haveQuote ? price(*snap->bid) + " / " + price(*snap->ask) : std::string("--"), text,
-         snap ? snap->symbolName : "");
+         snap ? snap->symbolName : "", Tab::None, "");
     card("k_spread", "SPREAD", haveQuote ? price(*snap->ask - *snap->bid) : std::string("--"), text,
-         snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "");
+         snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "", Tab::Settings,
+         "Settings (range width, entry offset)");
     card("k_float", "NET P/L (AFTER COSTS)", connected ? money(shownFloating) : std::string("--"), pnlColor(floating),
-         connected && snap ? "Gross " + money(snap->live.gross) + "  |  costs $" + price(snap->live.costs())
-                           : std::string(""));
+         connected && snap ? "Gross " + money(snap->live.gross) + " | costs $" + price(snap->live.costs())
+                           : std::string(""),
+         Tab::Positions, "Positions");
     card("k_pos", "OPEN POSITIONS", snap ? std::to_string(snap->positions.size()) : std::string("--"), text,
-         snap ? "Buy " + lots(buyLots) + "  /  Sell " + lots(sellLots) : "");
+         snap ? "Buy " + lots(buyLots) + " / Sell " + lots(sellLots) : "", Tab::Positions, "Positions");
     card("k_ord", "PENDING ORDERS", snap ? std::to_string(snap->pendingOrders.size()) : std::string("--"), text,
-         cycleState(snap, connected).label);
+         cycleState(snap, connected).label, Tab::Orders, "Pending orders");
     card("k_real", "BOOKED NET (ALL TIME)", money(shownBooked), pnlColor(allTimeNet),
-         std::to_string(history_.size()) + " baskets  |  today " + money(todayNet),
-         true);
+         std::to_string(history_.size()) + " baskets | today " + money(todayNet), Tab::History, "History");
+    card("k_vol", "VOLUME TODAY", lots(volToday.lots) + " lots", text,
+         "month " + lots(volMonth.lots) + " | all " + lots(volumeTotal_.lots), Tab::Volume, "Volume", true);
 }
 
 void DashboardWindow::renderRangePanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
@@ -923,12 +967,13 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
     const float footer = ImGui::GetFrameHeightWithSpacing() * 1.3f;
-    if (ImGui::BeginTable("positions", 9, flags, ImVec2(0, -footer))) {
+    if (ImGui::BeginTable("positions", 10, flags, ImVec2(0, -footer))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 40.0f);
         ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthFixed, 48.0f);
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Entry");
+        ImGui::TableSetupColumn("Slippage");
         ImGui::TableSetupColumn("Now");
         ImGui::TableSetupColumn("Gross");
         ImGui::TableSetupColumn("Costs");
@@ -953,8 +998,17 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::TextUnformatted(lots(p.lots).c_str());
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(price(p.entryPrice).c_str());
-            if (std::fabs(p.entryPrice - p.requestedPrice) >= 0.005) {
-                ImGui::SetItemTooltip("Requested %.2f, filled %.2f", p.requestedPrice, p.entryPrice);
+            ImGui::TableNextColumn();
+            // Filled vs the order's own price: + = worse (costs money).
+            if (p.adopted) {
+                ImGui::TextDisabled("--");
+                ImGui::SetItemTooltip("Opened before the bot connected: its order price isn't known.");
+            } else if (std::fabs(p.pnl.slippage) < 0.005) {
+                ImGui::TextDisabled("$0.00");
+            } else {
+                ImGui::TextColored(p.pnl.slippage > 0 ? kRed : kGreen, "%s", money(-p.pnl.slippage).c_str());
+                ImGui::SetItemTooltip("Order price %.2f, filled %.2f (%+.2f)", p.requestedPrice, p.entryPrice,
+                                      p.entryPrice - p.requestedPrice);
             }
             ImGui::TableNextColumn();
             if (snap.bid && snap.ask) {
@@ -1007,8 +1061,8 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 84.0f);
         ImGui::TableSetupColumn("Lots");
         ImGui::TableSetupColumn("Price");
-        ImGui::TableSetupColumn("Distance");
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+        ImGui::TableSetupColumn("Distance", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 184.0f);
         ImGui::TableHeadersRow();
 
         for (const auto& o : snap.pendingOrders) {
@@ -1031,16 +1085,32 @@ void DashboardWindow::renderOrdersTab(LiveController& controller, const LiveSnap
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(price(o.price).c_str());
             ImGui::TableNextColumn();
-            if (snap.bid && snap.ask) {
+            const double trigger = snap.bid && snap.ask ? (o.side == OrderSide::BuyStop ? *snap.ask : *snap.bid) : 0.0;
+            if (o.waiting) {
+                ImGui::TextColored(kAmber, "waiting - market is $%.2f past it", std::fabs(o.price - trigger));
+                ImGui::SetItemTooltip(
+                    "Not at the broker yet: the market is already past this price, so the broker would refuse a Stop "
+                    "here.\nIt goes out by itself as soon as the price is back on the right side. 'Place now' "
+                    "sends it at market instead.");
+            } else if (snap.bid && snap.ask) {
                 // How far price still has to travel to trigger it.
-                const double trigger = o.side == OrderSide::BuyStop ? *snap.ask : *snap.bid;
                 ImGui::TextDisabled("$%.2f away", std::fabs(o.price - trigger));
             } else {
                 ImGui::TextDisabled("--");
             }
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!connected);
-            if (glass::button("Cancel", kAmber, ImVec2(-1, 0))) controller.cancelOrder(o.id);
+            const float buttonW = o.waiting ? (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f
+                                            : -1.0f;
+            if (o.waiting) {
+                if (glass::button("Place now", kBlue, ImVec2(buttonW, 0))) {
+                    placeNowId_ = o.id;
+                    confirm_ = Confirm::PlaceNow;
+                    openConfirmRequested_ = true;
+                }
+                ImGui::SameLine();
+            }
+            if (glass::button("Cancel", kAmber, ImVec2(o.waiting ? buttonW : -1.0f, 0))) controller.cancelOrder(o.id);
             ImGui::EndDisabled();
             ImGui::PopID();
         }
@@ -1145,6 +1215,12 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
             detail = "Open positions stay open. The bot stops trading until you open a new range.";
             action = "Cancel all pending";
             break;
+        case Confirm::PlaceNow:
+            title = "Place the waiting order now, at market?";
+            detail = "It opens right away at the current price instead of its Stop price, and the basket\n"
+                     "carries on from that fill. The difference counts as slippage in the basket's P/L.";
+            action = "Place now";
+            break;
         case Confirm::ResetData:
             title = "Start fresh?";
             detail = "The basket history and the log are moved to archive folders next to your config file\n"
@@ -1172,6 +1248,9 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
                 break;
             case Confirm::CancelAllPending:
                 controller.cancelAllPendingOrders();
+                break;
+            case Confirm::PlaceNow:
+                controller.placeWaitingOrderNow(placeNowId_);
                 break;
             case Confirm::ResetData:
                 if (controller.resetData(configPathBuffer_.data())) {
@@ -1530,7 +1609,7 @@ void DashboardWindow::renderVolumeTab() {
 
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
-    if (!ImGui::BeginTable("volume", 11, flags)) return;
+    if (!ImGui::BeginTable("volume", 12, flags)) return;
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn(volumePeriod_ == 0 ? "Day" : (volumePeriod_ == 1 ? "Week" : "Month"),
                             ImGuiTableColumnFlags_WidthStretch, 1.6f);
@@ -1542,6 +1621,7 @@ void DashboardWindow::renderVolumeTab() {
     ImGui::TableSetupColumn("Won lots");
     ImGui::TableSetupColumn("Lost lots");
     ImGui::TableSetupColumn("Commission");
+    ImGui::TableSetupColumn("Slippage");
     ImGui::TableSetupColumn("Net");
     ImGui::TableSetupColumn("Net/lot");
     ImGui::TableHeadersRow();
@@ -1578,6 +1658,13 @@ void DashboardWindow::renderVolumeTab() {
             ImGui::TextColored(kAmber, "-$%.2f", b.commission);
         } else {
             ImGui::TextDisabled("$0.00");
+        }
+        ImGui::TableNextColumn();
+        if (std::fabs(b.slippage) < 0.005) {
+            ImGui::TextDisabled("$0.00");
+        } else {
+            ImGui::TextColored(b.slippage > 0 ? kAmber : kGreen, "%s", money(-b.slippage).c_str());
+            ImGui::SetItemTooltip("Fills vs order prices. Already included in Net (it comes from the real fills).");
         }
         ImGui::TableNextColumn();
         withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });

@@ -80,11 +80,15 @@ FixMessage MockFixServer::waitForMessage(const std::string& msgType, std::size_t
     std::unique_lock lock(receivedMutex_);
     std::optional<FixMessage> found;
     const bool ok = receivedCv_.wait_for(lock, timeout, [&] {
-        for (; searchCursor_ < received_.size(); ++searchCursor_) {
-            if (received_[searchCursor_].connectionIndex == connectionIndex &&
-                received_[searchCursor_].message.msgType() == msgType) {
-                found = received_[searchCursor_].message;
-                ++searchCursor_;
+        // The oldest message of this type on this connection not returned
+        // yet. Messages of other types/connections are left for their own
+        // waits -- a single shared cursor used to skip (and lose) e.g. an
+        // order that arrived on the trade connection just before the quote
+        // subscription the test was waiting for on the quote connection.
+        for (auto& r : received_) {
+            if (!r.consumed && r.connectionIndex == connectionIndex && r.message.msgType() == msgType) {
+                r.consumed = true;
+                found = r.message;
                 return true;
             }
         }

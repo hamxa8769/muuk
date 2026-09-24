@@ -443,3 +443,169 @@ TEST_CASE("The state file round-trips through JSON exactly") {
     newer["version"] = PersistedState::kVersion + 1;
     REQUIRE_THROWS(stateFromJson(newer));
 }
+
+TEST_CASE("A basket found at the broker with no saved state is picked up and its missing next order placed") {
+    const auto stateFile = freshStateFile("adopt_basket");
+    MockFixServer server;
+    Bot bot(resumeConfig(server), stateFile);  // range width $1.00, lots 0.01 + 0.01, Buy first
+    // BUY 0.01 anchored the range at 4337.00, then SELL 0.02 and BUY 0.03 -- and no pending order.
+    (void)handshake(server, {{"P1", true, 0.01, 4337.00}, {"P2", false, 0.02, 4335.98}, {"P3", true, 0.03, 4337.02}},
+                    {});
+    sendQuote(server, 2, 4336.50, 4336.60);
+
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(next.getInt(tag::OrdType) == 3);
+    REQUIRE(next.getInt(tag::Side) == 2);
+    REQUIRE(next.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(next.getDouble(tag::OrderQty) == Catch::Approx(4.0));  // 0.04 lot
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().pendingOrders.size() == 1; }));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.status == EngineStatus::Active);
+    REQUIRE(snap.positions.size() == 3);
+    for (const auto& p : snap.positions) REQUIRE_FALSE(p.adopted);
+    REQUIRE(snap.rangeLower == Catch::Approx(4336.00));
+    REQUIRE(snap.rangeUpper == Catch::Approx(4337.00));
+    REQUIRE(snap.resumeNote.find("Picked up the basket") != std::string::npos);
+    REQUIRE(snap.currentBasket.has_value());
+    REQUIRE(snap.currentBasket->legs.size() == 3);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("A next order the market has already passed waits, and goes out once the price is back") {
+    const auto stateFile = freshStateFile("waiting_order");
+    MockFixServer server;
+    Bot bot(resumeConfig(server), stateFile);
+    (void)handshake(server, {{"P1", true, 0.01, 4337.00}, {"P2", false, 0.02, 4336.00}, {"P3", true, 0.03, 4337.00}},
+                    {});
+    sendQuote(server, 2, 4330.00, 4330.10);  // already far below the Sell Stop's 4336.00
+
+    // Not sent: the broker would refuse a Sell Stop above the bid.
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 600ms), std::runtime_error);
+    LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.status == EngineStatus::Active);
+    REQUIRE(snap.pendingOrders.size() == 1);
+    REQUIRE(snap.pendingOrders[0].waiting);
+    REQUIRE(snap.pendingOrders[0].price == Catch::Approx(4336.00));
+    REQUIRE(snap.resumeNote.find("waits for the price") != std::string::npos);
+
+    sendQuote(server, 3, 4336.40, 4336.50);  // back above it
+    const FixMessage placed = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(placed.getInt(tag::OrdType) == 3);
+    REQUIRE(placed.getInt(tag::Side) == 2);
+    REQUIRE(placed.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(waitUntil([&] {
+        const auto s = bot.runner().snapshot();
+        return s.pendingOrders.size() == 1 && !s.pendingOrders[0].waiting;
+    }));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("placeWaitingOrderNow sends a waiting order at market, and its fill carries the basket on") {
+    const auto stateFile = freshStateFile("waiting_now");
+    MockFixServer server;
+    Bot bot(resumeConfig(server), stateFile);
+    int seq = handshake(server,
+                        {{"P1", true, 0.01, 4337.00}, {"P2", false, 0.02, 4336.00}, {"P3", true, 0.03, 4337.00}}, {});
+    sendQuote(server, 2, 4330.00, 4330.10);
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().pendingOrders.size() == 1; }));
+    const OrderId waitingId = bot.runner().snapshot().pendingOrders[0].id;
+
+    bot.runner().placeWaitingOrderNow(waitingId);
+    const FixMessage market = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(market.getInt(tag::OrdType) == 1);
+    REQUIRE(market.getInt(tag::Side) == 2);
+    REQUIRE(market.getDouble(tag::OrderQty) == Catch::Approx(4.0));
+    REQUIRE_FALSE(market.has(tag::PosMaintRptID));  // opens a new position
+    REQUIRE(market.getString(tag::ClOrdID) == std::to_string(waitingId));
+
+    sendFill(server, seq++, market.getString(tag::ClOrdID), 4330.00, 4.0, "P4");
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(next.getInt(tag::Side) == 1);
+    REQUIRE(next.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+    REQUIRE(next.getDouble(tag::OrderQty) == Catch::Approx(5.0));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 4; }));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Resume: a pending order that vanished from the broker without a fill is placed again") {
+    const auto stateFile = freshStateFile("resume_replace");
+    const FirstRun first = runFirstSession(stateFile);
+
+    MockFixServer server;
+    Bot bot(resumeConfig(server), stateFile);
+    (void)handshake(server, {{"P1", true, 0.01, 4337.00}}, {});  // the Sell Stop is gone, nothing filled
+    sendQuote(server, 2, 4336.50, 4336.60);
+
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::Side) == 2);
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(again.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    REQUIRE(again.getString(tag::ClOrdID) != first.sellId);  // a new ClOrdID
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.status == EngineStatus::Active);
+    REQUIRE(snap.resumeNote.find("Resumed") != std::string::npos);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+namespace {
+void sendOrderEvent(MockFixServer& server, int seq, const std::string& clOrdId, const char* execType,
+                    const char* ordStatus) {
+    FixMessage er = serverHeaderMessage(msgtype::ExecutionReport, seq);
+    er.set(tag::OrderID, "B" + clOrdId);
+    er.set(tag::ClOrdID, clOrdId);
+    er.set(tag::ExecType, std::string(execType));
+    er.set(tag::OrdStatus, std::string(ordStatus));
+    er.set(tag::Text, std::string("test"));
+    server.sendToClient(kTradeConn, er);
+}
+}  // namespace
+
+TEST_CASE("A pending order cancelled outside the bot (broker or cTrader) is placed again") {
+    MockFixServer server;
+    Bot bot(resumeConfig(server), freshStateFile("outside_cancel"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sell = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+
+    sendOrderEvent(server, seq++, sell.getString(tag::ClOrdID), "4", "4");  // cancelled -- not by the bot
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::Side) == 2);
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(again.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    REQUIRE(again.getString(tag::ClOrdID) != sell.getString(tag::ClOrdID));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Watchdog: a running basket left without any pending order gets its next one") {
+    MockFixServer server;
+    Bot bot(resumeConfig(server), freshStateFile("watchdog"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+
+    // The broker rejects the Sell Stop and all 3 retries: the engine gives up on it.
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const FixMessage sell = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+        REQUIRE(sell.getInt(tag::Side) == 2);
+        sendOrderEvent(server, seq++, sell.getString(tag::ClOrdID), "8", "8");
+    }
+    // Within a couple of seconds the watchdog notices and places it again.
+    const FixMessage rearmed = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(rearmed.getInt(tag::Side) == 2);
+    REQUIRE(rearmed.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+
+    bot.finish();
+    bot.rethrow();
+}

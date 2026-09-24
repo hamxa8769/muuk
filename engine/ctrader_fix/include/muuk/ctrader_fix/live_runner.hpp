@@ -74,6 +74,11 @@ struct PendingOrderInfo {
     double lots = 0.0;
     double price = 0.0;
     bool adopted = false;  // already working at the broker when the bot connected, not from a saved basket
+    // Held by the bot, not at the broker yet: the market is already past its
+    // price (a Buy Stop at or below the ask, a Sell Stop at or above the bid),
+    // so the broker would refuse it. It's sent as soon as the price is back
+    // on the right side -- or right away at market with placeWaitingOrderNow().
+    bool waiting = false;
 };
 
 // A point-in-time read of LiveRunner's state, for a UI (or anything else)
@@ -255,6 +260,11 @@ public:
     void closePosition(muuk::core::OrderId id);
     void cancelOrder(muuk::core::OrderId id);
 
+    // Sends a waiting order (see PendingOrderInfo::waiting) right now as a
+    // market order instead of waiting for the price to come back. It then
+    // counts as that order's fill, at whatever price the market gives.
+    void placeWaitingOrderNow(muuk::core::OrderId id);
+
     // Asks the broker for every open position (Request For Positions) and,
     // when the answer arrives, reconciles the tracked positions with it:
     // positions on this symbol that the bot didn't know about (e.g. left
@@ -325,6 +335,24 @@ private:
     // basket can't be overwritten by an empty one). markDirty: flags a change.
     void loadSavedState();
     void reconcileOnConnectLocked();
+    // Positions found at the broker with no saved basket (or only as "old"
+    // ones) that look exactly like one of the bot's baskets -- lots 0.01,
+    // 0.02, 0.03... with alternating sides -- are picked up as a running
+    // basket: range from the first fill, the engine rebuilt, and the next
+    // order armed. false (with the reason) if they don't fit.
+    bool adoptBasketFromBrokerLocked(std::string& why);
+    // Stop orders the market has already passed are held back rather than
+    // sent (the broker would refuse them); this sends the ones that have
+    // become valid. Caller must hold engineMutex_.
+    [[nodiscard]] bool stopIsMarketable(muuk::core::OrderSide side, muuk::core::Price price) const;
+    void sendStopOrderLocked(const OpenLeg& leg, int sequenceIndex);
+    void releaseWaitingOrdersLocked();
+    // Watchdog, run about once a second: a running basket must always
+    // have its next order at the broker (or waiting). An order the engine
+    // counts on that the bot doesn't have is placed again; a basket with
+    // positions and no pending order at all gets its next one. Both are
+    // logged as MISSED. Caller must hold engineMutex_.
+    void checkBasketHealthLocked();
     [[nodiscard]] PersistedState buildStateLocked() const;
     void flushState();
     void markDirty() { stateDirty_ = true; }
@@ -447,6 +475,14 @@ private:
     // instead rejects the cancel (OrderCancelReject) -- the order is still
     // genuinely live in that case.
     std::unordered_map<muuk::core::OrderId, OpenLeg> cancelledOrderInfo_;
+
+    // Orders the engine armed that the bot is holding back because the
+    // market is already past their price -- see PendingOrderInfo::waiting.
+    std::unordered_map<muuk::core::OrderId, OpenLeg> waitingOrders_;
+    int healthRearms_ = 0;
+    // Orders the operator cancelled one by one (cancelOrder): the watchdog
+    // leaves them cancelled.
+    std::unordered_set<muuk::core::OrderId> operatorCancelled_;  // watchdog re-arms since the last fill -- capped, so a rejecting broker isn't spammed
 
     // Closing Market orders sent and still awaiting a fill confirmation,
     // keyed by their ClOrdID, each with the leg it closes -- so the actual

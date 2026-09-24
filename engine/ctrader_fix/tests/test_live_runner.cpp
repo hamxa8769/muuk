@@ -38,6 +38,7 @@ TEST_CASE("LiveRunner resolves the symbol, arms both boundary orders, and re-arm
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     // LiveRunner connects and logs on to both sessions before doing
     // anything else (live_runner.cpp: tradeSession_->start() then
@@ -150,6 +151,7 @@ TEST_CASE("LiveRunner flattens the net position with a market order on basket cl
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -233,9 +235,14 @@ TEST_CASE("LiveRunner flattens the net position with a market order on basket cl
     closeFill.set(tag::LeavesQty, std::string("0"));
     server.sendToClient(kTradeConn, closeFill);
 
+    // Cycle 2 re-arms the same fixed range (no auto-centering here). The
+    // market (4342) is already above its Buy Stop at 4337, which the broker
+    // would refuse -- so that one waits for the price, and only the Sell
+    // Stop goes out.
     const FixMessage cycle2Order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(cycle2Order1.getInt(tag::OrdType) == 3);  // Stop -- back to normal strategy entries
-    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+    REQUIRE(cycle2Order1.getInt(tag::Side) == 2);
+    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4336.00));
 
     for (int i = 0; i < 50; ++i) {
         if (runner.snapshot().status == EngineStatus::Active) break;
@@ -243,6 +250,9 @@ TEST_CASE("LiveRunner flattens the net position with a market order on basket cl
     }
     REQUIRE(runner.snapshot().status == EngineStatus::Active);
     REQUIRE(runner.snapshot().activeOrderCount == 2);
+    const auto cycle2 = runner.snapshot().pendingOrders;
+    REQUIRE(cycle2.size() == 2);
+    REQUIRE(std::count_if(cycle2.begin(), cycle2.end(), [](const PendingOrderInfo& o) { return o.waiting; }) == 1);
 
     runner.stop();
     runnerThread.join();
@@ -271,6 +281,7 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -361,9 +372,11 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     sendFill(9, close3.getString(tag::ClOrdID), "4342.00", "0.03");
 
     // All three legs confirmed flat -> the next cycle starts.
+    // The fixed range's Buy Stop (4337) is below the market (4342) here, so
+    // it waits for the price; the Sell Stop is what goes out first.
     const FixMessage cycle2Order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(cycle2Order1.getInt(tag::OrdType) == 3);
-    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4336.00));
 
     for (int i = 0; i < 50; ++i) {
         if (runner.snapshot().status == EngineStatus::Active) break;
@@ -396,6 +409,7 @@ TEST_CASE("LiveRunner closes a cancelled order's fill immediately if it wins the
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -479,6 +493,7 @@ TEST_CASE("LiveRunner::closePosition and cancelOrder act on a single row without
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -561,6 +576,7 @@ TEST_CASE("LiveRunner snapshot shows every cost and a live net P/L; booked P/L c
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -663,6 +679,7 @@ TEST_CASE("LiveRunner records each closed basket with its position tree, and mea
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -769,6 +786,7 @@ TEST_CASE("LiveRunner never sends a close for a position whose id the broker did
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -822,6 +840,7 @@ TEST_CASE("LiveRunner syncs open positions from the broker on connect and can cl
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -857,6 +876,14 @@ TEST_CASE("LiveRunner syncs open positions from the broker on connect and can cl
     noOrders.set(tag::RefMsgType, std::string("AF"));
     noOrders.set(tag::BusinessRejectRefID, ordReq.getString(tag::MassStatusReqID));
     server.sendToClient(kTradeConn, noOrders);
+    FixMessage tick = serverHeaderMessage(msgtype::MarketDataSnapshotFullRefresh, 2);
+    tick.set(tag::Symbol, std::string("1"));
+    tick.set(tag::NoMDEntries, int64_t{2});
+    tick.set(tag::MDEntryType, std::string("0"));
+    tick.set(tag::MDEntryPx, std::string("4280.00"));
+    tick.set(tag::MDEntryType, std::string("1"));
+    tick.set(tag::MDEntryPx, std::string("4280.10"));
+    server.sendToClient(kQuoteConn, tick);
 
     for (int i = 0; i < 50; ++i) {
         if (runner.snapshot().connected) break;
@@ -905,6 +932,7 @@ TEST_CASE("LiveRunner::openRange/closeRange: one range at a time, never on top o
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1083,6 +1111,7 @@ TEST_CASE("LiveRunner::closeAllPositions closes every open leg and idles the eng
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1148,6 +1177,7 @@ TEST_CASE("LiveRunner::flattenAndWait closes everything and returns only once th
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1235,6 +1265,7 @@ TEST_CASE("LiveRunner::cancelAllPendingOrders cancels every pending order and id
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1286,6 +1317,7 @@ TEST_CASE("LiveRunner waits out connection.basketCooldownSeconds after a basket 
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1367,9 +1399,11 @@ TEST_CASE("LiveRunner waits out connection.basketCooldownSeconds after a basket 
     afterCooldownTick.set(tag::MDEntryPx, std::string("4342.02"));
     server.sendToClient(kQuoteConn, afterCooldownTick);
 
+    // The fixed range's Buy Stop (4337) is below the market (4342) here, so
+    // it waits for the price; the Sell Stop is what goes out first.
     const FixMessage cycle2Order1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(cycle2Order1.getInt(tag::OrdType) == 3);
-    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4337.00));
+    REQUIRE(cycle2Order1.getDouble(tag::StopPx) == Catch::Approx(4336.00));
 
     for (int i = 0; i < 50; ++i) {
         if (runner.snapshot().status == EngineStatus::Active) break;
@@ -1402,6 +1436,7 @@ TEST_CASE("LiveRunner exposes snapshot() and routes status lines through setLogH
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));
@@ -1456,6 +1491,7 @@ TEST_CASE("LiveRunner auto-centers the range on the first live quote when autoRa
             runnerException = std::current_exception();
         }
     });
+    const JoinOnExit joinOnExit{runner, runnerThread};  // a failed REQUIRE must not leave the thread running
 
     (void)server.waitForMessage(msgtype::Logon, kTradeConn);
     server.sendToClient(kTradeConn, serverHeaderMessage(msgtype::Logon, 1));

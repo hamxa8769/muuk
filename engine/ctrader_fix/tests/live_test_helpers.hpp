@@ -5,9 +5,11 @@
 
 #include <cstddef>
 #include <string>
+#include <thread>
 
 #include "muuk/ctrader_fix/fix_message.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
+#include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
 #include "muuk/ctrader_fix/tags.hpp"
 #include "mock_fix_server.hpp"
@@ -79,5 +81,20 @@ inline FixMessage buildSecurityListResponse() {
     return msg;
 }
 
+
+// Stops and joins a test's runner thread however the test ends. Without
+// it, a failed REQUIRE destroys a still-joinable std::thread, which
+// aborts the whole test run instead of reporting the failure.
+struct JoinOnExit {
+    LiveRunner& runner;
+    std::thread& thread;
+    JoinOnExit(LiveRunner& r, std::thread& t) : runner(r), thread(t) {}
+    ~JoinOnExit() {
+        runner.stop();
+        if (thread.joinable()) thread.join();
+    }
+    JoinOnExit(const JoinOnExit&) = delete;
+    JoinOnExit& operator=(const JoinOnExit&) = delete;
+};
 
 }  // namespace muuk::ctrader_fix::test

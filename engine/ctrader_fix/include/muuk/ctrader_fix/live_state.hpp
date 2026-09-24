@@ -41,6 +41,7 @@ struct PersistedState {
     std::vector<PersistedLeg> pendingOrders;    // placed, not filled yet
     std::vector<PersistedLeg> cancellingOrders; // cancel sent, not confirmed yet
     std::vector<PersistedLeg> pendingCloses;    // closing order sent, fill not confirmed yet
+    std::vector<PersistedLeg> waitingOrders;    // held back: the market was already past their price
     bool closeFailed = false;
     std::optional<BasketRecord> currentBasket;
     std::string closeReason;

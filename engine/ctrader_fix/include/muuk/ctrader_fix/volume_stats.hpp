@@ -24,12 +24,19 @@ struct VolumeBucket {
     double gross = 0.0;
     double commission = 0.0;
     double net = 0.0;
+    // Fills vs the Stop prices the orders were placed at, in money: >0 = filled
+    // worse. Already inside gross/net (those come from the real fills).
+    double slippage = 0.0;
 
     // Brokers usually count volume per side: opening and closing each count.
     [[nodiscard]] double sideLots() const { return lots * 2.0; }
     [[nodiscard]] double netPerLot() const { return lots > 0.0 ? net / lots : 0.0; }
     void add(const BasketRecord& basket);
 };
+
+// One position's slippage in money (>0 = filled worse than its order
+// price); 0 when the order price isn't known.
+[[nodiscard]] double legSlippage(const BasketLegRecord& leg, double contractSize);
 
 // The period a "YYYY-MM-DD HH:MM:SS" timestamp falls in. Weeks start on Monday.
 [[nodiscard]] std::string periodKey(const std::string& timestamp, VolumePeriod period);

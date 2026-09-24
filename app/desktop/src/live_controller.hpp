@@ -49,6 +49,7 @@ public:
     void cancelAllPendingOrders();
     void closePosition(muuk::core::OrderId id);
     void cancelOrder(muuk::core::OrderId id);
+    void placeWaitingOrderNow(muuk::core::OrderId id);
     void syncPositions();
 
     // Exit guard (see LiveRunner::flattenAndWait): closes everything and
