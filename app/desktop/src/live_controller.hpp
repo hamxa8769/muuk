@@ -99,7 +99,7 @@ public:
     // Everything is stored next to the config file, so it's all still there
     // the next time the app opens:
     //   muuk_state/<config>.state.json  the running basket + lifetime statistics
-    //   muuk_history/baskets.jsonl      every closed basket (appended as it closes)
+    //   muuk_history/<config>.baskets.jsonl  every closed basket of that account (appended as it closes)
     //   muuk_logs/muuk_live.log         the log, written line by line
     //   muuk_logs/muuk_<time>.log       saved copies (Save logs, and on every disconnect)
     //   muuk_reports/*.pdf              exported reports

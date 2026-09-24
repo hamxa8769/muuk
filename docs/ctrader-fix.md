@@ -192,7 +192,9 @@ broker rejects the cancel, the order goes back on the pending list.
 ## Basket history, reports and logs
 
 Every basket is written, the moment it closes, as one JSON line to
-`muuk_history/baskets.jsonl` next to the config file: start/close time,
+`muuk_history/<config name>.baskets.jsonl` next to the config file, one
+file per account file (an older shared `baskets.jsonl` moves to the first
+account that opens it): start/close time,
 range, close reason, and each position (side, lots, Stop price, real entry
 and exit fills, gross, commission, net, broker position id). The desktop
 app's **History** tab shows them as a tree (basket -> positions), and
@@ -219,6 +221,33 @@ $0.07 / $0.14 / $0.21. Spread is half the current spread per lot, per
 position (a buy exits at the bid, a sell at the ask). The engine's
 profit-target check uses exactly these same figures.
 
+## Lot sizes
+
+`strategy.lotProgression`:
+- `initialLot` + `lotIncrement`: 0.01, 0.02, 0.03... (the default).
+- `lotMultiplier` > 1 instead multiplies: `2` gives 0.01, 0.02, 0.04,
+  0.08, 0.16... (rounded to the 0.01 step).
+- Settings → *Lot mode* switches between the two and previews the
+  sequence, the total lots, and the order at which *Max lot* / *Max
+  orders* stop the basket from adding more.
+- Doubling recovers after a short move once a few orders have filled, but
+  every back-and-forth doubles the loss. With a $2 range: about −$170 at
+  the 8th fill and −$680 at the 10th (before costs). Always pair it with a
+  **Stop loss**.
+
+## Accounts
+
+Settings → *Account* edits the broker login of the current config file:
+account type (demo/live), account number, password, broker UID,
+TargetCompID, price/trade host and port, and symbol.
+- Pasting the SenderCompID from cTrader (`demo.icmarkets.12345678`) fills
+  type, broker and account number.
+- The password is never shown. Leaving it empty keeps the saved one.
+- *Save as new account* creates a new config file with the current strategy
+  settings and switches to it. Each account file has its own state and
+  history.
+- The header shows **DEMO** or **LIVE MONEY** for the file in use.
+
 ## Persistence: the bot picks up where it left off
 
 Nothing is lost when the app closes, the connection drops or the PC
@@ -227,7 +256,7 @@ restarts. Everything lives next to the config file:
 | File | What's in it |
 |---|---|
 | `muuk_state/<config>.state.json` | The running basket: engine state, open positions, pending orders, closes in flight. Also id counters, so no ClOrdID is ever reused, and lifetime statistics (speed totals, basket numbering). Written on every change, atomically. |
-| `muuk_history/baskets.jsonl` | Every closed basket. |
+| `muuk_history/<config>.baskets.jsonl` | Every closed basket of that account. |
 | `muuk_logs/muuk_live.log` | The log, line by line. The app shows its tail again on the next start. |
 | the config file itself | Settings. **Save & apply** writes them there, so they're what the app opens with. |
 | `%APPDATA%\Muuk\desktop.json` | App preferences: last config, theme, *Connect when the app opens*. |

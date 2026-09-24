@@ -8,6 +8,8 @@
 
 #include "muuk/ctrader_fix/basket_history.hpp"
 #include "muuk/ctrader_fix/instance_lock.hpp"
+#include "muuk/ctrader_fix/live_config.hpp"
+#include "muuk/ctrader_fix/live_state.hpp"
 #include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/pdf_writer.hpp"
 #include "muuk/ctrader_fix/session_report.hpp"
@@ -222,4 +224,78 @@ TEST_CASE("InstanceLock: only one holder per config file at a time") {
     first.release();
     muuk::ctrader_fix::InstanceLock third;
     REQUIRE(third.acquire(file));  // free again once released
+}
+
+TEST_CASE("Account settings: read without the password, saved in place or as a new file, validated") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "muuk_account_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path demo = dir / "demo.local.json";
+    {
+        std::ofstream out(demo);
+        out << R"({"connection":{"quote":{"host":"q.example.com","port":"5201"},"trade":{"host":"t.example.com","port":"5202"},
+                  "environment":"demo","brokerUid":"icmarkets","traderLogin":"111","password":"secret","targetCompId":"cServer",
+                  "symbolName":"XAUUSD","symbolId":"41","autoContinue":true},
+                  "strategy":{"symbol":{"name":"XAUUSD","digits":2,"tickSize":0.01,"tickValue":1.0,"contractSize":100.0,
+                  "volumeStep":0.01,"volumeMin":0.01,"volumeMax":100.0},"range":{"lower":4336.0,"upper":4337.0},
+                  "lotProgression":{"initialLot":0.01,"lotIncrement":0.01},"riskLimits":{"maxOrders":20,"maxLot":1.0},
+                  "costs":{"commissionPerLotRoundTurn":0.0},"basketProfitTargetMoney":3.5}})";
+    }
+    muuk::ctrader_fix::AccountSettings a = muuk::ctrader_fix::accountFromConfigFile(demo);
+    REQUIRE(a.traderLogin == "111");
+    REQUIRE(a.quotePort == "5201");
+    REQUIRE(a.password.empty());  // never read back out
+    REQUIRE(a.senderCompId() == "demo.icmarkets.111");
+
+    // Pasting a SenderCompID fills the three parts.
+    REQUIRE(a.setFromSenderCompId("live.icmarkets.222"));
+    REQUIRE(a.environment == "live");
+    REQUIRE(a.brokerUid == "icmarkets");
+    REQUIRE(a.traderLogin == "222");
+    REQUIRE_FALSE(a.setFromSenderCompId("nonsense"));
+
+    // Save as a new account file: strategy settings copied, password required.
+    const fs::path live = dir / "live.local.json";
+    REQUIRE_THROWS(muuk::ctrader_fix::saveAccountSettings(live, a, demo));  // a new account needs its own password
+    REQUIRE_FALSE(fs::exists(live));
+    a.password = "newpass";
+    a.symbolId.clear();
+    muuk::ctrader_fix::saveAccountSettings(live, a, demo);
+    const auto liveCfg = muuk::ctrader_fix::loadLiveConfig(live);
+    REQUIRE(liveCfg.connection.environment == "live");
+    REQUIRE(liveCfg.connection.traderLogin == "222");
+    REQUIRE(liveCfg.connection.password == "newpass");
+    REQUIRE(liveCfg.connection.symbolId.empty());  // a new account file looks the symbol up
+    REQUIRE(liveCfg.connection.autoContinue);      // everything else carried over
+    REQUIRE(liveCfg.strategy.basketProfitTargetMoney == Catch::Approx(3.5));
+
+    // Save in place with an empty password keeps the saved one.
+    muuk::ctrader_fix::AccountSettings same = muuk::ctrader_fix::accountFromConfigFile(demo);
+    same.tradeHost = "t2.example.com";
+    muuk::ctrader_fix::saveAccountSettings(demo, same);
+    const auto demoCfg = muuk::ctrader_fix::loadLiveConfig(demo);
+    REQUIRE(demoCfg.connection.password == "secret");
+    REQUIRE(demoCfg.connection.trade.host == "t2.example.com");
+    REQUIRE(demoCfg.connection.symbolId == "41");  // same symbol: its id is kept
+
+    same.tradePort = "52x2";
+    REQUIRE_THROWS(muuk::ctrader_fix::saveAccountSettings(demo, same));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("History is kept per account file; the old shared file moves to the first account that opens it") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "muuk_history_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "muuk_history");
+    { std::ofstream(dir / "muuk_history" / "baskets.jsonl") << "{}\n"; }
+    const fs::path first = muuk::ctrader_fix::historyFileFor(dir / "demo.local.json");
+    REQUIRE(first.filename() == "demo.local.baskets.jsonl");
+    REQUIRE(fs::exists(first));                                    // took over the old shared file
+    REQUIRE_FALSE(fs::exists(dir / "muuk_history" / "baskets.jsonl"));
+    const fs::path second = muuk::ctrader_fix::historyFileFor(dir / "live.local.json");
+    REQUIRE(second.filename() == "live.local.baskets.jsonl");
+    REQUIRE_FALSE(fs::exists(second));                             // a new account starts empty
+    fs::remove_all(dir);
 }

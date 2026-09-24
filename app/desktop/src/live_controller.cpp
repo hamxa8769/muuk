@@ -74,7 +74,7 @@ bool LiveController::startRunner(const std::string& configPath) {
     runner_->setLogHandler([this](const std::string& line) { appendLog(line); });
     // The running basket survives a disconnect / app restart (see LiveRunner::setStateFile).
     runner_->setStateFile(muuk::ctrader_fix::defaultStateFile(configPath));
-    const std::filesystem::path historyFile = dataDirectory(configPath) / "muuk_history" / "baskets.jsonl";
+    const std::filesystem::path historyFile = muuk::ctrader_fix::historyFileFor(configPath);
     runner_->setBasketHandler([this, historyFile](const muuk::ctrader_fix::BasketRecord& basket) {
         muuk::ctrader_fix::appendBasketHistory(historyFile, basket);  // throws on failure -- LiveRunner logs it
         std::scoped_lock lock(historyMutex_);
@@ -307,10 +307,11 @@ bool LiveController::resetData(const std::string& configPath) {
     const std::filesystem::path dir = dataDirectory(configPath);
     std::error_code ec;
     try {
-        const std::filesystem::path history = dir / "muuk_history" / "baskets.jsonl";
+        const std::filesystem::path history = muuk::ctrader_fix::historyFileFor(configPath);
         if (std::filesystem::exists(history, ec)) {
             std::filesystem::create_directories(dir / "muuk_history" / "archive");
-            std::filesystem::rename(history, dir / "muuk_history" / "archive" / ("baskets_until_" + stamp + ".jsonl"));
+            std::filesystem::rename(history, dir / "muuk_history" / "archive" /
+                                                 (history.stem().string() + "_until_" + stamp + ".jsonl"));
         }
         {
             std::scoped_lock lock(logMutex_);
@@ -379,7 +380,7 @@ std::vector<muuk::ctrader_fix::BasketRecord> LiveController::history() const {
 }
 
 void LiveController::reloadHistory(const std::string& configPath) {
-    auto loaded = muuk::ctrader_fix::loadBasketHistory(dataDirectory(configPath) / "muuk_history" / "baskets.jsonl");
+    auto loaded = muuk::ctrader_fix::loadBasketHistory(muuk::ctrader_fix::historyFileFor(configPath));
     std::scoped_lock lock(historyMutex_);
     history_ = std::move(loaded);
     historyLoadedFor_ = configPath;
@@ -392,7 +393,7 @@ std::optional<std::filesystem::path> LiveController::exportReport(const std::str
         {
             std::scoped_lock lock(historyMutex_);
             if (historyLoadedFor_ != configPath) {
-                history_ = loadBasketHistory(dataDirectory(configPath) / "muuk_history" / "baskets.jsonl");
+                history_ = loadBasketHistory(historyFileFor(configPath));
                 historyLoadedFor_ = configPath;
                 ++historyRevision_;
             }

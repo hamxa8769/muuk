@@ -784,3 +784,32 @@ TEST_CASE("A spread spike never halts a running basket -- its next order still g
     (void)fresh.start();
     REQUIRE(fresh.status() == EngineStatus::HaltedByRisk);
 }
+
+TEST_CASE("Lot multiplier x2: 0.01, 0.02, 0.04, 0.08, 0.16 -- and the basket follows it fill by fill") {
+    const SymbolSpec spec = xauusdSpec();
+    const LotProgressionConfig doubling{Volume::fromDouble(0.01, spec), Volume::fromDouble(0.01, spec), 2.0};
+    const double expected[] = {0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28};
+    for (int n = 1; n <= 8; ++n) {
+        REQUIRE(computeSequenceLot(doubling, n, spec).toDouble(spec) == Catch::Approx(expected[n - 1]));
+    }
+    // Capped at the symbol's max volume instead of overflowing.
+    REQUIRE(computeSequenceLot(doubling, 60, spec).toDouble(spec) == Catch::Approx(spec.volumeMax));
+    // x1.5 rounds to the 0.01 step: 0.02, 0.03, 0.045 -> 0.05 (rounded), ...
+    const LotProgressionConfig x15{Volume::fromDouble(0.02, spec), Volume{0}, 1.5};
+    REQUIRE(computeSequenceLot(x15, 2, spec).toDouble(spec) == Catch::Approx(0.03));
+    // Multiplier 1 keeps the old add-the-increment behaviour.
+    const LotProgressionConfig linear{Volume::fromDouble(0.01, spec), Volume::fromDouble(0.01, spec), 1.0};
+    REQUIRE(computeSequenceLot(linear, 3, spec).toDouble(spec) == Catch::Approx(0.03));
+
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.lotProgression = doubling;
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    PlaceOrderCommand order = placeCmd(engine.start(), 0);
+    for (int n = 1; n <= 5; ++n) {
+        REQUIRE(order.volume.toDouble(spec) == Catch::Approx(expected[n - 1]));
+        REQUIRE(order.side == (n % 2 == 1 ? OrderSide::BuyStop : OrderSide::SellStop));
+        order = placeCmd(engine.onOrderConfirmed(OrderConfirmedEvent{order.id, order.price}), 0);
+    }
+}

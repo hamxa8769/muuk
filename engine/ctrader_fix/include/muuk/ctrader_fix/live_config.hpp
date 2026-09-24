@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #include "muuk/core/strategy_engine.hpp"
@@ -103,6 +104,7 @@ struct LiveSettings {
     double seedOffset = 0.0;     // $ beyond bid/ask for the two seed orders (0 = no seeding)
     double initialLot = 0.01;
     double lotIncrement = 0.01;
+    double lotMultiplier = 1.0;  // > 1: each lot = previous x this (2 -> 0.01, 0.02, 0.04...); 1 = add lotIncrement
     double profitTarget = 1.0;   // basket net P/L ($) that books the basket
     double stopLoss = 0.0;       // basket net loss ($) that closes the basket; 0 = off
     int cooldownSeconds = 0;     // pause after a basket is fully flat
@@ -116,6 +118,40 @@ struct LiveSettings {
 };
 
 [[nodiscard]] LiveSettings settingsFromConfig(const LiveConfig& config);
+
+// The broker login part of a config file, for a UI to show and edit. The
+// password is write-only: it's never read back out (always empty here),
+// and an empty password given to saveAccountSettings keeps the saved one.
+struct AccountSettings {
+    std::string environment = "demo";  // "demo" or "live" -- part of SenderCompID
+    std::string brokerUid;
+    std::string traderLogin;           // account number
+    std::string password;              // write-only, see above
+    std::string targetCompId = "CSERVER";
+    std::string quoteHost;
+    std::string quotePort;
+    std::string tradeHost;
+    std::string tradePort;
+    std::string symbolName = "XAUUSD";
+    std::string symbolId;              // empty = look it up by name on connect
+
+    // cTrader shows the SenderCompID as "<environment>.<brokerUid>.<login>".
+    [[nodiscard]] std::string senderCompId() const { return environment + "." + brokerUid + "." + traderLogin; }
+    // Fills environment/brokerUid/traderLogin from a pasted SenderCompID; false if it doesn't parse.
+    bool setFromSenderCompId(const std::string& senderCompId);
+};
+
+// Throws if the file can't be read or has no connection section.
+[[nodiscard]] AccountSettings accountFromConfigFile(const std::filesystem::path& path);
+
+// Writes `account` into the config file at `path`, leaving everything else
+// in it (strategy settings) as it is. With `copyFrom`, the file is created
+// from that one instead -- "save as a new account file", keeping the
+// strategy settings. Throws std::runtime_error on invalid values (missing
+// login/host, bad port, no password for a new file) or a write failure;
+// written atomically, so a failure never leaves a half-written file.
+void saveAccountSettings(const std::filesystem::path& path, const AccountSettings& account,
+                         const std::optional<std::filesystem::path>& copyFrom = std::nullopt);
 
 // Writes `settings` into `config`. The range keeps its current center;
 // only its width changes (LiveRunner re-centers it on live price when a

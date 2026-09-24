@@ -76,6 +76,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.seedOffset = config.strategy.seedOffsetPoints;
     s.initialLot = config.strategy.lotProgression.initialLot.toDouble(spec);
     s.lotIncrement = config.strategy.lotProgression.lotIncrement.toDouble(spec);
+    s.lotMultiplier = config.strategy.lotProgression.multiplier;
     s.profitTarget = config.strategy.basketProfitTargetMoney;
     s.stopLoss = config.strategy.basketStopLossMoney;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
@@ -100,7 +101,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
 
     st.seedOffsetPoints = s.seedOffset;
     st.lotProgression = LotProgressionConfig{Volume::fromDouble(s.initialLot, spec),
-                                              Volume::fromDouble(s.lotIncrement, spec)};
+                                              Volume::fromDouble(s.lotIncrement, spec), s.lotMultiplier};
     st.basketProfitTargetMoney = s.profitTarget;
     st.basketStopLossMoney = s.stopLoss;
     st.riskLimits.maxOrders = s.maxOrders;
@@ -113,6 +114,113 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     config.connection.basketCooldownSeconds = s.cooldownSeconds;
     config.connection.manualCloseCooldownSeconds = s.manualCloseCooldownSeconds;
     config.connection.autoContinue = s.autoContinue;
+}
+
+bool AccountSettings::setFromSenderCompId(const std::string& id) {
+    const auto first = id.find('.');
+    const auto last = id.rfind('.');
+    if (first == std::string::npos || last == first || last + 1 >= id.size()) return false;
+    environment = id.substr(0, first);
+    brokerUid = id.substr(first + 1, last - first - 1);
+    traderLogin = id.substr(last + 1);
+    return !environment.empty() && !brokerUid.empty() && !traderLogin.empty();
+}
+
+namespace {
+nlohmann::json readJsonFile(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("cannot open config file: " + path.string());
+    nlohmann::json j;
+    in >> j;
+    return j;
+}
+
+void writeJsonFileAtomically(const std::filesystem::path& path, const nlohmann::json& j) {
+    std::filesystem::path tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot write " + tmp.string());
+        out << j.dump(2);
+        out.flush();
+        if (!out) throw std::runtime_error("write failed: " + tmp.string());
+    }
+    std::filesystem::rename(tmp, path);
+}
+
+std::string jsonString(const nlohmann::json& j, const char* key) {
+    if (!j.contains(key)) return {};
+    const auto& v = j.at(key);
+    return v.is_string() ? v.get<std::string>() : v.dump();  // ports may have been written as numbers
+}
+}  // namespace
+
+AccountSettings accountFromConfigFile(const std::filesystem::path& path) {
+    const nlohmann::json j = readJsonFile(path);
+    if (!j.contains("connection")) throw std::runtime_error("no \"connection\" section in " + path.string());
+    const auto& c = j.at("connection");
+    AccountSettings a;
+    a.environment = c.value("environment", std::string("demo"));
+    a.brokerUid = jsonString(c, "brokerUid");
+    a.traderLogin = jsonString(c, "traderLogin");
+    a.targetCompId = c.value("targetCompId", std::string("CSERVER"));
+    if (c.contains("quote")) {
+        a.quoteHost = jsonString(c.at("quote"), "host");
+        a.quotePort = jsonString(c.at("quote"), "port");
+    }
+    if (c.contains("trade")) {
+        a.tradeHost = jsonString(c.at("trade"), "host");
+        a.tradePort = jsonString(c.at("trade"), "port");
+    }
+    a.symbolName = c.value("symbolName", std::string("XAUUSD"));
+    a.symbolId = jsonString(c, "symbolId");
+    return a;  // password deliberately left empty
+}
+
+void saveAccountSettings(const std::filesystem::path& path, const AccountSettings& a,
+                         const std::optional<std::filesystem::path>& copyFrom) {
+    auto require = [](const std::string& v, const char* what) {
+        if (v.empty()) throw std::runtime_error(std::string(what) + " is empty");
+    };
+    auto requirePort = [](const std::string& v, const char* what) {
+        if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos || v.size() > 5) {
+            throw std::runtime_error(std::string(what) + " must be a port number");
+        }
+    };
+    if (a.environment != "demo" && a.environment != "live") throw std::runtime_error("environment must be demo or live");
+    require(a.brokerUid, "Broker UID");
+    require(a.traderLogin, "Account number");
+    require(a.targetCompId, "TargetCompID");
+    require(a.quoteHost, "Price host");
+    require(a.tradeHost, "Trade host");
+    requirePort(a.quotePort, "Price port");
+    requirePort(a.tradePort, "Trade port");
+    require(a.symbolName, "Symbol");
+
+    nlohmann::json j = readJsonFile(copyFrom ? *copyFrom : path);
+    auto& c = j["connection"];
+    const std::string oldPassword = c.contains("password") && c.at("password").is_string()
+                                        ? c.at("password").get<std::string>()
+                                        : std::string();
+    const std::string oldSymbol = c.value("symbolName", std::string());
+    c["environment"] = a.environment;
+    c["brokerUid"] = a.brokerUid;
+    c["traderLogin"] = a.traderLogin;
+    c["targetCompId"] = a.targetCompId;
+    c["quote"] = {{"host", a.quoteHost}, {"port", a.quotePort}};
+    c["trade"] = {{"host", a.tradeHost}, {"port", a.tradePort}};
+    c["symbolName"] = a.symbolName;
+    // A symbol id belongs to one broker's symbol list: keep it only if it was given, or the symbol didn't change.
+    c["symbolId"] = !a.symbolId.empty() ? a.symbolId : (a.symbolName == oldSymbol && !copyFrom ? jsonString(c, "symbolId") : "");
+    if (!a.password.empty()) {
+        c["password"] = a.password;
+    } else if (oldPassword.empty() || copyFrom) {
+        // A new account file never inherits another account's password.
+        throw std::runtime_error("Password is empty");
+    }
+    std::error_code ec;
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
+    writeJsonFileAtomically(path, j);
 }
 
 void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) {
@@ -138,6 +246,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     st["basketStopLossMoney"] = s.stopLoss;
     st["lotProgression"]["initialLot"] = s.initialLot;
     st["lotProgression"]["lotIncrement"] = s.lotIncrement;
+    st["lotProgression"]["lotMultiplier"] = s.lotMultiplier;
     st["riskLimits"]["maxOrders"] = s.maxOrders;
     st["riskLimits"]["maxLot"] = s.maxLot;
     st["riskLimits"]["maxBasketLossMoney"] = s.maxBasketLoss;

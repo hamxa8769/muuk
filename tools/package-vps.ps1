@@ -71,7 +71,10 @@ if ($Config) {
             Write-Warning "Muuk is running here: the copied state may already be out of date. Stop it, then package again."
         }
         $dataDir = Split-Path $cfg -Parent
-        $history = Join-Path (Join-Path $dataDir "muuk_history") "baskets.jsonl"
+        # One history file per account file (older versions shared baskets.jsonl).
+        $stem = [IO.Path]::GetFileNameWithoutExtension($cfg)
+        $history = Join-Path (Join-Path $dataDir "muuk_history") "$stem.baskets.jsonl"
+        if (-not (Test-Path $history)) { $history = Join-Path (Join-Path $dataDir "muuk_history") "baskets.jsonl" }
         if (Test-Path $history) {
             New-Item -ItemType Directory -Force (Join-Path $Out "muuk_history") | Out-Null
             Copy-Item $history (Join-Path $Out "muuk_history") -Force

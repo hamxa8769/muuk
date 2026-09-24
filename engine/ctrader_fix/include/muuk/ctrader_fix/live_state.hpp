@@ -80,5 +80,9 @@ void resetStateStatistics(const std::filesystem::path& file);
 // is in, and in it muuk_state/<config name>.state.json.
 [[nodiscard]] std::filesystem::path dataDirectoryFor(const std::filesystem::path& configPath);
 [[nodiscard]] std::filesystem::path defaultStateFile(const std::filesystem::path& configPath);
+// That config's basket history: muuk_history/<config name>.baskets.jsonl --
+// one per account file, so two accounts' baskets never mix. The first time,
+// an older shared muuk_history/baskets.jsonl is moved here.
+[[nodiscard]] std::filesystem::path historyFileFor(const std::filesystem::path& configPath);
 
 }  // namespace muuk::ctrader_fix

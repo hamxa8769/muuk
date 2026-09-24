@@ -245,6 +245,25 @@ std::filesystem::path dataDirectoryFor(const std::filesystem::path& configPath) 
     return std::filesystem::current_path(ec);
 }
 
+namespace {
+std::string configStem(const std::filesystem::path& configPath) {
+    std::string name = configPath.filename().string();
+    if (name.size() > 5 && name.substr(name.size() - 5) == ".json") name.resize(name.size() - 5);
+    return name.empty() ? std::string("muuk") : name;
+}
+}  // namespace
+
+std::filesystem::path historyFileFor(const std::filesystem::path& configPath) {
+    const std::filesystem::path dir = dataDirectoryFor(configPath) / "muuk_history";
+    const std::filesystem::path file = dir / (configStem(configPath) + ".baskets.jsonl");
+    std::error_code ec;
+    const std::filesystem::path legacy = dir / "baskets.jsonl";
+    if (!std::filesystem::exists(file, ec) && std::filesystem::exists(legacy, ec)) {
+        std::filesystem::rename(legacy, file, ec);  // the shared file of older versions becomes this account's
+    }
+    return file;
+}
+
 std::filesystem::path defaultStateFile(const std::filesystem::path& configPath) {
     std::string name = configPath.filename().string();
     if (name.size() > 5 && name.substr(name.size() - 5) == ".json") name.resize(name.size() - 5);

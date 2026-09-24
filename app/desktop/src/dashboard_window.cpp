@@ -277,6 +277,7 @@ void clampSettings(LiveSettings& s) {
     s.seedOffset = std::max(0.0, s.seedOffset);
     s.initialLot = std::max(0.01, s.initialLot);
     s.lotIncrement = std::max(0.0, s.lotIncrement);
+    s.lotMultiplier = std::clamp(s.lotMultiplier, 1.0, 5.0);
     s.profitTarget = std::max(0.0, s.profitTarget);
     s.stopLoss = std::max(0.0, s.stopLoss);
     s.cooldownSeconds = std::max(0, s.cooldownSeconds);
@@ -478,6 +479,7 @@ void DashboardWindow::render(LiveController& controller) {
         editSettings_ = snap->settings;
         settingsLoaded_ = true;
     }
+    if (accountLoadedFor_ != configPathBuffer_.data()) loadAccountForm(configPathBuffer_.data());
 
     // Basket history: (re)load it from the file next to the config when the
     // path changes (while connected, start() already loaded it), and copy
@@ -583,6 +585,12 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("XAUUSD range bot  |  IC Markets FIX");
     ImGui::SameLine(0.0f, 20.0f);
+    if (account_.loaded) {
+        glass::pill(account_.live ? "LIVE MONEY" : "DEMO", account_.live ? kRed : kBlue);
+        ImGui::SetItemTooltip("Account %s (%s) - change it in Settings > Account.", account_.traderLogin.data(),
+                              account_.live ? "live, real money" : "demo");
+        ImGui::SameLine(0.0f, 10.0f);
+    }
     if (connected) {
         glass::pill("Live", kGreen, true);
     } else if (running) {
@@ -874,6 +882,8 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
 void DashboardWindow::renderSettingsPanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                           bool connected) {
     ImGui::BeginChild("settings_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    renderAccountSection(controller.isRunning());
+    ImGui::Spacing();
     withFont(boldFont_, [] {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Strategy settings");
@@ -916,8 +926,28 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &s.stopLoss, 5.0, "%.2f", &settingsDirty_);
         settingDouble("First lot", "Lot size of the first order in each range.", &s.initialLot, 0.01, "%.2f",
                       &settingsDirty_);
-        settingDouble("Lot increment", "Added to the lot size on every following order (0.01 -> 0.02 -> 0.03...).",
-                      &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Lot mode");
+        ImGui::SetItemTooltip("How each next order's lot grows. Add: first lot + increment each time "
+                              "(0.01, 0.02, 0.03...). Multiply: previous lot x multiplier (x2: 0.01, 0.02, 0.04, "
+                              "0.08...).");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        const char* modes[] = {"Add increment (0.01, 0.02, 0.03...)", "Multiply (0.01, 0.02, 0.04, 0.08...)"};
+        int mode = s.lotMultiplier > 1.0 ? 1 : 0;
+        if (ImGui::Combo("##lotmode", &mode, modes, 2)) {
+            s.lotMultiplier = mode == 1 ? 2.0 : 1.0;
+            settingsDirty_ = true;
+        }
+        if (s.lotMultiplier > 1.0) {
+            settingDouble("Lot multiplier", "Each next order's lot = the previous one x this (2 = double).",
+                          &s.lotMultiplier, 0.1, "%.2f", &settingsDirty_);
+        } else {
+            settingDouble("Lot increment", "Added to the lot size on every following order (0.01 -> 0.02 -> 0.03...).",
+                          &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
+        }
         settingDouble("Entry offset ($)",
                       "How far beyond the current price the first order sits. Its fill sets the range. "
                       "0 = place the first order at the range boundary instead.",
@@ -942,6 +972,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
+    renderLotPreview(editSettings_);
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -1308,6 +1339,51 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
 }
 
 
+void DashboardWindow::renderLotPreview(const LiveSettings& s) {
+    // What the settings will actually place, order by order: lot, total
+    // lots open, and where a limit stops the basket from adding more.
+    const muuk::core::SymbolSpec spec;  // XAUUSD: 0.01 lot steps
+    const muuk::core::LotProgressionConfig lp{muuk::core::Volume::fromDouble(s.initialLot, spec),
+                                              muuk::core::Volume::fromDouble(s.lotIncrement, spec), s.lotMultiplier};
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("Order sizes with these settings"); });
+    std::string line;
+    double total = 0.0;
+    int limitAt = 0;
+    const char* limitWhy = "";
+    for (int n = 1; n <= std::min(s.maxOrders, 16); ++n) {
+        const double lot = muuk::core::computeSequenceLot(lp, n, spec).toDouble(spec);
+        if (lot > s.maxLot + 1e-9) {
+            limitAt = n;
+            limitWhy = "Max lot";
+            break;
+        }
+        total += lot;
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%s%.2f", line.empty() ? "" : "  ", lot);
+        line += buf;
+        if (n == 8 && s.maxOrders > 8) {
+            // Wrap for readability.
+            ImGui::TextUnformatted(line.c_str());
+            line.clear();
+        }
+    }
+    if (!line.empty()) ImGui::TextUnformatted(line.c_str());
+    if (limitAt == 0 && s.maxOrders <= 16) {
+        limitAt = s.maxOrders + 1;
+        limitWhy = "Max orders";
+    }
+    ImGui::TextDisabled("Total open if all of these fill: %.2f lots", total);
+    if (limitAt > 0) {
+        ImGui::TextColored(kAmber, "Order #%d would break %s -- from there the basket adds nothing more%s.", limitAt,
+                           limitWhy, s.stopLoss > 0.0 ? " (the stop loss still closes it)" : ": set a Stop loss");
+    }
+    if (s.lotMultiplier > 1.0 && s.stopLoss <= 0.0) {
+        ImGui::TextColored(kRed, "Multiplying lots without a Stop loss: one long back-and-forth can grow the loss "
+                                 "very fast. Set a Stop loss.");
+    }
+}
+
 void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
     ImGui::Spacing();
     withFont(boldFont_, [] { ImGui::TextUnformatted("System speed"); });
@@ -1387,7 +1463,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
     ImGui::BeginDisabled(controller.isRunning());
     if (glass::button("Reload", glass::palette().neutral)) controller.reloadHistory(configPath);
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Re-reads muuk_history/baskets.jsonl next to the config file.");
+    ImGui::SetItemTooltip("Re-reads this account's history file (muuk_history next to the config file).");
     ImGui::SameLine();
     ImGui::BeginDisabled(configPath.empty());
     if (glass::button("Reset data", kRed)) {
@@ -1446,8 +1522,8 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
 
     if (history_.empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("No closed baskets yet. Each basket is saved here (and to muuk_history/baskets.jsonl next "
-                            "to your config) the moment it closes.");
+        ImGui::TextDisabled("No closed baskets yet. Each basket is saved here (and to muuk_history next to your "
+                            "config, one file per account) the moment it closes.");
     }
 
     // Newest first. Only the most recent ones are listed -- the PDF report
@@ -1907,6 +1983,192 @@ void DashboardWindow::renderPerformanceTab(LiveController& controller, const std
         row("Data folder", LiveController::dataDirectory(configPathBuffer_.data()).string());
         ImGui::EndTable();
     }
+}
+
+
+namespace {
+template <std::size_t N>
+void copyTo(std::array<char, N>& buf, const std::string& s) {
+    const std::size_t n = std::min(s.size(), N - 1);
+    std::copy_n(s.begin(), n, buf.begin());
+    buf[n] = '\0';
+}
+}  // namespace
+
+void DashboardWindow::loadAccountForm(const std::string& configPath) {
+    accountLoadedFor_ = configPath;
+    accountDirty_ = false;
+    accountMessage_.clear();
+    AccountForm f;
+    try {
+        const muuk::ctrader_fix::AccountSettings a = muuk::ctrader_fix::accountFromConfigFile(configPath);
+        f.live = a.environment == "live";
+        copyTo(f.brokerUid, a.brokerUid);
+        copyTo(f.traderLogin, a.traderLogin);
+        copyTo(f.targetCompId, a.targetCompId);
+        copyTo(f.quoteHost, a.quoteHost);
+        copyTo(f.quotePort, a.quotePort);
+        copyTo(f.tradeHost, a.tradeHost);
+        copyTo(f.tradePort, a.tradePort);
+        copyTo(f.symbolName, a.symbolName);
+        copyTo(f.symbolId, a.symbolId);
+        f.loaded = true;
+    } catch (const std::exception&) {
+        f.loaded = false;  // no such file yet / not a config -- the form stays empty
+    }
+    account_ = f;
+}
+
+muuk::ctrader_fix::AccountSettings DashboardWindow::accountFromForm() const {
+    muuk::ctrader_fix::AccountSettings a;
+    a.environment = account_.live ? "live" : "demo";
+    a.brokerUid = account_.brokerUid.data();
+    a.traderLogin = account_.traderLogin.data();
+    a.password = account_.password.data();
+    a.targetCompId = account_.targetCompId.data();
+    a.quoteHost = account_.quoteHost.data();
+    a.quotePort = account_.quotePort.data();
+    a.tradeHost = account_.tradeHost.data();
+    a.tradePort = account_.tradePort.data();
+    a.symbolName = account_.symbolName.data();
+    a.symbolId = account_.symbolId.data();
+    return a;
+}
+
+void DashboardWindow::renderAccountSection(bool running) {
+    ImGui::SetNextItemOpen(!running, ImGuiCond_Appearing);
+    if (!ImGui::CollapsingHeader("Account (broker login)")) return;
+
+    const std::string configPath(configPathBuffer_.data());
+    ImGui::TextDisabled("File: %s", configPath.empty() ? "(none)" : configPath.c_str());
+    if (running) {
+        ImGui::TextColored(kAmber, "Disconnect first to change the account.");
+    }
+    ImGui::BeginDisabled(running);
+
+    // Paste from cTrader: Settings > FIX API shows "SenderCompID" as demo.broker.12345.
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputTextWithHint("##sendercompid", "Paste SenderCompID from cTrader (e.g. demo.icmarkets.12345678)",
+                                 account_.pasteSenderCompId.data(), account_.pasteSenderCompId.size(),
+                                 ImGuiInputTextFlags_EnterReturnsTrue) ||
+        (ImGui::IsItemDeactivatedAfterEdit() && account_.pasteSenderCompId[0] != '\0')) {
+        muuk::ctrader_fix::AccountSettings a = accountFromForm();
+        if (a.setFromSenderCompId(account_.pasteSenderCompId.data())) {
+            account_.live = a.environment == "live";
+            copyTo(account_.brokerUid, a.brokerUid);
+            copyTo(account_.traderLogin, a.traderLogin);
+            accountDirty_ = true;
+            accountMessage_.clear();
+        } else {
+            accountMessage_ = "That doesn't look like a SenderCompID (environment.broker.account).";
+        }
+        account_.pasteSenderCompId[0] = '\0';
+    }
+
+    auto field = [&](const char* label, const char* help, char* buf, std::size_t size, ImGuiInputTextFlags flags = 0,
+                     const char* hint = nullptr) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        if (help) ImGui::SetItemTooltip("%s", help);
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::PushID(label);
+        const bool changed = hint ? ImGui::InputTextWithHint("##v", hint, buf, size, flags)
+                                  : ImGui::InputText("##v", buf, size, flags);
+        if (changed) accountDirty_ = true;
+        ImGui::PopID();
+    };
+
+    if (ImGui::BeginTable("account", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Account type");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        int env = account_.live ? 1 : 0;
+        const char* envs[] = {"Demo", "LIVE (real money)"};
+        if (ImGui::Combo("##env", &env, envs, 2)) {
+            account_.live = env == 1;
+            accountDirty_ = true;
+        }
+        field("Account number", "The trading account / login number (the last part of SenderCompID).",
+              account_.traderLogin.data(), account_.traderLogin.size(), ImGuiInputTextFlags_CharsDecimal);
+        field("Password", "The FIX API password from cTrader (Settings > FIX API). Never shown; leave empty to keep the "
+                          "saved one.",
+              account_.password.data(), account_.password.size(), ImGuiInputTextFlags_Password,
+              "unchanged (leave empty to keep)");
+        field("Broker UID", "The middle part of SenderCompID, e.g. icmarkets.", account_.brokerUid.data(),
+              account_.brokerUid.size());
+        field("TargetCompID", "As shown in cTrader's FIX API settings (often \"cServer\").",
+              account_.targetCompId.data(), account_.targetCompId.size());
+        field("Price host", "Price (quote) connection host.", account_.quoteHost.data(), account_.quoteHost.size());
+        field("Price port", "Price (quote) connection port (plain text port).", account_.quotePort.data(),
+              account_.quotePort.size(), ImGuiInputTextFlags_CharsDecimal);
+        field("Trade host", "Trade connection host.", account_.tradeHost.data(), account_.tradeHost.size());
+        field("Trade port", "Trade connection port (plain text port).", account_.tradePort.data(),
+              account_.tradePort.size(), ImGuiInputTextFlags_CharsDecimal);
+        field("Symbol", "The symbol to trade, as the broker names it.", account_.symbolName.data(),
+              account_.symbolName.size());
+        field("Symbol id", "Optional. Empty = looked up by name when connecting (needed for a new broker).",
+              account_.symbolId.data(), account_.symbolId.size(), ImGuiInputTextFlags_CharsDecimal,
+              "empty = look up by name");
+        ImGui::EndTable();
+    }
+    if (account_.live) {
+        ImGui::TextColored(kRed, "LIVE account: every order uses real money. Set a Stop loss and test on demo first.");
+    }
+
+    const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
+    ImGui::BeginDisabled(!accountDirty_ || configPath.empty());
+    if (glass::button("Save to this file", kBlue, ImVec2(third, 0), glass::ButtonKind::Primary)) {
+        try {
+            muuk::ctrader_fix::saveAccountSettings(configPath, accountFromForm());
+            loadAccountForm(configPath);
+            flash("Account saved to " + configPath + " - press Connect.");
+        } catch (const std::exception& ex) {
+            accountMessage_ = ex.what();
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Replaces the login in the current config file. Its saved basket state stays tied to the old "
+                          "account and is ignored for the new one.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(third);
+    ImGui::InputTextWithHint("##newfile", "new file, e.g. live_account", account_.newFileName.data(),
+                             account_.newFileName.size());
+    ImGui::SameLine();
+    ImGui::BeginDisabled(account_.newFileName[0] == '\0' || configPath.empty());
+    if (glass::button("Save as new account", kViolet, ImVec2(third, 0))) {
+        std::string name = account_.newFileName.data();
+        if (name.size() < 5 || name.substr(name.size() - 5) != ".json") name += ".local.json";
+        const std::filesystem::path target = LiveController::dataDirectory(configPath) / name;
+        std::error_code ec;
+        if (std::filesystem::exists(target, ec)) {
+            accountMessage_ = target.filename().string() + " already exists - pick another name.";
+        } else {
+            try {
+                muuk::ctrader_fix::saveAccountSettings(target, accountFromForm(), std::filesystem::path(configPath));
+                setConfigPath(target.string());
+                loadAccountForm(target.string());
+                flash("New account file " + target.filename().string() +
+                      " created with your strategy settings - press Connect.");
+            } catch (const std::exception& ex) {
+                accountMessage_ = ex.what();
+            }
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Creates a new config file next to this one with these login details and the current strategy "
+                          "settings, and switches to it. Each account file keeps its own history and state. To go back, "
+                          "pick the other file in 'Config file' at the top.");
+    if (!accountMessage_.empty()) ImGui::TextColored(kRed, "%s", accountMessage_.c_str());
+    ImGui::EndDisabled();
+    ImGui::Separator();
 }
 
 }  // namespace muuk::desktop

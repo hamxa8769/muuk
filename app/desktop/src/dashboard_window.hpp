@@ -86,6 +86,10 @@ private:
     void renderHistoryTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void renderSpeed(const muuk::ctrader_fix::LiveSnapshot& snap);
     void renderVolumeTab();
+    void renderLotPreview(const muuk::ctrader_fix::LiveSettings& settings);
+    void renderAccountSection(bool running);
+    void loadAccountForm(const std::string& configPath);
+    [[nodiscard]] muuk::ctrader_fix::AccountSettings accountFromForm() const;
     void renderPerformanceTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void samplePerformance(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void refreshVolume();
@@ -140,6 +144,28 @@ private:
 
     Confirm confirm_ = Confirm::None;
     std::string manualReopenText_;
+
+    // Settings > Account: the broker login of the current config file.
+    struct AccountForm {
+        bool loaded = false;
+        bool live = false;
+        std::array<char, 128> pasteSenderCompId{};
+        std::array<char, 64> brokerUid{};
+        std::array<char, 32> traderLogin{};
+        std::array<char, 128> password{};  // write-only: never filled from the file
+        std::array<char, 64> targetCompId{};
+        std::array<char, 128> quoteHost{};
+        std::array<char, 8> quotePort{};
+        std::array<char, 128> tradeHost{};
+        std::array<char, 8> tradePort{};
+        std::array<char, 32> symbolName{};
+        std::array<char, 16> symbolId{};
+        std::array<char, 96> newFileName{};
+    };
+    AccountForm account_;
+    std::string accountLoadedFor_;
+    bool accountDirty_ = false;
+    std::string accountMessage_;
     bool openConfirmRequested_ = false;
 
     std::string flashMessage_;

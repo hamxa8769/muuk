@@ -30,7 +30,8 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
 
     const auto& lots = j.at("lotProgression");
     cfg.lotProgression = LotProgressionConfig{Volume::fromDouble(lots.at("initialLot").get<double>(), spec),
-                                               Volume::fromDouble(lots.at("lotIncrement").get<double>(), spec)};
+                                               Volume::fromDouble(lots.at("lotIncrement").get<double>(), spec),
+                                               lots.value("lotMultiplier", 1.0)};
 
     if (j.contains("riskLimits")) {
         const auto& risk = j.at("riskLimits");
