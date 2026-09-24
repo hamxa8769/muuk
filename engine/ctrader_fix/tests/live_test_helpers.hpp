@@ -43,6 +43,7 @@ inline LiveConfig testConfig(const MockFixServer& server) {
     cfg.connection.traderLogin = "12345";
     cfg.connection.password = "pass";
     cfg.connection.heartBtIntSeconds = 1;
+    cfg.market.enabled = false;  // tests must not depend on the wall clock (sessions, weekends)
     cfg.connection.symbolName = "XAUUSD";
 
     const SymbolSpec spec = xauusdSpec();

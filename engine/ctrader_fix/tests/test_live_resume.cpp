@@ -944,3 +944,61 @@ TEST_CASE("Broker-exact commission: the target waits for it, and the booked net 
     bot.finish();
     bot.rethrow();
 }
+
+TEST_CASE("Market hours: no new range during a pause (here a news guard); it opens once the pause is gone") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.market.enabled = true;
+    NewsEvent nfp;
+    nfp.utcMs = utcNowMs();  // right now -- whatever the clock, the market is paused (news, break or weekend)
+    nfp.title = "NFP";
+    nfp.manual = true;
+    cfg.market.news.push_back(nfp);
+    Bot bot(cfg, freshStateFile("market_pause"));
+    (void)handshake(server, {}, {});
+    sendQuote(server, 2, 4336.50, 4336.60);
+
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+    const LiveSnapshot paused = bot.runner().snapshot();
+    REQUIRE(paused.marketKnown);
+    REQUIRE_FALSE(paused.market.canOpenRange);
+    REQUIRE(paused.status == EngineStatus::Idle);
+    REQUIRE_FALSE(bot.runner().openRange());  // by hand too
+
+    LiveSettings s = bot.runner().settings();
+    s.market.enabled = false;  // filter off
+    bot.runner().applySettings(s);
+    const FixMessage first = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(first.getInt(tag::Side) == 1);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Auto profit target: a percentage of what the open positions cost, growing with every fill") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 50.0;  // ignored while the auto target is on
+    cfg.strategy.autoProfitTarget = true;
+    cfg.strategy.autoTargetPercent = 100.0;
+    cfg.strategy.costs.commissionPerMillionPerSide = 30.0;
+    Bot bot(cfg, freshStateFile("auto_target"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // Sell Stop
+
+    // 0.01 lot: commission 0.26 + spread 0.10 x 1 oz = 0.10 -> cost 0.36, target 100% = 0.36.
+    sendQuote(server, 2, 4337.20, 4337.30);  // net 0.20 - 0.26 = -0.06
+    REQUIRE(waitUntil([&] {
+        const auto s = bot.runner().snapshot();
+        return s.bid && *s.bid == Catch::Approx(4337.20);
+    }));
+    REQUIRE(bot.runner().snapshot().targetNow == Catch::Approx(0.36));
+    sendQuote(server, 3, 4337.70, 4337.80);  // net 0.70 - 0.26 = 0.44 >= 0.36: booked
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getInt(tag::OrdType) == 1);
+
+    bot.finish();
+    bot.rethrow();
+}

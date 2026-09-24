@@ -24,8 +24,8 @@ const Palette kDarkPalette{
     ImVec4(1.0f, 1.0f, 1.0f, 0.10f),       // cardBorder
     ImVec4(1.0f, 1.0f, 1.0f, 0.24f),       // cardHighlight
     ImVec4(0.0f, 0.0f, 0.0f, 0.12f),       // shadow
-    ImVec4(0.93f, 0.94f, 0.97f, 1.0f),     // text
-    ImVec4(0.58f, 0.62f, 0.71f, 1.0f),     // textDim
+    ImVec4(0.95f, 0.96f, 0.99f, 1.0f),     // text
+    ImVec4(0.72f, 0.76f, 0.84f, 1.0f),     // textDim
     ImVec4(0.75f, 0.80f, 0.95f, 1.0f),     // neutral
 };
 
@@ -39,9 +39,9 @@ const Palette kLightPalette{
     ImVec4(0.25f, 0.30f, 0.55f, 0.13f),
     ImVec4(1.0f, 1.0f, 1.0f, 0.95f),
     ImVec4(0.25f, 0.30f, 0.55f, 0.06f),
-    ImVec4(0.09f, 0.11f, 0.18f, 1.0f),
-    ImVec4(0.38f, 0.42f, 0.52f, 1.0f),
-    ImVec4(0.30f, 0.36f, 0.58f, 1.0f),
+    ImVec4(0.04f, 0.05f, 0.10f, 1.0f),
+    ImVec4(0.24f, 0.27f, 0.36f, 1.0f),
+    ImVec4(0.26f, 0.31f, 0.52f, 1.0f),
 };
 
 constexpr float kCardRounding = 14.0f;
@@ -195,6 +195,23 @@ void setStyleColors(bool dark) {
 void applyTheme(bool dark) {
     g_dark = dark;
     g_palette = dark ? kDarkPalette : kLightPalette;
+    if (dark) {
+        kGreen = ImVec4(0.20f, 0.84f, 0.56f, 1.0f);
+        kRed = ImVec4(1.00f, 0.39f, 0.43f, 1.0f);
+        kBlue = ImVec4(0.45f, 0.66f, 1.00f, 1.0f);
+        kAmber = ImVec4(1.00f, 0.73f, 0.30f, 1.0f);
+        kViolet = ImVec4(0.68f, 0.57f, 1.00f, 1.0f);
+        kGrey = ImVec4(0.66f, 0.70f, 0.78f, 1.0f);
+        kOrange = ImVec4(1.00f, 0.56f, 0.18f, 1.0f);
+    } else {
+        kGreen = ImVec4(0.02f, 0.52f, 0.31f, 1.0f);
+        kRed = ImVec4(0.80f, 0.12f, 0.19f, 1.0f);
+        kBlue = ImVec4(0.12f, 0.34f, 0.82f, 1.0f);
+        kAmber = ImVec4(0.70f, 0.40f, 0.00f, 1.0f);
+        kViolet = ImVec4(0.40f, 0.24f, 0.86f, 1.0f);
+        kGrey = ImVec4(0.33f, 0.37f, 0.45f, 1.0f);
+        kOrange = ImVec4(0.85f, 0.38f, 0.00f, 1.0f);
+    }
 
     ImGuiStyle& st = ImGui::GetStyle();
     st.WindowRounding = 0.0f;
@@ -360,7 +377,8 @@ void balanceBar(const char* id, float value, float negScale, float posScale, con
     const float pos = std::max(posScale, 0.01f);
     // Normalised to [-1, 1]: -1 = full loss side, +1 = target reached.
     const float target = value >= 0.0f ? std::min(value / pos, 1.0f) : std::max(value / neg, -1.0f);
-    const float shown = animate(ImGui::GetID(id), target, 8.0f);
+    const float shown = animate(ImGui::GetID(id), target, 10.0f);
+    const float strength = std::min(1.0f, std::fabs(shown));
 
     const float h = height > 0.0f ? height : ImGui::GetFrameHeight();
     const float w = ImGui::GetContentRegionAvail().x;
@@ -372,12 +390,20 @@ void balanceBar(const char* id, float value, float negScale, float posScale, con
 
     // Track, faintly tinted red on the loss half and green on the profit half.
     dl->AddRectFilled(a, b, col(g_dark ? ImVec4(1, 1, 1, 0.05f) : ImVec4(0, 0, 0, 0.05f)), r);
-    dl->AddRectFilled(a, ImVec2(mid, b.y), col(alpha(kRed, 0.06f)), r, ImDrawFlags_RoundCornersLeft);
-    dl->AddRectFilled(ImVec2(mid, a.y), b, col(alpha(kGreen, 0.06f)), r, ImDrawFlags_RoundCornersRight);
+    // The side the basket is on glows more the further it has gone.
+    const float redTint = 0.05f + (shown < 0.0f ? 0.12f * strength : 0.0f);
+    const float greenTint = 0.05f + (shown > 0.0f ? 0.12f * strength : 0.0f);
+    dl->AddRectFilled(a, ImVec2(mid, b.y), col(alpha(kRed, redTint)), r, ImDrawFlags_RoundCornersLeft);
+    dl->AddRectFilled(ImVec2(mid, a.y), b, col(alpha(kGreen, greenTint)), r, ImDrawFlags_RoundCornersRight);
 
     if (std::fabs(shown) > 0.002f) {
         const bool up = shown > 0.0f;
-        const ImVec4 c = up ? kGreen : kRed;
+        // Near zero the fill is a muted grey-green / grey-red; it turns fully
+        // green / red as the net moves towards the target / the loss limit.
+        const ImVec4 full = up ? kGreen : kRed;
+        const ImVec4 dim = g_palette.textDim;
+        const float k = 0.35f + 0.65f * strength;
+        const ImVec4 c(dim.x + (full.x - dim.x) * k, dim.y + (full.y - dim.y) * k, dim.z + (full.z - dim.z) * k, 1.0f);
         const float edge = mid + shown * (w * 0.5f);
         const ImVec2 fa(up ? mid : edge, a.y);
         const ImVec2 fb(up ? edge : mid, b.y);

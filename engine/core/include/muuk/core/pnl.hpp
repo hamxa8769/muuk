@@ -70,6 +70,9 @@ struct BasketPnlResult {
     double swapMoney = 0.0;
     double slippageMoney = 0.0;
     double netPnlMoney = 0.0;
+    // The profit target in force at this moment: the fixed one, or with the
+    // auto target on, a percentage of what the open positions cost.
+    double targetMoney = 0.0;
 };
 
 [[nodiscard]] BasketPnlResult computeBasketPnl(const BasketPnlInput& input,

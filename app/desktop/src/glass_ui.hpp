@@ -19,13 +19,15 @@ struct Palette {
     ImVec4 neutral;              // tint for plain (non-coloured) buttons
 };
 
-// Accent colours, shared by both themes.
-inline const ImVec4 kGreen(0.20f, 0.84f, 0.56f, 1.0f);
-inline const ImVec4 kRed(1.00f, 0.39f, 0.43f, 1.0f);
-inline const ImVec4 kBlue(0.40f, 0.62f, 1.00f, 1.0f);
-inline const ImVec4 kAmber(1.00f, 0.73f, 0.30f, 1.0f);
-inline const ImVec4 kViolet(0.64f, 0.52f, 1.00f, 1.0f);
-inline const ImVec4 kGrey(0.58f, 0.62f, 0.70f, 1.0f);
+// Accent colours. applyTheme() sets them: bright on the dark theme, deeper
+// on the light one so coloured text stays readable on a pale background.
+inline ImVec4 kGreen(0.20f, 0.84f, 0.56f, 1.0f);
+inline ImVec4 kRed(1.00f, 0.39f, 0.43f, 1.0f);
+inline ImVec4 kBlue(0.40f, 0.62f, 1.00f, 1.0f);
+inline ImVec4 kAmber(1.00f, 0.73f, 0.30f, 1.0f);
+inline ImVec4 kViolet(0.64f, 0.52f, 1.00f, 1.0f);
+inline ImVec4 kGrey(0.58f, 0.62f, 0.70f, 1.0f);
+inline ImVec4 kOrange(1.00f, 0.56f, 0.18f, 1.0f);
 
 // Selects the palette and applies matching ImGui style colours/metrics.
 void applyTheme(bool dark);

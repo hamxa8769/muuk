@@ -24,12 +24,18 @@ using muuk::ctrader_fix::BasketRecord;
 using muuk::ctrader_fix::LatencySummary;
 using muuk::ctrader_fix::LiveSettings;
 using muuk::ctrader_fix::LiveSnapshot;
+using muuk::ctrader_fix::MarketHoursConfig;
+using muuk::ctrader_fix::MarketPhase;
+using muuk::ctrader_fix::MarketStatus;
+using muuk::ctrader_fix::NewsEvent;
+using muuk::ctrader_fix::Session;
 using muuk::ctrader_fix::VolumeBucket;
 using muuk::ctrader_fix::VolumePeriod;
 using glass::kAmber;
 using glass::kBlue;
 using glass::kGreen;
 using glass::kGrey;
+using glass::kOrange;
 using glass::kRed;
 using glass::kViolet;
 
@@ -44,6 +50,63 @@ ImVec4 pnlColor(double v) {
     if (v > 0.005) return kGreen;
     if (v < -0.005) return kRed;
     return kGrey;
+}
+
+// "2h 05m", "12m 30s", "45s", "3d 4h".
+std::string countdown(int64_t ms) {
+    if (ms <= 0) return "now";
+    const long long s = ms / 1000;
+    char buf[32];
+    if (s >= 86400) {
+        std::snprintf(buf, sizeof(buf), "%lldd %lldh", s / 86400, (s % 86400) / 3600);
+    } else if (s >= 3600) {
+        std::snprintf(buf, sizeof(buf), "%lldh %02lldm", s / 3600, (s % 3600) / 60);
+    } else if (s >= 60) {
+        std::snprintf(buf, sizeof(buf), "%lldm %02llds", s / 60, s % 60);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%llds", s);
+    }
+    return buf;
+}
+
+// ForexFactory's folder colours.
+ImVec4 impactColor(const std::string& impact) {
+    if (impact == "High") return kRed;
+    if (impact == "Medium") return kOrange;
+    if (impact == "Low") return glass::isDark() ? ImVec4(0.95f, 0.85f, 0.30f, 1.0f) : ImVec4(0.62f, 0.52f, 0.00f, 1.0f);
+    return kGrey;
+}
+
+ImVec4 phaseColor(MarketPhase p) {
+    switch (p) {
+        case MarketPhase::Open: return kGreen;
+        case MarketPhase::SessionPause: return kAmber;
+        case MarketPhase::NewsPause: return kRed;
+        case MarketPhase::OffHours: return kGrey;
+        case MarketPhase::DailyBreak:
+        case MarketPhase::Weekend: return kViolet;
+    }
+    return kGrey;
+}
+
+// A small gear icon button (drawn -- the UI font has no gear glyph).
+bool gearButton(const char* id, float size) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f);
+    const ImU32 color = ImGui::GetColorU32(hovered ? glass::palette().text : glass::palette().textDim);
+    const float r = size * 0.24f;
+    for (int i = 0; i < 8; ++i) {
+        const float a = static_cast<float>(i) * 3.14159265f / 4.0f;
+        const ImVec2 d(std::cos(a), std::sin(a));
+        dl->AddLine(ImVec2(c.x + d.x * r * 0.9f, c.y + d.y * r * 0.9f), ImVec2(c.x + d.x * r * 1.6f, c.y + d.y * r * 1.6f),
+                    color, size * 0.13f);
+    }
+    dl->AddCircle(c, r, color, 16, size * 0.12f);
+    dl->AddCircleFilled(c, r * 0.35f, color, 12);
+    return pressed;
 }
 
 std::string money(double v) {
@@ -96,6 +159,10 @@ CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (snap->closeFailed) return {"Close failed - needs attention", kRed};
     if (snap->closingInProgress) return {"Closing basket", kAmber};
     if (snap->cooldownRemainingSeconds > 0) return {"Cooldown", kBlue};
+    if (snap->marketKnown && !snap->market.canOpenRange &&
+        (snap->status == EngineStatus::Idle || snap->status == EngineStatus::Completed)) {
+        return {snap->market.label.c_str(), phaseColor(snap->market.phase)};
+    }
     switch (snap->status) {
         case EngineStatus::Active:
             return snap->seeding ? CycleState{"Waiting for first fill", kAmber} : CycleState{"Range active", kGreen};
@@ -121,6 +188,11 @@ const char* openRangeBlocker(const std::optional<LiveSnapshot>& snap, bool conne
     if (snap->closingInProgress) return "Previous basket is still closing.";
     if (!snap->positions.empty()) return "Previous range still has open positions.";
     if (!snap->pendingOrders.empty()) return "Previous range still has pending orders.";
+    if (snap->marketKnown && !snap->market.canOpenRange) {
+        static std::string why;
+        why = snap->market.label + " - " + snap->market.detail + " (Settings > Market hours & news)";
+        return why.c_str();
+    }
     return nullptr;
 }
 
@@ -215,6 +287,54 @@ void drawRangeChart(const LiveSnapshot& snap, float height) {
         dl->AddText(ImVec2(std::min(right - hiW, hiX), labelY), dim, hiText.c_str());
     }
 
+    // Which boundary is which, and how far each side has got.
+    {
+        const ImU32 green = ImGui::GetColorU32(kGreen);
+        const ImU32 red = ImGui::GetColorU32(kRed);
+        if (snap.rangeUpper > snap.rangeLower) {
+            const float x0 = xOf(snap.rangeLower);
+            const float x1 = xOf(snap.rangeUpper);
+            const char* buyText = "BUY STOP";
+            const char* sellText = "SELL STOP";
+            const float bw = ImGui::CalcTextSize(buyText).x;
+            const float sw = ImGui::CalcTextSize(sellText).x;
+            float bx = x1 + 11.0f;
+            if (bx + bw > right) bx = x1 - 11.0f - bw;
+            float sx = x0 - 11.0f - sw;
+            if (sx < left) sx = x0 + 11.0f;
+            const float y = trackY - 17.0f - textH;
+            dl->AddText(ImVec2(bx, y), green, buyText);
+            dl->AddText(ImVec2(sx, y), red, sellText);
+        }
+        int buys = 0;
+        int sells = 0;
+        double buyLots = 0.0;
+        double sellLots = 0.0;
+        for (const auto& p : snap.positions) {
+            if (p.side == OrderSide::BuyStop) {
+                ++buys;
+                buyLots += p.lots;
+            } else {
+                ++sells;
+                sellLots += p.lots;
+            }
+        }
+        std::string buyPending;
+        std::string sellPending;
+        for (const auto& o : snap.pendingOrders) {
+            (o.side == OrderSide::BuyStop ? buyPending : sellPending) =
+                "  |  pending " + lots(o.lots) + (o.waiting ? " (held)" : "");
+        }
+        const std::string sellLine = "Sell: " + std::to_string(sells) + " filled, " + lots(sellLots) + " lots" + sellPending;
+        const std::string buyLine = "Buy: " + std::to_string(buys) + " filled, " + lots(buyLots) + " lots" + buyPending;
+        const float rowY = trackY + 30.0f + textH + 6.0f;
+        const float sellW = ImGui::CalcTextSize(sellLine.c_str()).x;
+        const float buyW = ImGui::CalcTextSize(buyLine.c_str()).x;
+        dl->AddText(ImVec2(left, rowY), red, sellLine.c_str());
+        const float buyY = left + sellW + 16.0f > right - buyW ? rowY + textH + 3.0f : rowY;
+        dl->AddText(ImVec2(right - buyW, buyY), green, buyLine.c_str());
+    }
+
     for (const auto& o : snap.pendingOrders) {
         const float x = xOf(o.price);
         if (o.side == OrderSide::BuyStop) {
@@ -287,6 +407,11 @@ void clampSettings(LiveSettings& s) {
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
     s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
+    s.autoTargetPercent = std::clamp(s.autoTargetPercent, 1, 1000);
+    s.market.pauseMinutesBefore = std::clamp(s.market.pauseMinutesBefore, 0, 240);
+    s.market.pauseMinutesAfter = std::clamp(s.market.pauseMinutesAfter, 0, 240);
+    s.market.newsMinutesBefore = std::clamp(s.market.newsMinutesBefore, 0, 240);
+    s.market.newsMinutesAfter = std::clamp(s.market.newsMinutesAfter, 0, 240);
 }
 
 
@@ -462,6 +587,10 @@ void DashboardWindow::render(LiveController& controller) {
                      ImGuiWindowFlags_NoScrollbar);
 
     glass::setLowPower(liteMode());
+    if (!newsStarted_) {
+        controller.startNews(prefsFile().parent_path() / "news_calendar.json");
+        newsStarted_ = true;
+    }
     controller.setAutoReconnect(prefs_.autoReconnect);
     controller.tick();  // reconnects a dropped connection when it's time
     const bool running = controller.isRunning();
@@ -539,6 +668,18 @@ void DashboardWindow::render(LiveController& controller) {
         if (ImGui::BeginTabItem(histLabel.c_str(), nullptr, tabFlags(Tab::History))) {
             renderHistoryTab(controller, snap);
             ImGui::EndTabItem();
+        }
+        {
+            const MarketStatus m = currentMarket(controller, snap, connected);
+            const bool newsNow = m.phase == MarketPhase::NewsPause;
+            if (newsNow) ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            const bool open = ImGui::BeginTabItem(newsNow ? "  News - guard ON  ###news" : "  News  ###news", nullptr,
+                                                  tabFlags(Tab::News));
+            if (newsNow) ImGui::PopStyleColor();
+            if (open) {
+                renderNewsTab(controller, snap, connected);
+                ImGui::EndTabItem();
+            }
         }
         if (ImGui::BeginTabItem("  Volume  ###volume", nullptr, tabFlags(Tab::Volume))) {
             renderVolumeTab();
@@ -683,6 +824,7 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
         ImGui::SameLine();
         if (ImGui::SmallButton("OK")) dismissedResumeNote_ = snap->resumeNote;
     }
+    renderMarketStrip(controller, controller.snapshot(), connected);
     glass::endCard();
 }
 
@@ -785,7 +927,7 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::TextColored(kBlue, "%ds", snap->cooldownRemainingSeconds);
     }
 
-    const float chartHeight = ImGui::GetTextLineHeight() * 2.0f + 72.0f;
+    const float chartHeight = ImGui::GetTextLineHeight() * 4.0f + 82.0f;
     if (snap && connected) {
         drawRangeChart(*snap, chartHeight);
     } else {
@@ -837,17 +979,7 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                               "(bid for buys, ask for sells) -- slippage and spread are already inside it.");
     }
 
-    if (snap && connected && snap->settings.profitTarget > 0.0) {
-        const double net = floatingPnl(*snap);
-        const double lossScale =
-            snap->settings.maxBasketLoss > 0.0 ? snap->settings.maxBasketLoss : snap->settings.profitTarget;
-        const std::string overlay = money(net) + " net   |   target " + money(snap->settings.profitTarget);
-        glass::balanceBar("target_bar", static_cast<float>(net), static_cast<float>(lossScale),
-                          static_cast<float>(snap->settings.profitTarget), overlay.c_str());
-        ImGui::SetItemTooltip("Green grows to the right towards the profit target; red grows to the left while the "
-                              "basket is in loss (full at %s).",
-                              snap->settings.maxBasketLoss > 0.0 ? "your max basket loss" : "the same size as the target");
-    }
+    if (snap && connected) renderTargetBar(controller, *snap, connected);
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -931,8 +1063,8 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::SameLine();
         glass::pill("edited", kAmber);
     }
-    ImGui::TextDisabled("Saved to your config file, so the app always opens with them. They apply from the next "
-                        "range - never to a running one.");
+    ImGui::TextDisabled("Saved to your config file, so the app always opens with them. Range and lots apply from "
+                        "the next range; profit target, stop loss and market hours at once.");
 
     ImGui::BeginDisabled(!settingsLoaded_);
     if (ImGui::BeginTable("settings", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -1020,6 +1152,9 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     }
     ImGui::EndDisabled();
     renderLotPreview(editSettings_, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
+    ImGui::BeginDisabled(!settingsLoaded_);
+    renderMarketSettings();
+    ImGui::EndDisabled();
 
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -1148,9 +1283,10 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
             ImGui::TableNextColumn();
             ImGui::TextColored(p.pnl.commission > 0.005 ? kAmber : glass::palette().textDim, "%s",
                                money(-p.pnl.commission).c_str());
-            ImGui::SetItemTooltip("Open + close for %.2f lot filled at %.2f, at your Settings rate -- the same as "
-                                  "this position's Commission in cTrader.",
-                                  p.lots, p.entryPrice);
+            ImGui::SetItemTooltip("Opening %s + closing %s = %s for %.2f lot filled at %.2f (Settings rate).\n"
+                                  "The same as this position's Commission in cTrader.",
+                                  money(p.pnl.commission / 2.0).c_str(), money(p.pnl.commission / 2.0).c_str(),
+                                  money(p.pnl.commission).c_str(), p.lots, p.entryPrice);
             ImGui::TableNextColumn();
             withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(p.pnl.net), "%s", money(p.pnl.net).c_str()); });
             ImGui::TableNextColumn();
@@ -1634,6 +1770,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
                             n > 0 ? 100.0 * target / n : 0.0, money(deepest).c_str(), n > 0 ? fillsTotal / n : 0.0,
                             missed);
     }
+    renderSessionStats();
     if (snap) {
         ImGui::TextDisabled("This session (since %s): %zu basket(s), booked net %s",
                             snap->sessionStartedAt.empty() ? "--" : snap->sessionStartedAt.c_str(),
@@ -2328,6 +2465,517 @@ void DashboardWindow::renderAccountSection(bool running) {
     if (!accountMessage_.empty()) ImGui::TextColored(kRed, "%s", accountMessage_.c_str());
     ImGui::EndDisabled();
     ImGui::Separator();
+}
+
+
+// ---------------------------------------------------------------------------
+// Market hours, news, auto target
+
+MarketStatus DashboardWindow::currentMarket(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                            bool connected) {
+    if (connected && snap && snap->marketKnown) return snap->market;
+    const double now = ImGui::GetTime();
+    if (now - uiMarketAt_ < 1.0) return uiMarket_;
+    const MarketHoursConfig& cfg = editSettings_.market;
+    const std::string key = muuk::ctrader_fix::marketHoursToJson(cfg).dump();
+    std::vector<NewsEvent> feed;
+    if (const auto news = controller.news()) {
+        for (auto& e : news->events()) {
+            if (muuk::ctrader_fix::newsIsGuarded(e, cfg)) feed.push_back(std::move(e));
+        }
+    }
+    const int64_t ms = muuk::ctrader_fix::utcNowMs();
+    const bool full = key != uiMarketKey_ || now - uiMarketFullAt_ >= 60.0 ||
+                      (uiMarket_.nextChangeUtcMs > 0 && ms >= uiMarket_.nextChangeUtcMs);
+    MarketStatus st = muuk::ctrader_fix::evaluateMarket(ms, cfg, &feed, full);
+    if (full) {
+        uiMarketFullAt_ = now;
+    } else {
+        st.nextChangeUtcMs = uiMarket_.nextChangeUtcMs;
+        st.nextChangeLabel = uiMarket_.nextChangeLabel;
+        st.hasNextNews = uiMarket_.hasNextNews;
+        st.nextNews = uiMarket_.nextNews;
+    }
+    uiMarket_ = std::move(st);
+    uiMarketAt_ = now;
+    uiMarketKey_ = key;
+    return uiMarket_;
+}
+
+void DashboardWindow::quickApply(LiveController& controller, const std::optional<LiveSnapshot>& snap, bool connected,
+                                 const std::function<void(LiveSettings&)>& change) {
+    LiveSettings s = connected && snap ? snap->settings : editSettings_;
+    change(s);
+    clampSettings(s);
+    if (connected) controller.applySettings(s);
+    if (configPathBuffer_[0] != '\0') (void)controller.saveSettings(configPathBuffer_.data(), s);
+    change(editSettings_);  // the editor shows it too; other unsaved edits stay
+    uiMarketAt_ = -1000.0;  // re-evaluate the market straight away
+}
+
+void DashboardWindow::renderMarketStrip(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                        bool connected) {
+    const MarketStatus m = currentMarket(controller, snap, connected);
+    const LiveSettings& s = connected && snap ? snap->settings : editSettings_;
+    const int64_t now = muuk::ctrader_fix::utcNowMs();
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Session");
+    ImGui::SameLine();
+    glass::pill(m.sessionLabel.c_str(), m.marketOpen ? kBlue : kGrey);
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::TextUnformatted("Trading sessions in your time (daylight saving included):");
+        for (int i = 0; i < muuk::ctrader_fix::kSessionCount; ++i) {
+            const auto w = muuk::ctrader_fix::sessionWindow(static_cast<Session>(i), now);
+            ImGui::Text("%-9s %s - %s%s", muuk::ctrader_fix::sessionName(static_cast<Session>(i)),
+                        muuk::ctrader_fix::formatLocalDateTime(w.openUtcMs).c_str(),
+                        muuk::ctrader_fix::formatLocalDateTime(w.closeUtcMs).substr(11).c_str(),
+                        w.openNow ? "   (open now)" : "");
+        }
+        ImGui::TextDisabled("Gold: Sunday 18:00 to Friday 17:00 New York time, daily break 17:00-18:00.");
+        ImGui::EndTooltip();
+    }
+
+    ImGui::SameLine(0.0f, 14.0f);
+    ImGui::TextDisabled("Market");
+    ImGui::SameLine();
+    std::string label = m.label;
+    if (!s.market.enabled) label = m.marketOpen ? "Filter off" : m.label + " (filter off)";
+    glass::pill(label.c_str(), s.market.enabled ? phaseColor(m.phase) : kGrey,
+                m.phase == MarketPhase::NewsPause && s.market.enabled);
+    ImGui::SetItemTooltip("%s%s", m.detail.c_str(),
+                          s.market.enabled ? "\nA running range keeps being managed; only new ranges wait."
+                                           : "\nMarket hours filter is off (Settings > Market hours & news).");
+    if (s.market.enabled && m.nextChangeUtcMs > 0) {
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        const int64_t left = m.nextChangeUtcMs - now;
+        const bool soon = m.canOpenRange && left < 15 * 60'000;
+        ImGui::TextColored(soon ? kAmber : glass::palette().textDim, "%s in %s", m.nextChangeLabel.c_str(),
+                           countdown(left).c_str());
+        ImGui::SetItemTooltip("At %s (your time).", muuk::ctrader_fix::formatLocalDateTime(m.nextChangeUtcMs).c_str());
+    }
+
+    ImGui::SameLine(0.0f, 18.0f);
+    bool guard = s.market.newsGuard;
+    if (ImGui::Checkbox("News guard", &guard)) {
+        quickApply(controller, snap, connected, [guard](LiveSettings& x) { x.market.newsGuard = guard; });
+    }
+    ImGui::SetItemTooltip("On: no new range from %d min before to %d min after %s%s news for %s (ForexFactory "
+                          "calendar). Off: news is ignored.",
+                          s.market.newsMinutesBefore, s.market.newsMinutesAfter, s.market.newsHigh ? "red" : "",
+                          s.market.newsMedium ? (s.market.newsHigh ? " and orange" : "orange") : "",
+                          s.market.newsCurrencies.c_str());
+    ImGui::SameLine();
+    if (!guard) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(kAmber, "news ignored");
+    } else if (m.hasNextNews) {
+        const NewsEvent& n = m.nextNews;
+        const int64_t to = n.utcMs - now;
+        const bool inWindow = m.phase == MarketPhase::NewsPause;
+        const std::string text = std::string(inWindow ? "NEWS NOW: " : "") + (n.currency.empty() ? "" : n.currency + " ") +
+                                 n.title + (to > 0 ? "  in " + countdown(to) : "  " + countdown(-to) + " ago");
+        glass::pill(text.c_str(), impactColor(n.impact), inWindow);
+        if (ImGui::IsItemClicked()) selectTab_ = Tab::News;
+        ImGui::SetItemTooltip("%s impact, %s (your time)%s%s%s%s\nNew ranges pause %d min before to %d min after. "
+                              "Click for the News tab.",
+                              n.impact.c_str(), muuk::ctrader_fix::formatLocalDateTime(n.utcMs).c_str(),
+                              n.forecast.empty() ? "" : "\nForecast ", n.forecast.c_str(),
+                              n.previous.empty() ? "" : "   Previous ", n.previous.c_str(), s.market.newsMinutesBefore,
+                              s.market.newsMinutesAfter);
+    } else {
+        ImGui::AlignTextToFramePadding();
+        const auto news = controller.news();
+        const auto st = news ? news->status() : muuk::ctrader_fix::NewsFeed::Status{};
+        if (!st.loaded) {
+            ImGui::TextColored(st.error.empty() ? glass::palette().textDim : kAmber, "%s",
+                               st.error.empty() ? "loading ForexFactory calendar..." : st.error.c_str());
+        } else {
+            ImGui::TextDisabled("no guarded news ahead this week");
+        }
+    }
+}
+
+void DashboardWindow::renderNewsTab(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                    bool connected) {
+    const auto feed = controller.news();
+    const LiveSettings& s = connected && snap ? snap->settings : editSettings_;
+    const MarketHoursConfig& mc = s.market;
+    const int64_t now = muuk::ctrader_fix::utcNowMs();
+
+    bool guard = mc.newsGuard;
+    if (ImGui::Checkbox("News guard", &guard)) {
+        quickApply(controller, snap, connected, [guard](LiveSettings& x) { x.market.newsGuard = guard; });
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    if (guard) {
+        ImGui::TextDisabled("No new range from %d min before to %d min after %s%s%s news for %s. A running range keeps "
+                            "being managed.",
+                            mc.newsMinutesBefore, mc.newsMinutesAfter, mc.newsHigh ? "red" : "",
+                            mc.newsHigh && mc.newsMedium ? " + " : "", mc.newsMedium ? "orange" : "",
+                            mc.newsCurrencies.c_str());
+    } else {
+        ImGui::TextColored(kAmber, "Off: the bot trades straight through the news.");
+    }
+
+    const auto st = feed ? feed->status() : muuk::ctrader_fix::NewsFeed::Status{};
+    ImGui::AlignTextToFramePadding();
+    if (st.loaded) {
+        ImGui::TextDisabled("ForexFactory calendar: %zu events this week%s%s", st.events,
+                            st.updatedAt.empty() ? "" : ", downloaded ", st.updatedAt.c_str());
+    } else {
+        ImGui::TextDisabled("ForexFactory calendar: not loaded yet");
+    }
+    if (!st.error.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(kAmber, "(%s)", st.error.c_str());
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!feed);
+    if (ImGui::SmallButton("Refresh")) feed->refreshNow();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Downloads the calendar again (ForexFactory allows it at most every 5 minutes; it's "
+                          "refreshed by itself every hour).");
+    ImGui::SameLine(0.0f, 20.0f);
+    ImGui::Checkbox("USD only", &newsUsdOnly_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Hide low impact", &newsHideLow_);
+
+    std::vector<NewsEvent> events = feed ? feed->events() : std::vector<NewsEvent>{};
+    for (const auto& n : mc.news) events.push_back(n);
+    std::sort(events.begin(), events.end(), [](const NewsEvent& a, const NewsEvent& b) { return a.utcMs < b.utcMs; });
+
+    const float formHeight = ImGui::GetFrameHeightWithSpacing() * 2.6f;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
+    if (ImGui::BeginTable("news", 8, flags, ImVec2(0, -formHeight))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Time (yours)", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+        ImGui::TableSetupColumn("In", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+        ImGui::TableSetupColumn("Cur", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+        ImGui::TableSetupColumn("Impact", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Event", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+        ImGui::TableSetupColumn("Forecast", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Previous", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Guard", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+        ImGui::TableHeadersRow();
+        int shown = 0;
+        int index = 0;
+        for (const auto& n : events) {
+            ++index;
+            if (n.utcMs < now - 2 * 3'600'000) continue;  // earlier today and before: gone
+            if (!n.manual && newsUsdOnly_ && n.currency != "USD") continue;
+            if (!n.manual && newsHideLow_ && n.impact != "High" && n.impact != "Medium") continue;
+            ++shown;
+            const bool guarded = mc.newsGuard && muuk::ctrader_fix::newsIsGuarded(n, mc);
+            const bool inWindow = guarded && now >= n.utcMs - mc.newsMinutesBefore * 60'000LL &&
+                                  now < n.utcMs + mc.newsMinutesAfter * 60'000LL;
+            const bool past = n.utcMs <= now;
+            ImGui::PushID(index);
+            ImGui::TableNextRow();
+            if (inWindow) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(withAlpha(kRed, 0.14f)));
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            const std::string when = muuk::ctrader_fix::formatLocalDateTime(n.utcMs);
+            if (past) {
+                ImGui::TextDisabled("%s", when.substr(5).c_str());
+            } else {
+                ImGui::TextUnformatted(when.substr(5).c_str());
+            }
+            ImGui::TableNextColumn();
+            if (inWindow) {
+                ImGui::TextColored(kRed, "%s", past ? "GUARD" : ("NOW " + countdown(n.utcMs - now)).c_str());
+            } else if (past) {
+                ImGui::TextDisabled("done");
+            } else {
+                const bool soon = n.utcMs - now < 60 * 60'000;
+                ImGui::TextColored(soon ? impactColor(n.impact) : glass::palette().text, "%s",
+                                   countdown(n.utcMs - now).c_str());
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(n.currency.empty() ? "-" : n.currency.c_str());
+            ImGui::TableNextColumn();
+            {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float h = ImGui::GetTextLineHeight();
+                ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(p.x + 5.0f, p.y + h * 0.5f + 1.0f), 5.0f,
+                                                            ImGui::GetColorU32(impactColor(n.impact)), 12);
+                ImGui::Dummy(ImVec2(13.0f, h));
+                ImGui::SameLine(0.0f, 2.0f);
+                ImGui::TextColored(impactColor(n.impact), "%s", n.impact.empty() ? "-" : n.impact.c_str());
+            }
+            ImGui::TableNextColumn();
+            if (past && !inWindow) {
+                ImGui::TextDisabled("%s%s", n.title.c_str(), n.manual ? "  (yours)" : "");
+            } else {
+                ImGui::Text("%s%s", n.title.c_str(), n.manual ? "  (yours)" : "");
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(n.forecast.empty() ? "" : n.forecast.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", n.previous.c_str());
+            ImGui::TableNextColumn();
+            if (n.manual) {
+                if (ImGui::SmallButton("Remove")) {
+                    const int64_t at = n.utcMs;
+                    const std::string title = n.title;
+                    quickApply(controller, snap, connected, [at, title](LiveSettings& x) {
+                        auto& v = x.market.news;
+                        v.erase(std::remove_if(v.begin(), v.end(),
+                                               [&](const NewsEvent& e) { return e.utcMs == at && e.title == title; }),
+                                v.end());
+                    });
+                }
+            } else if (guarded) {
+                ImGui::TextColored(impactColor(n.impact), "pause");
+                ImGui::SetItemTooltip("No new range %d min before to %d min after.", mc.newsMinutesBefore,
+                                      mc.newsMinutesAfter);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+        if (shown == 0) ImGui::TextDisabled("Nothing to show with these filters.");
+    }
+
+    // Add a release by hand (anything ForexFactory doesn't list, e.g. a speech).
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Add by hand");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150.0f);
+    ImGui::InputTextWithHint("##newswhen", "YYYY-MM-DD HH:MM", newsWhen_.data(), newsWhen_.size());
+    ImGui::SetItemTooltip("Your computer's local time.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - 90.0f));
+    ImGui::InputTextWithHint("##newstitle", "What (e.g. Fed Chair speaks)", newsTitle_.data(), newsTitle_.size());
+    ImGui::SameLine();
+    if (glass::button("Add", kBlue, ImVec2(-1, 0))) {
+        int64_t at = 0;
+        if (!muuk::ctrader_fix::parseLocalDateTime(newsWhen_.data(), at)) {
+            flash("News time must look like 2026-10-02 15:30 (your local time).");
+        } else {
+            NewsEvent e;
+            e.utcMs = at;
+            e.title = newsTitle_[0] != '\0' ? std::string(newsTitle_.data()) : std::string("News");
+            e.impact = "High";
+            e.manual = true;
+            quickApply(controller, snap, connected, [e](LiveSettings& x) { x.market.news.push_back(e); });
+            newsWhen_[0] = '\0';
+            newsTitle_[0] = '\0';
+        }
+    }
+}
+
+void DashboardWindow::renderMarketSettings() {
+    MarketHoursConfig& mc = editSettings_.market;
+    ImGui::Spacing();
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Market hours & news");
+    });
+    ImGui::TextDisabled("When new ranges may open. A running range is always managed: target and stop loss keep "
+                        "working through any pause.");
+    if (ImGui::Checkbox("Market hours filter", &mc.enabled)) settingsDirty_ = true;
+    ImGui::SetItemTooltip("Off: the bot opens ranges at any time the broker has prices (as before).");
+
+    ImGui::BeginDisabled(!mc.enabled);
+    if (ImGui::BeginTable("market_settings", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        auto sessionBoxes = [&](const char* label, const char* help, std::array<bool, 4>& flags, const char* idSuffix) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            ImGui::SetItemTooltip("%s", help);
+            ImGui::TableNextColumn();
+            for (int i = 0; i < muuk::ctrader_fix::kSessionCount; ++i) {
+                if (i > 0) ImGui::SameLine();
+                const std::string id =
+                    std::string(muuk::ctrader_fix::sessionName(static_cast<Session>(i))) + "##" + idSuffix;
+                if (ImGui::Checkbox(id.c_str(), &flags[i])) settingsDirty_ = true;
+            }
+        };
+        sessionBoxes("Trade in", "New ranges only while at least one ticked session is open.", mc.tradeIn, "trade");
+        sessionBoxes("Pause at the end of",
+                     "Around the end of each ticked session (spreads widen, prices jump): no new range.",
+                     mc.pauseAtEndOf, "pause");
+        settingInt("  minutes before it ends", "Pause starts this long before the session ends.",
+                   &mc.pauseMinutesBefore, &settingsDirty_);
+        settingInt("  minutes after it ends", "Pause lasts this long after the session ends (and after the daily reopen).",
+                   &mc.pauseMinutesAfter, &settingsDirty_);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("News guard (ForexFactory)");
+        ImGui::TableNextColumn();
+        if (ImGui::Checkbox("On##newsguard", &mc.newsGuard)) settingsDirty_ = true;
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        if (ImGui::Checkbox("High##newshigh", &mc.newsHigh)) settingsDirty_ = true;
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, kOrange);
+        if (ImGui::Checkbox("Medium##newsmed", &mc.newsMedium)) settingsDirty_ = true;
+        ImGui::PopStyleColor();
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("  news currencies");
+        ImGui::SetItemTooltip("Comma separated, e.g. USD or USD, EUR. Gold moves on USD news. ALL = every currency.");
+        ImGui::TableNextColumn();
+        char cur[64];
+        std::snprintf(cur, sizeof(cur), "%s", mc.newsCurrencies.c_str());
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##newscur", cur, sizeof(cur))) {
+            mc.newsCurrencies = cur;
+            settingsDirty_ = true;
+        }
+        settingInt("  minutes before news", "No new range from this long before a guarded release.",
+                   &mc.newsMinutesBefore, &settingsDirty_);
+        settingInt("  minutes after news", "... until this long after it.", &mc.newsMinutesAfter, &settingsDirty_);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("When a pause starts");
+        ImGui::SetItemTooltip("What happens to a range that is still running when a pause begins.");
+        ImGui::TableNextColumn();
+        const char* closeItems[] = {"Keep managing the running range", "Close it before the weekend",
+                                    "Close it at every pause"};
+        int closeIndex = mc.closeRangeAt == "weekend" ? 1 : (mc.closeRangeAt == "every" ? 2 : 0);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##closeat", &closeIndex, closeItems, 3)) {
+            mc.closeRangeAt = closeIndex == 1 ? "weekend" : (closeIndex == 2 ? "every" : "never");
+            settingsDirty_ = true;
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndDisabled();
+    clampSettings(editSettings_);
+}
+
+void DashboardWindow::renderSessionStats() {
+    if (sessionRowsRev_ != historyRevision_) {
+        sessionRowsRev_ = historyRevision_;
+        sessionRows_.clear();
+        for (const auto& b : history_) {
+            std::string name = b.marketSession;
+            if (name.empty()) {
+                const int64_t ms =
+                    muuk::ctrader_fix::localTimestampToUtcMs(b.startedAt.empty() ? b.closedAt : b.startedAt);
+                name = ms > 0 ? muuk::ctrader_fix::sessionLabelAt(ms) : "Unknown";
+            }
+            auto it = std::find_if(sessionRows_.begin(), sessionRows_.end(),
+                                   [&](const SessionRow& r) { return r.name == name; });
+            if (it == sessionRows_.end()) {
+                sessionRows_.push_back(SessionRow{name});
+                it = std::prev(sessionRows_.end());
+            }
+            ++it->baskets;
+            (b.net > 0.0 ? it->won : it->lost) += 1;
+            it->net += b.net;
+            it->commission += b.commission;
+        }
+        std::sort(sessionRows_.begin(), sessionRows_.end(),
+                  [](const SessionRow& a, const SessionRow& b) { return a.baskets > b.baskets; });
+    }
+    if (sessionRows_.empty()) return;
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("By trading session"); });
+    ImGui::SameLine();
+    ImGui::TextDisabled("(the session(s) open when each basket started)");
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp;
+    if (ImGui::BeginTable("sessions", 7, flags)) {
+        ImGui::TableSetupColumn("Session", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn("Baskets");
+        ImGui::TableSetupColumn("Won / lost");
+        ImGui::TableSetupColumn("Win rate");
+        ImGui::TableSetupColumn("Net");
+        ImGui::TableSetupColumn("Avg / basket");
+        ImGui::TableSetupColumn("Commission");
+        ImGui::TableHeadersRow();
+        for (const auto& r : sessionRows_) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(r.name.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", r.baskets);
+            ImGui::TableNextColumn();
+            ImGui::TextColored(kGreen, "%d", r.won);
+            ImGui::SameLine(0.0f, 4.0f);
+            ImGui::TextDisabled("/");
+            ImGui::SameLine(0.0f, 4.0f);
+            ImGui::TextColored(r.lost > 0 ? kRed : kGrey, "%d", r.lost);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f%%", r.baskets > 0 ? 100.0 * r.won / r.baskets : 0.0);
+            ImGui::TableNextColumn();
+            ImGui::TextColored(pnlColor(r.net), "%s", money(r.net).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextColored(pnlColor(r.net), "%s", money(r.baskets > 0 ? r.net / r.baskets : 0.0).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", money(-r.commission).c_str());
+        }
+        ImGui::EndTable();
+    }
+}
+
+void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnapshot& snap, bool connected) {
+    const LiveSettings& s = snap.settings;
+    const double net = floatingPnl(snap);
+    const double target = snap.targetNow > 0.0 ? snap.targetNow : s.profitTarget;
+    const float h = ImGui::GetFrameHeight();
+
+    if (gearButton("##targetgear", h)) ImGui::OpenPopup("target_popup");
+    ImGui::SetItemTooltip("Profit target: fixed, or automatic from what the open positions cost.");
+    ImGui::SameLine(0.0f, 6.0f);
+    const double lossScale =
+        s.stopLoss > 0.0 ? s.stopLoss : (s.maxBasketLoss > 0.0 ? s.maxBasketLoss : std::max(target, 0.01));
+    std::string overlay = money(net) + " net   |   target " + money(target);
+    if (s.autoTarget) overlay += "  (auto " + std::to_string(s.autoTargetPercent) + "%)";
+    glass::balanceBar("target_bar", static_cast<float>(net), static_cast<float>(lossScale),
+                      static_cast<float>(std::max(target, 0.01)), overlay.c_str());
+    ImGui::SetItemTooltip("Right, green: towards the profit target. Left, red: in loss (full at %s). The colour gets "
+                          "stronger the further it goes.",
+                          s.stopLoss > 0.0 ? "your stop loss" : (s.maxBasketLoss > 0.0 ? "your max basket loss"
+                                                                                       : "the size of the target"));
+
+    if (ImGui::BeginPopup("target_popup")) {
+        withFont(boldFont_, [] { ImGui::TextUnformatted("Profit target"); });
+        const std::optional<LiveSnapshot> opt(snap);
+        bool autoOn = s.autoTarget;
+        if (ImGui::Checkbox("Auto - from what the open positions cost", &autoOn)) {
+            quickApply(controller, opt, connected, [autoOn](LiveSettings& x) { x.autoTarget = autoOn; });
+        }
+        ImGui::TextDisabled("Cost = commission (open + close) + the spread, of every open position. With one 0.01 lot\n"
+                            "the target is small; each new fill raises it.");
+        ImGui::BeginDisabled(!autoOn);
+        for (int p : {20, 40, 60, 80, 100}) {
+            if (p != 20) ImGui::SameLine();
+            const std::string label = std::to_string(p) + "%";
+            if (ImGui::RadioButton(label.c_str(), s.autoTargetPercent == p)) {
+                quickApply(controller, opt, connected, [p](LiveSettings& x) { x.autoTargetPercent = p; });
+            }
+        }
+        ImGui::EndDisabled();
+        const double cost = snap.live.commission + 2.0 * snap.live.spread;
+        ImGui::Separator();
+        ImGui::Text("Cost of the open positions now: %s", money(cost).c_str());
+        ImGui::TextDisabled("  commission %s + spread %s", money(snap.live.commission).c_str(),
+                            money(2.0 * snap.live.spread).c_str());
+        if (autoOn) {
+            ImGui::Text("Target now: %s  (%d%% of the cost%s)", money(target).c_str(), s.autoTargetPercent,
+                        snap.positions.empty() ? ", set by the first fill" : "");
+        } else {
+            ImGui::Text("Fixed target: %s  (Settings > Profit target)", money(s.profitTarget).c_str());
+        }
+        ImGui::TextDisabled("Applies at once, also to the running basket. Saved to your config.");
+        ImGui::EndPopup();
+    }
 }
 
 }  // namespace muuk::desktop

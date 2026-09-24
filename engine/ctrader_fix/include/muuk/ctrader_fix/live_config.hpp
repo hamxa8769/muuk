@@ -5,6 +5,7 @@
 #include <string>
 
 #include "muuk/core/strategy_engine.hpp"
+#include "muuk/ctrader_fix/market_hours.hpp"
 
 namespace muuk::ctrader_fix {
 
@@ -98,6 +99,7 @@ struct LiveConnectionConfig {
 struct LiveConfig {
     LiveConnectionConfig connection;
     muuk::core::StrategyConfig strategy;
+    MarketHoursConfig market;  // "market" in the file: sessions, pauses, news
 };
 
 // The operator-tunable subset of LiveConfig, in plain human units (lots,
@@ -111,6 +113,8 @@ struct LiveSettings {
     double lotMultiplier = 1.0;  // > 1: each lot = previous x this (2 -> 0.01, 0.02, 0.04...); 1 = add lotIncrement
     double profitTarget = 1.0;   // basket net P/L ($) that books the basket
     double stopLoss = 0.0;       // basket net loss ($) that closes the basket; 0 = off
+    bool autoTarget = false;     // target = autoTargetPercent % of the open positions' cost, instead of profitTarget
+    int autoTargetPercent = 100; // 20 / 40 / 60 / 80 / 100
     int cooldownSeconds = 0;     // pause after a basket is fully flat
     int manualCloseCooldownSeconds = 15;  // pause after Close range before a new range opens; 0 = don't reopen
     int maxOrders = 20;
@@ -122,6 +126,7 @@ struct LiveSettings {
     double commissionPerMillion = 0.0;
     bool autoContinue = true;
     muuk::core::StartSide startSide = muuk::core::StartSide::Both;  // first order(s) of each range
+    MarketHoursConfig market;
 };
 
 [[nodiscard]] LiveSettings settingsFromConfig(const LiveConfig& config);

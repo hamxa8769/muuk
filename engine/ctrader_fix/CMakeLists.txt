@@ -6,6 +6,8 @@ add_library(muuk_ctrader_fix STATIC
     src/live_runner.cpp
     src/basket_history.cpp
     src/live_state.cpp
+    src/market_hours.cpp
+    src/news_feed.cpp
     src/instance_lock.cpp
     src/volume_stats.cpp
     src/pdf_writer.cpp
@@ -18,6 +20,9 @@ target_include_directories(muuk_ctrader_fix PUBLIC
 
 target_link_libraries(muuk_ctrader_fix PUBLIC muuk_core muuk_config_json nlohmann_json::nlohmann_json asio)
 target_compile_features(muuk_ctrader_fix PUBLIC cxx_std_20)
+if(WIN32)
+    target_link_libraries(muuk_ctrader_fix PRIVATE winhttp)
+endif()
 
 add_executable(muuk-live cli/main.cpp)
 target_link_libraries(muuk-live PRIVATE muuk_ctrader_fix)
@@ -30,6 +35,7 @@ if(MUUK_BUILD_TESTS)
         tests/test_live_runner.cpp
         tests/test_live_resume.cpp
         tests/test_reporting.cpp
+        tests/test_market_hours.cpp
     )
     target_link_libraries(muuk_ctrader_fix_tests PRIVATE muuk_ctrader_fix Catch2::Catch2WithMain)
     include(Catch)

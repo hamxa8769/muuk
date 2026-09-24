@@ -1,5 +1,9 @@
 #include "muuk/ctrader_fix/volume_stats.hpp"
 
+#include <algorithm>
+
+#include "muuk/ctrader_fix/market_hours.hpp"
+
 #include <cstdio>
 #include <ctime>
 #include <map>
@@ -91,6 +95,26 @@ VolumeBucket volumeTotal(const std::vector<BasketRecord>& baskets) {
     total.period = "All time";
     for (const auto& b : baskets) total.add(b);
     return total;
+}
+
+std::vector<VolumeBucket> volumeBySession(const std::vector<BasketRecord>& baskets) {
+    std::vector<VolumeBucket> out;
+    for (const auto& b : baskets) {
+        std::string name = b.marketSession;
+        if (name.empty()) {
+            const int64_t ms = localTimestampToUtcMs(b.startedAt.empty() ? b.closedAt : b.startedAt);
+            name = ms > 0 ? sessionLabelAt(ms) : "Unknown";
+        }
+        auto it = std::find_if(out.begin(), out.end(), [&](const VolumeBucket& v) { return v.period == name; });
+        if (it == out.end()) {
+            out.push_back(VolumeBucket{});
+            out.back().period = name;
+            it = std::prev(out.end());
+        }
+        it->add(b);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const VolumeBucket& a, const VolumeBucket& b) { return a.baskets > b.baskets; });
+    return out;
 }
 
 }  // namespace muuk::ctrader_fix

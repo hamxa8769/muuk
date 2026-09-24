@@ -143,6 +143,21 @@ void StrategyEngine::reconfigure(const StrategyConfig& config) {
     config_ = config;
 }
 
+void StrategyEngine::updateExitRules(const StrategyConfig& config) {
+    config_.basketProfitTargetMoney = config.basketProfitTargetMoney;
+    config_.basketStopLossMoney = config.basketStopLossMoney;
+    config_.autoProfitTarget = config.autoProfitTarget;
+    config_.autoTargetPercent = config.autoTargetPercent;
+}
+
+double StrategyEngine::effectiveTargetMoney(const BasketPnlResult& pnl) const {
+    if (!config_.autoProfitTarget) return config_.basketProfitTargetMoney;
+    // Full cost of the open positions: commission (open + close) and the
+    // whole spread (half paid getting in, half getting out).
+    const double cost = pnl.commissionMoney + 2.0 * pnl.spreadCostMoney;
+    return std::max(0.01, cost * std::clamp(config_.autoTargetPercent, 1.0, 1000.0) / 100.0);
+}
+
 BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {
     // Gross P/L is computed at the theoretical mid price; the cost of
     // actually crossing the spread to exit is charged explicitly below as
@@ -261,10 +276,11 @@ CommandBatch StrategyEngine::onTick(const TickEvent& tick) {
     }
 
     lastBasketPnl_ = evaluateBasketPnl(tick);
+    lastBasketPnl_.targetMoney = effectiveTargetMoney(lastBasketPnl_);
 
     const bool haveOpenExposure = (buyAggregate_.totalVolumeSteps + sellAggregate_.totalVolumeSteps) > 0;
-    const bool targetHit = config_.basketProfitTargetMoney > 0.0 &&
-                           lastBasketPnl_.netPnlMoney >= config_.basketProfitTargetMoney;
+    const bool targetHit = lastBasketPnl_.targetMoney > 0.0 &&
+                           lastBasketPnl_.netPnlMoney >= lastBasketPnl_.targetMoney;
     const bool stopHit = config_.basketStopLossMoney > 0.0 &&
                          lastBasketPnl_.netPnlMoney <= -config_.basketStopLossMoney;
     if (haveOpenExposure && (targetHit || stopHit)) {

@@ -19,7 +19,9 @@
 #include "muuk/ctrader_fix/latency_stats.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_state.hpp"
+#include "muuk/ctrader_fix/market_hours.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
+#include "muuk/ctrader_fix/news_feed.hpp"
 
 namespace muuk::ctrader_fix {
 
@@ -123,6 +125,12 @@ struct LiveSnapshot {
     double bookedCommission = 0.0;
     double realizedPnl = 0.0;        // booked net
     LiveSettings settings;
+    // The profit target in force right now (the auto target moves with
+    // every fill -- see StrategyConfig::autoProfitTarget).
+    double targetNow = 0.0;
+    // Market hours: sessions, pauses, news guard (see MarketHoursConfig).
+    MarketStatus market;
+    bool marketKnown = false;
 
     // Speed. tickDecision / fillReaction are the bot's own processing time
     // in microseconds (quote in -> engine decided; fill in -> reaction sent);
@@ -189,6 +197,10 @@ public:
     // run()" rule as setLogHandler.
     using BasketHandler = std::function<void(const BasketRecord&)>;
     void setBasketHandler(BasketHandler handler) { basketHandler_ = std::move(handler); }
+
+    // The ForexFactory calendar for the news guard (set before run(); may
+    // be shared with the UI). Without one only hand-added news is guarded.
+    void setNewsFeed(std::shared_ptr<NewsFeed> feed) { newsFeed_ = std::move(feed); }
 
     // State persistence. When set (before run()), the running basket --
     // engine state, open positions, pending orders, closes in flight --
@@ -597,6 +609,17 @@ private:
     // have passed: after Close range (connection.manualCloseCooldownSeconds),
     // or at connect when the spread was too wide to start right away (0).
     bool reopenAfterManualClose_ = false;
+    // Market hours (engineMutex_). Worked out once a second off the lock.
+    std::shared_ptr<NewsFeed> newsFeed_;
+    MarketStatus marketStatus_;
+    bool marketKnown_ = false;
+    bool marketDirty_ = true;        // settings changed: rescan for the next change
+    int64_t marketFullEvalMs_ = 0;
+    bool marketWaitLogged_ = false;
+    bool closedForPause_ = false;    // closeRangeAt already acted on this pause
+    void updateMarket();             // takes engineMutex_ itself
+    bool marketBlocksLocked();       // true (and logs once) while no new range may open
+    void closeRangeLocked(bool reopen, const std::string& reason);
     int reopenCooldownSeconds_ = 0;
     bool spreadWaitLogged_ = false;
     // Orders waiting for the broker's first answer too long (see

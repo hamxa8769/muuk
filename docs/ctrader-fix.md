@@ -395,3 +395,36 @@ price against a pending order's `StopPx` itself.
 - **A risk-limit breach halts new order creation but never force-closes an
   open basket** — same documented choice as `engine/core` (see
   `docs/architecture.md`).
+
+## Auto profit target
+
+`strategy.autoProfitTarget: {"enabled": true, "percent": 60}` (the gear next
+to the net P/L bar): instead of a fixed dollar target, the basket is booked
+once its net profit reaches *percent* of what the open positions cost --
+commission (open + close) plus the full spread. One 0.01 lot aims low; every
+fill raises the target. 20 / 40 / 60 / 80 / 100 % in the app. Target, stop
+loss and the auto target apply at once, also to a running basket.
+
+## Market hours, sessions and the news guard
+
+`"market": {...}` in the config (Settings > Market hours & news). Only
+*new* ranges wait; a running range keeps being managed (target and stop
+loss), unless "When a pause starts" says to close it (before the weekend,
+or at every pause).
+
+- **Sessions** on their own city's clock, daylight saving included:
+  Sydney 07-16, Tokyo 09-18, London 08-17, New York 08-17, Mon-Fri.
+  "Trade in" limits new ranges to the ticked sessions.
+- **Session-end pause**: from 15 min before to 1 min after each ticked
+  session ends (and the first minute after the daily reopen).
+- **Gold's hours**: Sunday 18:00 to Friday 17:00 New York time, daily
+  break 17:00-18:00 -- shown as "Weekend" / "Daily break".
+- **News guard** (on by default): ForexFactory's weekly calendar
+  (`nfs.faireconomy.media/ff_calendar_thisweek.json`, the export of
+  forexfactory.com/calendar) is downloaded at most once an hour and cached
+  (`%APPDATA%\Muuk\news_calendar.json`; `muuk_state/news_calendar.json` for
+  muuk-live). No new range from 15 min before to 15 min after each red
+  (High) -- optionally also orange (Medium) -- release in the listed
+  currencies (USD). Releases can also be added by hand in the News tab.
+- Every basket records the session(s) open when it started; History and
+  the PDF report show the results per session.

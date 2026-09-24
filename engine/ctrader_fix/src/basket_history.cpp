@@ -44,6 +44,7 @@ nlohmann::json basketToJson(const BasketRecord& b) {
             {"bestNet", b.bestNet},
             {"maxOpenLots", b.maxOpenLots},
             {"netAtTrigger", b.netAtTrigger},
+            {"marketSession", b.marketSession},
             {"gross", b.gross},
             {"commission", b.commission},
             {"net", b.net},
@@ -71,6 +72,7 @@ BasketRecord basketFromJson(const nlohmann::json& j) {
     b.bestNet = j.value("bestNet", 0.0);
     b.maxOpenLots = j.value("maxOpenLots", 0.0);
     b.netAtTrigger = j.value("netAtTrigger", 0.0);
+    b.marketSession = j.value("marketSession", std::string());
     b.gross = j.value("gross", 0.0);
     b.commission = j.value("commission", 0.0);
     b.net = j.value("net", 0.0);

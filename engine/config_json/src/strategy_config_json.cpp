@@ -56,6 +56,11 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
 
     cfg.basketProfitTargetMoney = j.value("basketProfitTargetMoney", 0.0);
     cfg.basketStopLossMoney = j.value("basketStopLossMoney", 0.0);
+    if (j.contains("autoProfitTarget") && j.at("autoProfitTarget").is_object()) {
+        const auto& at = j.at("autoProfitTarget");
+        cfg.autoProfitTarget = at.value("enabled", cfg.autoProfitTarget);
+        cfg.autoTargetPercent = at.value("percent", cfg.autoTargetPercent);
+    }
     cfg.maxRejectRetries = j.value("maxRejectRetries", cfg.maxRejectRetries);
     cfg.reArmOnFill = j.value("reArmOnFill", cfg.reArmOnFill);
     cfg.seedOffsetPoints = j.value("seedOffsetPoints", cfg.seedOffsetPoints);

@@ -162,6 +162,11 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.bookedCommission = bookedCommission_;
     snap.realizedPnl = bookedGross_ - bookedCommission_;
     snap.settings = settingsFromConfig(config_);
+    snap.market = marketStatus_;
+    snap.marketKnown = marketKnown_;
+    snap.targetNow = engine_ && engine_->status() == EngineStatus::Active
+                         ? engine_->effectiveTargetMoney(engine_->lastBasketPnl())
+                         : config_.strategy.basketProfitTargetMoney;
     return snap;
 }
 
@@ -330,6 +335,7 @@ void LiveRunner::run() {
         }
 
         bool started = false;
+        updateMarket();
         {
             std::scoped_lock lock(engineMutex_);
             if (autoRange) centerRangeOnLatestQuote();
@@ -356,8 +362,8 @@ void LiveRunner::run() {
             } else if (holdAutoStart_) {
                 log("[resume] not opening a range by itself after an interrupted basket -- press Open range");
             } else if (config_.connection.autoContinue) {
-                if (spreadTooWideLocked()) {
-                    reopenAfterManualClose_ = true;  // starts as soon as the spread is back in range
+                if (spreadTooWideLocked() || marketBlocksLocked()) {
+                    reopenAfterManualClose_ = true;  // starts as soon as the spread / market allows
                     reopenCooldownSeconds_ = 0;
                 } else {
                     beginBasket();
@@ -411,6 +417,7 @@ void LiveRunner::run() {
                     requestOrderStatusLocked();
                 }
             }
+            if (loops % 5 == 0) updateMarket();
             if (loops % 5 == 0) {
                 std::scoped_lock lock(engineMutex_);
                 checkBasketHealthLocked();
@@ -1145,9 +1152,10 @@ void LiveRunner::maybeRestartAfterBasketClose() {
             return;  // still cooling down -- this function gets called again on the next tick
         }
     }
-    // A new range never starts into a spread spike: wait (re-checked on
-    // every tick) -- the cooldown, if any, stays served.
-    if (spreadTooWideLocked()) return;
+    // A new range never starts into a spread spike or a market pause
+    // (session end, news, daily break, weekend): wait (re-checked on every
+    // tick) -- the cooldown, if any, stays served.
+    if (spreadTooWideLocked() || marketBlocksLocked()) return;
 
     cooldownActive_ = false;
     markDirty();
@@ -1452,6 +1460,8 @@ bool LiveRunner::openRange() {
     }
     spreadWaitLogged_ = false;
     if (spreadTooWideLocked()) return false;  // logs why
+    marketWaitLogged_ = false;
+    if (marketBlocksLocked()) return false;   // logs why
 
     if (engine_->status() != EngineStatus::Idle) engine_->stopCycle();  // Completed / HaltedByRisk -> Idle
     cooldownActive_ = false;
@@ -1468,7 +1478,11 @@ void LiveRunner::closeRange(bool reopen) {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
     log("[manual] operator requested: close range");
-    setCloseReason("manual: close range");
+    closeRangeLocked(reopen, "manual: close range");
+}
+
+void LiveRunner::closeRangeLocked(bool reopen, const std::string& reason) {
+    setCloseReason(reason);
     cancelPendingLocked();
     closePositionsLocked();
     engine_->stopCycle();
@@ -1546,6 +1560,7 @@ void LiveRunner::beginBasket() {
     b.symbol = config_.connection.symbolName;
     b.contractSize = config_.strategy.symbol.contractSize;
     b.startedAt = localTimestamp();
+    b.marketSession = sessionLabelAt(utcNowMs());
     const RangeConfig range = engine_ ? engine_->currentRange() : config_.strategy.range;
     b.rangeLower = range.lowerBound.toDouble(config_.strategy.symbol);
     b.rangeUpper = range.upperBound.toDouble(config_.strategy.symbol);
@@ -1626,6 +1641,7 @@ void LiveRunner::maybeFinalizeBasket() {
                 : startsWith("manual")            ? "manual"
                 : startsWith("interrupted")       ? "interrupted"
                 : startsWith("guard")             ? "guard"
+                : startsWith("market")            ? "market pause"
                                                   : "closed";
     closeReason_.clear();
     for (const auto& l : b.legs) {
@@ -1653,10 +1669,96 @@ LiveSettings LiveRunner::settings() const {
 void LiveRunner::applySettings(const LiveSettings& settings) {
     std::scoped_lock lock(engineMutex_);
     applySettingsToConfig(config_, settings);
+    // Target, stop loss and auto target act at once, also on a running basket.
+    if (engine_) engine_->updateExitRules(config_.strategy);
+    marketDirty_ = true;
+    marketWaitLogged_ = false;
     log("[settings] updated -- range width " + std::to_string(settings.rangeWidth) + ", lots " +
         std::to_string(settings.initialLot) + " +" + std::to_string(settings.lotIncrement) + ", target $" +
         std::to_string(settings.profitTarget) + (settings.autoContinue ? ", auto-continue on" : ", auto-continue off") +
-        " (applies from the next range)");
+        " (range and lots apply from the next range; target, stop loss and market hours now)");
+}
+
+void LiveRunner::updateMarket() {
+    // Scanning ahead for the next change is the slow part -- done off the
+    // lock, so quotes and fills are never held up by it.
+    MarketHoursConfig cfg;
+    bool full = false;
+    MarketStatus previous;
+    bool known = false;
+    const int64_t now = utcNowMs();
+    {
+        std::scoped_lock lock(engineMutex_);
+        cfg = config_.market;
+        previous = marketStatus_;
+        known = marketKnown_;
+        full = marketDirty_ || !marketKnown_ || now - marketFullEvalMs_ >= 60'000 ||
+               (marketStatus_.nextChangeUtcMs > 0 && now >= marketStatus_.nextChangeUtcMs);
+        marketDirty_ = false;
+    }
+    std::vector<NewsEvent> feed;
+    if (newsFeed_) {
+        for (auto& e : newsFeed_->events()) {
+            if (newsIsGuarded(e, cfg)) feed.push_back(std::move(e));
+        }
+    }
+    MarketStatus st = evaluateMarket(now, cfg, &feed, full);
+    if (!full) {
+        st.nextChangeUtcMs = previous.nextChangeUtcMs;
+        st.nextChangeLabel = previous.nextChangeLabel;
+        st.hasNextNews = previous.hasNextNews;
+        st.nextNews = previous.nextNews;
+    }
+
+    bool closeNow = false;
+    std::string closeWhy;
+    {
+        std::scoped_lock lock(engineMutex_);
+        if (full) marketFullEvalMs_ = now;
+        marketStatus_ = st;
+        marketKnown_ = true;
+        if (known && previous.canOpenRange && !st.canOpenRange) {
+            log("[market] " + st.label + " -- " + st.detail +
+                (st.nextChangeUtcMs > 0 ? " New ranges wait until " + formatLocalDateTime(st.nextChangeUtcMs) + "." : ""));
+        } else if (known && !previous.canOpenRange && st.canOpenRange) {
+            log("[market] open again (" + st.sessionLabel + ") -- new ranges may start");
+        } else if (known && previous.label != st.label && !st.canOpenRange) {
+            log("[market] " + st.label + " -- " + st.detail);
+        }
+        if (st.canOpenRange) {
+            closedForPause_ = false;
+        } else if (!closedForPause_ && engine_ && tradeSession_) {
+            // closeRangeAt: close a running range as the pause starts.
+            const bool weekendAhead =
+                st.phase == MarketPhase::Weekend ||
+                (st.phase == MarketPhase::SessionPause && st.label.find("New York") != std::string::npos &&
+                 newYorkWeekday(now) == 5);
+            const bool wanted = cfg.closeRangeAt == "every" || (cfg.closeRangeAt == "weekend" && weekendAhead);
+            const bool somethingOpen = engine_->status() == EngineStatus::Active || !openLegs_.empty() ||
+                                       !placedOrderInfo_.empty() || !waitingOrders_.empty();
+            if (wanted && somethingOpen) {
+                closeNow = true;
+                closeWhy = "market: " + st.label;
+            }
+            closedForPause_ = true;
+        }
+        if (closeNow) {
+            log("[market] closing the running range: " + st.label + " (Settings > Market hours)");
+            closeRangeLocked(true, closeWhy);
+        }
+    }
+}
+
+bool LiveRunner::marketBlocksLocked() {
+    if (!marketKnown_ || marketStatus_.canOpenRange) {
+        marketWaitLogged_ = false;
+        return false;
+    }
+    if (!marketWaitLogged_) {
+        log("[market] no new range now: " + marketStatus_.label + " -- " + marketStatus_.detail);
+        marketWaitLogged_ = true;
+    }
+    return true;
 }
 
 void LiveRunner::closePosition(OrderId id) {

@@ -36,6 +36,12 @@ struct StrategyConfig {
     // >0: close the whole basket once its net P/L falls to -this (a hard
     // loss cap; closes exactly like the profit target does). 0 = off.
     double basketStopLossMoney = 0.0;
+    // Auto profit target: instead of basketProfitTargetMoney, book the basket
+    // once its net profit reaches autoTargetPercent % of what the open
+    // positions cost to trade (commission + the full spread, in and out).
+    // So one 0.01 lot aims low, and the target grows with every fill.
+    bool autoProfitTarget = false;
+    double autoTargetPercent = 100.0;
     int maxRejectRetries = 3;
     // true (default): proposal §4 behavior — on fill, immediately re-arm
     // the triggering side with the next lot in the progression
@@ -151,6 +157,11 @@ public:
     // Replaces the config used by the next start()/restart(). Only valid
     // while no cycle is running (Idle or Completed).
     void reconfigure(const StrategyConfig& config);
+    // Profit target / stop loss / auto target from `config`, applied right
+    // away -- also in the middle of a running basket.
+    void updateExitRules(const StrategyConfig& config);
+    // The profit target the next tick would use (see StrategyConfig::autoProfitTarget).
+    [[nodiscard]] double effectiveTargetMoney(const BasketPnlResult& pnl) const;
 
     // Evaluates the current basket against the profit target and the risk
     // engine against live spread. Also updates the mark price used for

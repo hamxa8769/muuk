@@ -70,7 +70,7 @@ public:
 private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
     // The tabs on the right; a KPI card click selects one.
-    enum class Tab { None, Positions, Orders, History, Volume, Performance, Settings, Log };
+    enum class Tab { None, Positions, Orders, History, News, Volume, Performance, Settings, Log };
     [[nodiscard]] int tabFlags(Tab tab) const;
 
     void setTheme(bool dark);
@@ -97,6 +97,26 @@ private:
     void renderConfirmPopup(LiveController& controller);
     void renderExitPopup(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     void flash(const std::string& message);
+
+    // Market hours / news (see MarketHoursConfig): the status strip in the
+    // header, the News tab, and their part of Settings.
+    void renderMarketStrip(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                           bool connected);
+    void renderNewsTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                       bool connected);
+    void renderMarketSettings();
+    void renderSessionStats();
+    // The net P/L bar with its target, and the gear that sets the auto target.
+    void renderTargetBar(LiveController& controller, const muuk::ctrader_fix::LiveSnapshot& snap, bool connected);
+    // The market as the bot sees it (connected), or worked out here from
+    // the settings being edited (offline) -- refreshed once a second.
+    [[nodiscard]] muuk::ctrader_fix::MarketStatus currentMarket(LiveController& controller,
+                                                                 const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                                                                 bool connected);
+    // A one-field change applied at once: to the running bot, the config
+    // file and the settings editor (other unsaved edits are kept).
+    void quickApply(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                    bool connected, const std::function<void(muuk::ctrader_fix::LiveSettings&)>& change);
 
     std::array<char, 512> configPathBuffer_{};
     AppPrefs prefs_;
@@ -130,6 +150,27 @@ private:
     double exitClosingSince_ = 0.0;
 
     Tab selectTab_ = Tab::None;  // switch to this tab on the next frame
+
+    // Market hours / news, offline view (see currentMarket).
+    muuk::ctrader_fix::MarketStatus uiMarket_;
+    double uiMarketAt_ = -1000.0;
+    double uiMarketFullAt_ = -1000.0;
+    std::string uiMarketKey_;       // settings the cached status was worked out for
+    bool newsStarted_ = false;
+    struct SessionRow {
+        std::string name;
+        int baskets = 0;
+        int won = 0;
+        int lost = 0;
+        double net = 0.0;
+        double commission = 0.0;
+    };
+    std::vector<SessionRow> sessionRows_;  // History > By trading session
+    uint64_t sessionRowsRev_ = ~uint64_t{0};
+    bool newsUsdOnly_ = true;
+    bool newsHideLow_ = true;
+    std::array<char, 32> newsWhen_{};
+    std::array<char, 96> newsTitle_{};
 
     // Performance tab.
     SystemMonitor monitor_;

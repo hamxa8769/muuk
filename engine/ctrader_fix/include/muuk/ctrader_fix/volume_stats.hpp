@@ -44,5 +44,9 @@ struct VolumeBucket {
 // One bucket per period that has baskets, newest first.
 [[nodiscard]] std::vector<VolumeBucket> volumeByPeriod(const std::vector<BasketRecord>& baskets, VolumePeriod period);
 [[nodiscard]] VolumeBucket volumeTotal(const std::vector<BasketRecord>& baskets);
+// One bucket per trading session ("London + New York", "Tokyo"...) the
+// baskets started in, most baskets first. Older records without the
+// session are placed by their start (or close) time.
+[[nodiscard]] std::vector<VolumeBucket> volumeBySession(const std::vector<BasketRecord>& baskets);
 
 }  // namespace muuk::ctrader_fix

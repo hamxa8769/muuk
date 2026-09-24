@@ -32,7 +32,16 @@ std::string timestampPrefix() {
 }
 }  // namespace
 
-LiveController::~LiveController() { stop(); }
+LiveController::~LiveController() {
+    stop();
+    if (news_) news_->stop();
+}
+
+void LiveController::startNews(const std::filesystem::path& cacheFile) {
+    if (news_) return;
+    news_ = std::make_shared<muuk::ctrader_fix::NewsFeed>(cacheFile);
+    news_->start();
+}
 
 void LiveController::start(const std::string& configPath) {
     if (running_.load()) return;
@@ -72,6 +81,7 @@ bool LiveController::startRunner(const std::string& configPath) {
     configPath_ = configPath;
     runner_ = std::make_unique<LiveRunner>(std::move(config));
     runner_->setLogHandler([this](const std::string& line) { appendLog(line); });
+    if (news_) runner_->setNewsFeed(news_);
     // The running basket survives a disconnect / app restart (see LiveRunner::setStateFile).
     runner_->setStateFile(muuk::ctrader_fix::defaultStateFile(configPath));
     const std::filesystem::path historyFile = muuk::ctrader_fix::historyFileFor(configPath);

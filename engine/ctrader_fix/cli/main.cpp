@@ -140,6 +140,9 @@ int main(int argc, char** argv) {
     // every (re)connect (see LiveRunner::setStateFile).
     const auto stateFile = muuk::ctrader_fix::defaultStateFile(credentialsPath);
     std::cerr << "state file: " << stateFile.string() << "\n";
+    // ForexFactory calendar for the news guard, cached next to the state file.
+    const auto news = std::make_shared<muuk::ctrader_fix::NewsFeed>(stateFile.parent_path() / "news_calendar.json");
+    news->start();
     int failures = 0;
     while (!g_exitRequested) {
         const auto startedAt = std::chrono::steady_clock::now();
@@ -147,6 +150,7 @@ int main(int argc, char** argv) {
             const muuk::ctrader_fix::LiveConfig config = muuk::ctrader_fix::loadLiveConfig(credentialsPath);
             muuk::ctrader_fix::LiveRunner runner(config);
             runner.setStateFile(stateFile);
+            runner.setNewsFeed(news);
             const RunnerRegistration registration(&runner);
             {
                 std::scoped_lock lock(g_runnerMutex);

@@ -63,6 +63,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     requireNonEmpty(cfg.connection.password, "connection.password");
 
     cfg.strategy = muuk::config_json::parseStrategyConfig(j.at("strategy"));
+    if (j.contains("market")) cfg.market = marketHoursFromJson(j.at("market"));
 
     return cfg;
 }
@@ -80,6 +81,9 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.lotMultiplier = config.strategy.lotProgression.multiplier;
     s.profitTarget = config.strategy.basketProfitTargetMoney;
     s.stopLoss = config.strategy.basketStopLossMoney;
+    s.autoTarget = config.strategy.autoProfitTarget;
+    s.autoTargetPercent = static_cast<int>(std::lround(config.strategy.autoTargetPercent));
+    s.market = config.market;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
     s.manualCloseCooldownSeconds = config.connection.manualCloseCooldownSeconds;
     s.maxOrders = config.strategy.riskLimits.maxOrders;
@@ -106,6 +110,9 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
                                               Volume::fromDouble(s.lotIncrement, spec), s.lotMultiplier};
     st.basketProfitTargetMoney = s.profitTarget;
     st.basketStopLossMoney = s.stopLoss;
+    st.autoProfitTarget = s.autoTarget;
+    st.autoTargetPercent = s.autoTargetPercent;
+    config.market = s.market;
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
@@ -247,6 +254,8 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     st["startSide"] = muuk::config_json::startSideToString(s.startSide);
     st["basketProfitTargetMoney"] = s.profitTarget;
     st["basketStopLossMoney"] = s.stopLoss;
+    st["autoProfitTarget"] = {{"enabled", s.autoTarget}, {"percent", s.autoTargetPercent}};
+    j["market"] = marketHoursToJson(s.market);
     st["lotProgression"]["initialLot"] = s.initialLot;
     st["lotProgression"]["lotIncrement"] = s.lotIncrement;
     st["lotProgression"]["lotMultiplier"] = s.lotMultiplier;

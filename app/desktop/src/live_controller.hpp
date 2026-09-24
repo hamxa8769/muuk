@@ -16,6 +16,7 @@
 #include "muuk/ctrader_fix/instance_lock.hpp"
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
+#include "muuk/ctrader_fix/news_feed.hpp"
 
 namespace muuk::desktop {
 
@@ -84,6 +85,11 @@ public:
     [[nodiscard]] std::optional<muuk::ctrader_fix::LiveSettings> loadSettings(const std::string& configPath);
     bool saveSettings(const std::string& configPath, const muuk::ctrader_fix::LiveSettings& settings);
 
+    // ForexFactory calendar (news guard + News tab): downloaded in the
+    // background, at most hourly, cached in `cacheFile`. Shared with the bot.
+    void startNews(const std::filesystem::path& cacheFile);
+    [[nodiscard]] std::shared_ptr<muuk::ctrader_fix::NewsFeed> news() const { return news_; }
+
     [[nodiscard]] bool isRunning() const { return running_.load(); }
     // Returns the last known state even after the runner has stopped
     // (e.g. a dropped connection), so the UI can show what happened
@@ -134,6 +140,7 @@ private:
     void setError(const std::string& message);
     [[nodiscard]] static std::string fileStamp();
 
+    std::shared_ptr<muuk::ctrader_fix::NewsFeed> news_;
     std::string configPath_;  // of the current/last connection
     std::string dataAttachedFor_;
     std::ofstream liveLog_;   // guarded by logMutex_

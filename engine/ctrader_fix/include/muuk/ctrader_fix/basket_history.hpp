@@ -31,6 +31,7 @@ struct BasketLegRecord {
 struct BasketRecord {
     int number = 0;               // 1, 2, 3... within the session that produced it
     std::string session;          // when that session started, to group records across runs
+    std::string marketSession;    // trading session(s) open when it started: "London + New York", "Tokyo"...
     std::string symbol;
     std::string startedAt;
     std::string closedAt;

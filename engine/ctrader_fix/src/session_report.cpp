@@ -259,7 +259,19 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
     const std::vector<std::pair<std::string, std::string>> items = {
         {"First order", start},
         {"Range width", fmt("$%.2f", s.rangeWidth)},
-        {"Profit target (net)", fmt("$%.2f", s.profitTarget)},
+        {"Profit target (net)", s.autoTarget ? "auto: " + std::to_string(s.autoTargetPercent) + "% of the positions' cost"
+                                             : fmt("$%.2f", s.profitTarget)},
+        {"Stop loss (net)", s.stopLoss > 0 ? fmt("$%.2f", s.stopLoss) : std::string("off")},
+        {"Market hours filter", s.market.enabled ? "on, pause " + std::to_string(s.market.pauseMinutesBefore) +
+                                                       " min before / " + std::to_string(s.market.pauseMinutesAfter) +
+                                                       " min after session ends"
+                                                 : std::string("off")},
+        {"News guard", s.market.newsGuard
+                           ? std::string(s.market.newsHigh ? "High" : "") +
+                                 (s.market.newsMedium ? (s.market.newsHigh ? " + Medium" : "Medium") : "") + " " +
+                                 s.market.newsCurrencies + ", " + std::to_string(s.market.newsMinutesBefore) +
+                                 " min before / " + std::to_string(s.market.newsMinutesAfter) + " after"
+                           : std::string("off")},
         {"First lot / increment", fmt("%.2f", s.initialLot) + " / " + fmt("%.2f", s.lotIncrement)},
         {"Entry offset", fmt("$%.2f", s.seedOffset)},
         {"Commission", s.commissionPerMillion > 0 ? fmt("$%.2f per $1M traded, each side", s.commissionPerMillion)
@@ -510,6 +522,7 @@ std::string buildSessionReportPdf(const SessionReportInput& in) {
     const VolumeBucket total = volumeTotal(in.allBaskets);
     volumeTable(lay, "BY MONTH", volumeByPeriod(in.allBaskets, VolumePeriod::Month), 24, total);
     volumeTable(lay, "BY DAY (most recent 31)", volumeByPeriod(in.allBaskets, VolumePeriod::Day), 31, total);
+    volumeTable(lay, "BY TRADING SESSION (open when the basket started)", volumeBySession(in.allBaskets), 20, total);
 
     std::vector<BasketRecord> newestFirst(in.allBaskets.rbegin(), in.allBaskets.rend());
     basketTable(lay, newestFirst);
