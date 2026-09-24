@@ -11,14 +11,18 @@
     start-desktop.cmd, start-live.cmd    double-click starters
     README-VPS.md                        the guide (docs\vps.md)
   and your config file if you pass -Config (it holds your FIX password --
-  keep the folder and zip private).
+  keep the folder and zip private). With -WithData also the basket history
+  (muuk_history) and the saved running basket (muuk_state) for that config,
+  so the VPS carries on with the same data -- stop the bot on this PC first.
+  The output folder is recreated from scratch every time.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File tools\package-vps.ps1 -Config .\ic_markets_demo.local.json
+  powershell -ExecutionPolicy Bypass -File tools\package-vps.ps1 -Config .\ic_markets_demo.local.json -WithData
 #>
 param(
     [string]$Config = "",
     [string]$Out = "",
+    [switch]$WithData,
     [switch]$NoZip
 )
 
@@ -45,6 +49,8 @@ if (Test-Path $vswhere) {
 }
 $crtFiles = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 
+# Start from an empty folder: nothing left over from an earlier package.
+if (Test-Path $Out) { Remove-Item $Out -Recurse -Force }
 New-Item -ItemType Directory -Force $Out | Out-Null
 Copy-Item $desktop, $live $Out -Force
 if ($crt) {
@@ -60,6 +66,25 @@ if ($Config) {
     $cfg = Resolve-Path $Config
     Copy-Item $cfg $Out -Force
     Write-Warning "Copied $(Split-Path $cfg -Leaf) -- it contains your FIX password. Keep the folder/zip private."
+    if ($WithData) {
+        if (Get-Process muuk-desktop, muuk-live -ErrorAction SilentlyContinue) {
+            Write-Warning "Muuk is running here: the copied state may already be out of date. Stop it, then package again."
+        }
+        $dataDir = Split-Path $cfg -Parent
+        $history = Join-Path (Join-Path $dataDir "muuk_history") "baskets.jsonl"
+        if (Test-Path $history) {
+            New-Item -ItemType Directory -Force (Join-Path $Out "muuk_history") | Out-Null
+            Copy-Item $history (Join-Path $Out "muuk_history") -Force
+            Write-Host "Basket history copied ($((Get-Content $history | Measure-Object -Line).Lines) baskets)."
+        }
+        $stateName = [IO.Path]::GetFileNameWithoutExtension($cfg) + ".state.json"
+        $state = Join-Path $dataDir "muuk_state\$stateName"
+        if (Test-Path $state) {
+            New-Item -ItemType Directory -Force (Join-Path $Out "muuk_state") | Out-Null
+            Copy-Item $state (Join-Path $Out "muuk_state") -Force
+            Write-Host "Saved state copied ($stateName)."
+        }
+    }
 } else {
     Copy-Item (Join-Path $repo "engine\ctrader_fix\config.example.json") (Join-Path $Out "my_account.local.json") -Force
     Write-Host "No -Config given: put your real config in the folder (a template my_account.local.json is there)."
