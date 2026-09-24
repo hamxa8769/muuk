@@ -124,6 +124,9 @@ powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
   (Sysinternals *Autologon*). Otherwise nobody logs on and nothing starts.
 - The app's own **Connect when the app opens** checkbox does the same
   thing as `--connect`.
+- `muuk-desktop.exe --demo` opens the app with made-up, moving preview
+  data and never connects to a broker -- for looking at the screens
+  without touching the account.
 
 ## 7. Day to day
 

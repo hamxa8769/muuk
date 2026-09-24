@@ -90,7 +90,15 @@ public:
     void startNews(const std::filesystem::path& cacheFile);
     [[nodiscard]] std::shared_ptr<muuk::ctrader_fix::NewsFeed> news() const { return news_; }
 
-    [[nodiscard]] bool isRunning() const { return running_.load(); }
+    // Preview mode (--demo): no broker connection at all; snapshot() returns
+    // made-up, moving data so the screens can be looked at and checked.
+    void enableDemo() {
+        demo_ = true;
+        demoStart_ = std::chrono::steady_clock::now();
+    }
+    [[nodiscard]] bool demo() const { return demo_; }
+
+    [[nodiscard]] bool isRunning() const { return running_.load() || demo_; }
     // Returns the last known state even after the runner has stopped
     // (e.g. a dropped connection), so the UI can show what happened
     // rather than blanking out. std::nullopt only before the first
@@ -141,6 +149,9 @@ private:
     [[nodiscard]] static std::string fileStamp();
 
     std::shared_ptr<muuk::ctrader_fix::NewsFeed> news_;
+    bool demo_ = false;
+    std::chrono::steady_clock::time_point demoStart_{};
+    [[nodiscard]] muuk::ctrader_fix::LiveSnapshot demoSnapshot() const;
     std::string configPath_;  // of the current/last connection
     std::string dataAttachedFor_;
     std::ofstream liveLog_;   // guarded by logMutex_

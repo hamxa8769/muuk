@@ -1,6 +1,7 @@
 #include "live_controller.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <exception>
 #include <fstream>
@@ -44,7 +45,7 @@ void LiveController::startNews(const std::filesystem::path& cacheFile) {
 }
 
 void LiveController::start(const std::string& configPath) {
-    if (running_.load()) return;
+    if (running_.load() || demo_) return;  // the preview never connects
     if (!instanceLock_.acquire(muuk::ctrader_fix::instanceLockFile(configPath))) {
         setError("Muuk is already running with this config (another window, muuk-live, or the auto-start task). "
                  "Close that one first -- two copies on one login keep kicking each other off the broker.");
@@ -229,8 +230,71 @@ bool LiveController::saveSettings(const std::string& configPath, const LiveSetti
 }
 
 std::optional<LiveSnapshot> LiveController::snapshot() const {
+    if (demo_ && !runner_) return demoSnapshot();
     if (!runner_) return std::nullopt;
     return runner_->snapshot();
+}
+
+LiveSnapshot LiveController::demoSnapshot() const {
+    using muuk::core::OrderSide;
+    using muuk::ctrader_fix::PendingOrderInfo;
+    using muuk::ctrader_fix::PositionInfo;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - demoStart_).count();
+    LiveSnapshot s;
+    s.connected = true;
+    s.status = muuk::core::EngineStatus::Active;
+    s.environment = "demo";
+    s.brokerUid = "preview";
+    s.accountLogin = "0000000";
+    s.symbolName = "XAUUSD";
+    s.tradeHost = "no broker - preview data";
+    s.rangeLower = 4271.13;
+    s.rangeUpper = 4273.13;
+    const double mid = 4272.10 + 1.6 * std::sin(t * 0.35) + 0.35 * std::sin(t * 1.7);
+    s.bid = mid - 0.20;
+    s.ask = mid + 0.20;
+    s.settings.autoTarget = true;
+    s.settings.autoTargetPercent = 200;
+    s.settings.stopLoss = 30.0;
+    s.settings.commissionPerMillion = 30.0;
+    muuk::core::CostInputs costs;
+    costs.commissionPerMillionPerSide = 30.0;
+    const muuk::core::SymbolSpec spec;
+    uint64_t id = 9001;
+    auto position = [&](OrderSide side, double lots, double requested, double fill) {
+        const bool buy = side == OrderSide::BuyStop;
+        const double oz = lots * spec.contractSize;
+        PositionInfo p;
+        p.id = id++;
+        p.positionId = "P" + std::to_string(p.id);
+        p.side = side;
+        p.lots = lots;
+        p.requestedPrice = requested;
+        p.entryPrice = fill;
+        p.verified = true;
+        p.pnl.gross = (buy ? mid - requested : requested - mid) * oz;
+        p.pnl.slippage = (buy ? fill - requested : requested - fill) * oz;
+        p.pnl.spread = 0.20 * oz;
+        p.pnl.commission = muuk::core::roundTurnCommissionMoney(lots, fill, spec, costs);
+        p.pnl.net = p.pnl.gross - p.pnl.slippage - p.pnl.spread - p.pnl.commission;
+        p.floatingPnl = p.pnl.net;
+        s.live += p.pnl;
+        s.positions.push_back(p);
+    };
+    position(OrderSide::BuyStop, 0.01, 4273.13, 4273.13);
+    position(OrderSide::SellStop, 0.02, 4271.13, 4270.85);  // slipped
+    position(OrderSide::BuyStop, 0.04, 4273.13, 4273.61);   // slipped
+    PendingOrderInfo o{id++, OrderSide::SellStop, 0.08, 4271.13};
+    o.confirmed = true;
+    s.pendingOrders.push_back(o);
+    s.targetNow = muuk::core::autoTargetMoney(s.live.commission + 2.0 * s.live.spread, 200.0);
+    muuk::ctrader_fix::BasketRecord basket;
+    basket.number = 1;
+    s.currentBasket = basket;
+    s.market = muuk::ctrader_fix::evaluateMarket(muuk::ctrader_fix::utcNowMs(), s.settings.market, nullptr, false);
+    s.marketKnown = true;
+    s.brokerCheckedAt = muuk::ctrader_fix::localTimestamp();
+    return s;
 }
 
 std::vector<std::string> LiveController::logLines() const {

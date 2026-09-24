@@ -1,6 +1,7 @@
 #include "dashboard_window.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -224,145 +225,145 @@ void breakdownRow(const char* label, const char* help, double value, bool isCost
     if (font) ImGui::PopFont();
 }
 
-// The range as a horizontal price scale: the band between the two
-// boundaries, pending orders as triangles (Buy Stop above the track, Sell
-// Stop below), open positions as dots, and the live mid as a marker.
+// The range on a fixed layout: the Sell Stop boundary always sits at 28 %
+// of the width and the Buy Stop at 72 %, so their labels never move; every
+// price is placed relative to them. Rows, top to bottom: side labels,
+// pending-order markers, the track (band, boundary lines, filled positions,
+// live price), boundary prices, the live price, per-side counts.
+float rangeChartHeight() { return ImGui::GetTextLineHeight() * 5.0f + 60.0f; }
+
 void drawRangeChart(const LiveSnapshot& snap, float height) {
     const float width = ImGui::GetContentRegionAvail().x;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(width, height));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const glass::Palette& pal = glass::palette();
+    ImFont* font = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const float smallSize = fs * 0.82f;
+    const float textH = ImGui::GetTextLineHeight();
+    const float left = origin.x + 8.0f;
+    const float right = origin.x + width - 8.0f;
+    const float xLo = left + (right - left) * 0.28f;
+    const float xHi = left + (right - left) * 0.72f;
 
+    const bool haveRange = snap.rangeUpper > snap.rangeLower;
+    const bool haveQuote = snap.bid && snap.ask;
+    const double mid = haveQuote ? (*snap.bid + *snap.ask) / 2.0 : 0.0;
     double lo = snap.rangeLower;
     double hi = snap.rangeUpper;
-    auto include = [&](double p) {
-        if (p <= 0.0) return;
-        lo = std::min(lo, p);
-        hi = std::max(hi, p);
+    if (!haveRange) {
+        lo = mid - 1.0;
+        hi = mid + 1.0;
+    }
+    const double perPx = (hi - lo) / static_cast<double>(xHi - xLo);
+    auto xOf = [&](double p) { return xLo + static_cast<float>((p - lo) / perPx); };
+    auto inView = [&](float x) { return std::clamp(x, left + 6.0f, right - 6.0f); };
+
+    const float labelY = origin.y;
+    const float markY = labelY + textH + 3.0f;  // pending markers, 9 px tall
+    const float trackY = markY + 9.0f + 17.0f;
+    const float valueY = trackY + 16.0f;
+    const float liveY = valueY + textH + 4.0f;
+    const float countY = liveY + textH + 10.0f;
+
+    auto centered = [&](float x, float y, ImU32 color, const std::string& t, float size) {
+        const float w = font->CalcTextSizeA(size, FLT_MAX, 0.0f, t.c_str()).x;
+        dl->AddText(font, size, ImVec2(std::clamp(x - w * 0.5f, left, right - w), y), color, t.c_str());
     };
-    if (snap.bid) include(*snap.bid);
-    if (snap.ask) include(*snap.ask);
-    for (const auto& p : snap.positions) include(p.entryPrice);
-    for (const auto& o : snap.pendingOrders) include(o.price);
-    if (hi - lo < 0.5) {
-        const double mid = (hi + lo) / 2.0;
-        lo = mid - 0.25;
-        hi = mid + 0.25;
-    }
-    const double pad = (hi - lo) * 0.12;
-    lo -= pad;
-    hi += pad;
+    const ImU32 green = ImGui::GetColorU32(kGreen);
+    const ImU32 red = ImGui::GetColorU32(kRed);
+    const ImU32 text = ImGui::GetColorU32(pal.text);
 
-    const float textH = ImGui::GetTextLineHeight();
-    const float left = origin.x + 6.0f;
-    const float right = origin.x + width - 6.0f;
-    const float trackY = origin.y + textH + 34.0f;
-    auto xOf = [&](double p) { return left + static_cast<float>((p - lo) / (hi - lo)) * (right - left); };
-
-    dl->AddRectFilled(ImVec2(left, trackY - 2), ImVec2(right, trackY + 2),
-                      ImGui::GetColorU32(glass::isDark() ? ImVec4(1, 1, 1, 0.08f) : ImVec4(0, 0, 0, 0.08f)), 2.0f);
-
-    if (snap.rangeUpper > snap.rangeLower) {
-        const float x0 = xOf(snap.rangeLower);
-        const float x1 = xOf(snap.rangeUpper);
-        dl->AddRectFilledMultiColor(ImVec2(x0, trackY - 12), ImVec2(x1, trackY + 12),
-                                    ImGui::GetColorU32(withAlpha(kRed, 0.16f)), ImGui::GetColorU32(withAlpha(kGreen, 0.16f)),
-                                    ImGui::GetColorU32(withAlpha(kGreen, 0.16f)), ImGui::GetColorU32(withAlpha(kRed, 0.16f)));
-        dl->AddLine(ImVec2(x0, trackY - 16), ImVec2(x0, trackY + 16), ImGui::GetColorU32(kRed), 2.0f);
-        dl->AddLine(ImVec2(x1, trackY - 16), ImVec2(x1, trackY + 16), ImGui::GetColorU32(kGreen), 2.0f);
-        const std::string loText = price(snap.rangeLower);
-        const std::string hiText = price(snap.rangeUpper);
-        const float labelY = trackY + 30.0f;
-        const ImU32 dim = ImGui::GetColorU32(pal.textDim);
-        const float loW = ImGui::CalcTextSize(loText.c_str()).x;
-        const float hiW = ImGui::CalcTextSize(hiText.c_str()).x;
-        float loX = x0 - loW / 2;
-        float hiX = x1 - hiW / 2;
-        if (loX + loW + 8.0f > hiX) {  // a narrow range on this scale: put them either side instead
-            loX = x0 - loW - 4.0f;
-            hiX = x1 + 4.0f;
-        }
-        dl->AddText(ImVec2(std::max(left, loX), labelY), dim, loText.c_str());
-        dl->AddText(ImVec2(std::min(right - hiW, hiX), labelY), dim, hiText.c_str());
+    // Track and the range band.
+    dl->AddRectFilled(ImVec2(left, trackY - 2.0f), ImVec2(right, trackY + 2.0f),
+                      ImGui::GetColorU32(glass::isDark() ? ImVec4(1, 1, 1, 0.12f) : ImVec4(0, 0, 0, 0.10f)), 2.0f);
+    if (haveRange) {
+        dl->AddRectFilledMultiColor(ImVec2(xLo, trackY - 11.0f), ImVec2(xHi, trackY + 11.0f),
+                                    ImGui::GetColorU32(withAlpha(kRed, 0.30f)), ImGui::GetColorU32(withAlpha(kGreen, 0.30f)),
+                                    ImGui::GetColorU32(withAlpha(kGreen, 0.30f)), ImGui::GetColorU32(withAlpha(kRed, 0.30f)));
+        dl->AddLine(ImVec2(xLo, trackY - 15.0f), ImVec2(xLo, trackY + 15.0f), red, 2.5f);
+        dl->AddLine(ImVec2(xHi, trackY - 15.0f), ImVec2(xHi, trackY + 15.0f), green, 2.5f);
+        centered(xLo, labelY, red, "SELL STOP", fs);
+        centered(xHi, labelY, green, "BUY STOP", fs);
+        centered(xLo, valueY, text, price(lo), fs);
+        centered(xHi, valueY, text, price(hi), fs);
     }
 
-    // Which boundary is which, and how far each side has got.
-    {
-        const ImU32 green = ImGui::GetColorU32(kGreen);
-        const ImU32 red = ImGui::GetColorU32(kRed);
-        if (snap.rangeUpper > snap.rangeLower) {
-            const float x0 = xOf(snap.rangeLower);
-            const float x1 = xOf(snap.rangeUpper);
-            const char* buyText = "BUY STOP";
-            const char* sellText = "SELL STOP";
-            const float bw = ImGui::CalcTextSize(buyText).x;
-            const float sw = ImGui::CalcTextSize(sellText).x;
-            float bx = x1 + 11.0f;
-            if (bx + bw > right) bx = x1 - 11.0f - bw;
-            float sx = x0 - 11.0f - sw;
-            if (sx < left) sx = x0 + 11.0f;
-            const float y = trackY - 17.0f - textH;
-            dl->AddText(ImVec2(bx, y), green, buyText);
-            dl->AddText(ImVec2(sx, y), red, sellText);
-        }
-        int buys = 0;
-        int sells = 0;
-        double buyLots = 0.0;
-        double sellLots = 0.0;
-        for (const auto& p : snap.positions) {
-            if (p.side == OrderSide::BuyStop) {
-                ++buys;
-                buyLots += p.lots;
-            } else {
-                ++sells;
-                sellLots += p.lots;
-            }
-        }
-        std::string buyPending;
-        std::string sellPending;
-        for (const auto& o : snap.pendingOrders) {
-            (o.side == OrderSide::BuyStop ? buyPending : sellPending) =
-                "  |  pending " + lots(o.lots) + (o.waiting ? " (held)" : "");
-        }
-        const std::string sellLine = "Sell: " + std::to_string(sells) + " filled, " + lots(sellLots) + " lots" + sellPending;
-        const std::string buyLine = "Buy: " + std::to_string(buys) + " filled, " + lots(buyLots) + " lots" + buyPending;
-        const float rowY = trackY + 30.0f + textH + 6.0f;
-        const float sellW = ImGui::CalcTextSize(sellLine.c_str()).x;
-        const float buyW = ImGui::CalcTextSize(buyLine.c_str()).x;
-        dl->AddText(ImVec2(left, rowY), red, sellLine.c_str());
-        const float buyY = left + sellW + 16.0f > right - buyW ? rowY + textH + 3.0f : rowY;
-        dl->AddText(ImVec2(right - buyW, buyY), green, buyLine.c_str());
-    }
-
+    // Pending orders: a triangle pointing at the track over their price
+    // (outlined while held back by the bot).
     for (const auto& o : snap.pendingOrders) {
-        const float x = xOf(o.price);
-        if (o.side == OrderSide::BuyStop) {
-            dl->AddTriangleFilled(ImVec2(x, trackY - 29), ImVec2(x - 7, trackY - 18), ImVec2(x + 7, trackY - 18),
-                                  ImGui::GetColorU32(kGreen));
+        const float x = inView(xOf(o.price));
+        const ImU32 c = o.side == OrderSide::BuyStop ? green : red;
+        const ImVec2 a(x - 6.5f, markY);
+        const ImVec2 b(x + 6.5f, markY);
+        const ImVec2 t(x, markY + 9.0f);
+        if (o.waiting) {
+            dl->AddTriangle(a, b, t, c, 1.5f);
         } else {
-            dl->AddTriangleFilled(ImVec2(x, trackY + 29), ImVec2(x + 7, trackY + 18), ImVec2(x - 7, trackY + 18),
-                                  ImGui::GetColorU32(kRed));
+            dl->AddTriangleFilled(a, b, t, c);
         }
     }
+
+    // Filled positions at their real fill price. One that filled away from
+    // its boundary (slippage) gets its own small price label.
     for (const auto& p : snap.positions) {
-        const float x = xOf(p.entryPrice);
-        const ImVec4 c = p.side == OrderSide::BuyStop ? kGreen : kRed;
-        dl->AddCircleFilled(ImVec2(x, trackY), 9.0f, ImGui::GetColorU32(withAlpha(c, 0.22f)), 20);
-        dl->AddCircleFilled(ImVec2(x, trackY), 5.0f, ImGui::GetColorU32(c), 16);
+        const bool buy = p.side == OrderSide::BuyStop;
+        const float x = inView(xOf(p.entryPrice));
+        const ImVec4 c = buy ? kGreen : kRed;
+        dl->AddCircleFilled(ImVec2(x, trackY), 8.0f, ImGui::GetColorU32(withAlpha(c, 0.25f)), 20);
+        dl->AddCircleFilled(ImVec2(x, trackY), 4.5f, ImGui::GetColorU32(c), 16);
+        const float boundaryX = haveRange ? (buy ? xHi : xLo) : x;
+        if (std::fabs(x - boundaryX) >= 14.0f) {
+            centered(x, trackY - 13.0f - smallSize, ImGui::GetColorU32(c), price(p.entryPrice), smallSize);
+        }
     }
 
-    if (snap.bid && snap.ask) {
-        const double mid = (*snap.bid + *snap.ask) / 2.0;
-        const float x = xOf(mid);
-        const ImU32 textCol = ImGui::GetColorU32(pal.text);
-        dl->AddLine(ImVec2(x, origin.y + textH + 3), ImVec2(x, trackY + 12), textCol, 1.5f);
-        dl->AddCircleFilled(ImVec2(x, trackY), 3.0f, textCol, 12);
-        const std::string midText = price(mid);
-        const float tw = ImGui::CalcTextSize(midText.c_str()).x;
-        const float tx = std::clamp(x - tw / 2, left, right - tw);
-        dl->AddText(ImVec2(tx, origin.y), textCol, midText.c_str());
+    // Live price: a marker on the track, its price in a tag underneath.
+    if (haveQuote) {
+        const float raw = xOf(mid);
+        const float x = inView(raw);
+        dl->AddLine(ImVec2(x, trackY - 13.0f), ImVec2(x, trackY + 13.0f), text, 1.5f);
+        dl->AddCircleFilled(ImVec2(x, trackY), 3.5f, text, 12);
+        std::string t = price(mid);
+        if (raw < left + 6.0f) t = "< " + t;
+        if (raw > right - 6.0f) t += " >";
+        const float w = ImGui::CalcTextSize(t.c_str()).x + 14.0f;
+        const float tx = std::clamp(x - w * 0.5f, left, right - w);
+        dl->AddRectFilled(ImVec2(tx, liveY - 2.0f), ImVec2(tx + w, liveY + textH + 2.0f),
+                          ImGui::GetColorU32(glass::isDark() ? ImVec4(1, 1, 1, 0.14f) : ImVec4(0, 0, 0, 0.08f)), 7.0f);
+        dl->AddTriangleFilled(ImVec2(x - 4.0f, liveY - 2.0f), ImVec2(x + 4.0f, liveY - 2.0f), ImVec2(x, liveY - 6.0f),
+                              ImGui::GetColorU32(glass::isDark() ? ImVec4(1, 1, 1, 0.14f) : ImVec4(0, 0, 0, 0.08f)));
+        dl->AddText(ImVec2(tx + 7.0f, liveY), text, t.c_str());
     }
+
+    // How far each side has got.
+    int buys = 0;
+    int sells = 0;
+    double buyLots = 0.0;
+    double sellLots = 0.0;
+    for (const auto& p : snap.positions) {
+        if (p.side == OrderSide::BuyStop) {
+            ++buys;
+            buyLots += p.lots;
+        } else {
+            ++sells;
+            sellLots += p.lots;
+        }
+    }
+    std::string buyPending;
+    std::string sellPending;
+    for (const auto& o : snap.pendingOrders) {
+        (o.side == OrderSide::BuyStop ? buyPending : sellPending) =
+            "  |  pending " + lots(o.lots) + (o.waiting ? " (held)" : "");
+    }
+    const std::string sellLine = "Sell: " + std::to_string(sells) + " filled, " + lots(sellLots) + " lots" + sellPending;
+    const std::string buyLine = "Buy: " + std::to_string(buys) + " filled, " + lots(buyLots) + " lots" + buyPending;
+    const float sellW = ImGui::CalcTextSize(sellLine.c_str()).x;
+    const float buyW = ImGui::CalcTextSize(buyLine.c_str()).x;
+    dl->AddText(ImVec2(left, countY), red, sellLine.c_str());
+    const float buyY = left + sellW + 16.0f > right - buyW ? countY + textH + 3.0f : countY;
+    dl->AddText(ImVec2(right - buyW, buyY), green, buyLine.c_str());
 }
 
 // Numeric settings row; marks `dirty` when edited.
@@ -927,7 +928,7 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::TextColored(kBlue, "%ds", snap->cooldownRemainingSeconds);
     }
 
-    const float chartHeight = ImGui::GetTextLineHeight() * 4.0f + 82.0f;
+    const float chartHeight = rangeChartHeight();
     if (snap && connected) {
         drawRangeChart(*snap, chartHeight);
     } else {
@@ -1882,7 +1883,8 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
 void DashboardWindow::requestExit(LiveController& controller) {
     if (exitApproved_) return;
     const std::optional<LiveSnapshot> snap = controller.snapshot();
-    const bool exposure = snap && (!snap->positions.empty() || !snap->pendingOrders.empty());
+    // The preview's positions are made up: nothing to guard.
+    const bool exposure = !controller.demo() && snap && (!snap->positions.empty() || !snap->pendingOrders.empty());
     if (!exposure) {
         exitApproved_ = true;
         return;
@@ -2950,8 +2952,11 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     const LiveSettings& s = snap.settings;
     const double net = floatingPnl(snap);
     const double target = snap.targetNow > 0.0 ? snap.targetNow : s.profitTarget;
+    const bool haveStop = s.stopLoss > 0.0;
+    const double lossScale = haveStop ? s.stopLoss : (s.maxBasketLoss > 0.0 ? s.maxBasketLoss : std::max(target, 0.01));
     const float h = ImGui::GetFrameHeight();
 
+    // Row 1: gear, net, target.
     if (gearButton("##targetgear", h)) {
         ImGui::OpenPopup("target_popup");
         // Open below the gear if it fits, otherwise above it -- never off the bottom of the window.
@@ -2959,24 +2964,52 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
         const ImVec2 gearMax = ImGui::GetItemRectMax();
         const float displayH = ImGui::GetIO().DisplaySize.y;
         const bool below = displayH - gearMax.y > 300.0f;
-        ImGui::SetNextWindowPos(below ? ImVec2(gearMin.x, gearMax.y + 4.0f) : ImVec2(gearMin.x, gearMin.y - 4.0f),
-                                ImGuiCond_Always, below ? ImVec2(0.0f, 0.0f) : ImVec2(0.0f, 1.0f));
+        // Applied right before BeginPopup (a tooltip in between would take it otherwise).
+        targetPopupPos_ = below ? ImVec2(gearMin.x, gearMax.y + 4.0f) : ImVec2(gearMin.x, gearMin.y - 4.0f);
+        targetPopupPivot_ = below ? ImVec2(0.0f, 0.0f) : ImVec2(0.0f, 1.0f);
     }
+    ImGui::SetItemTooltip("Profit target: fixed, or automatic from what the open positions cost.");
+    ImGui::SameLine(0.0f, 8.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("NET");
+    ImGui::SameLine();
+    withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(net), "%s", money(net).c_str()); });
+    const std::string targetText =
+        "target " + money(target) + (s.autoTarget ? "  (auto " + std::to_string(s.autoTargetPercent) + "%)" : "");
+    ImGui::SameLine(0.0f, 12.0f);
+    const float targetW = ImGui::CalcTextSize(targetText.c_str()).x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    if (avail > targetW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - targetW);
+    ImGui::TextColored(kGreen, "%s", targetText.c_str());
+
+    // Row 2: the bar.
+    glass::pnlBar("net_bar", static_cast<float>(net), static_cast<float>(lossScale),
+                  static_cast<float>(std::max(target, 0.01)));
+    ImGui::SetItemTooltip("Net P/L of the open positions (after commission and spread).\n"
+                          "Right, green: towards the profit target. Left, red: towards %s.\n"
+                          "The colour deepens as it grows; each move pulses green (up) or red (down).",
+                          haveStop ? "the stop loss" : (s.maxBasketLoss > 0.0 ? "the max basket loss" : "a loss the size of the target"));
+
+    // Row 3: the scale under it.
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImFont* font = ImGui::GetFont();
+        const float size = ImGui::GetFontSize() * 0.82f;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x;
+        const std::string lossText = money(-lossScale) + (haveStop ? " stop" : "");
+        const std::string winText = money(target);
+        const float winW = font->CalcTextSizeA(size, FLT_MAX, 0.0f, winText.c_str()).x;
+        const float zeroW = font->CalcTextSizeA(size, FLT_MAX, 0.0f, "0").x;
+        dl->AddText(font, size, ImVec2(p.x, p.y), ImGui::GetColorU32(kRed), lossText.c_str());
+        dl->AddText(font, size, ImVec2(p.x + (w - zeroW) * 0.5f, p.y), ImGui::GetColorU32(glass::palette().textDim), "0");
+        dl->AddText(font, size, ImVec2(p.x + w - winW, p.y), ImGui::GetColorU32(kGreen), winText.c_str());
+        ImGui::Dummy(ImVec2(w, size + 2.0f));
+    }
+
+    ImGui::SetNextWindowPos(targetPopupPos_, ImGuiCond_Appearing, targetPopupPivot_);
     ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
                                         ImVec2(FLT_MAX, std::max(200.0f, ImGui::GetIO().DisplaySize.y - 24.0f)));
-    ImGui::SetItemTooltip("Profit target: fixed, or automatic from what the open positions cost.");
-    ImGui::SameLine(0.0f, 6.0f);
-    const double lossScale =
-        s.stopLoss > 0.0 ? s.stopLoss : (s.maxBasketLoss > 0.0 ? s.maxBasketLoss : std::max(target, 0.01));
-    std::string overlay = money(net) + " net   |   target " + money(target);
-    if (s.autoTarget) overlay += "  (auto " + std::to_string(s.autoTargetPercent) + "%)";
-    glass::balanceBar("target_bar", static_cast<float>(net), static_cast<float>(lossScale),
-                      static_cast<float>(std::max(target, 0.01)), overlay.c_str());
-    ImGui::SetItemTooltip("Right, green: towards the profit target. Left, red: in loss (full at %s). The colour gets "
-                          "stronger the further it goes.",
-                          s.stopLoss > 0.0 ? "your stop loss" : (s.maxBasketLoss > 0.0 ? "your max basket loss"
-                                                                                       : "the size of the target"));
-
     if (ImGui::BeginPopup("target_popup")) {
         withFont(boldFont_, [] { ImGui::TextUnformatted("Profit target"); });
         const std::optional<LiveSnapshot> opt(snap);

@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <imgui.h>
+
 #include "app_prefs.hpp"
 #include "live_controller.hpp"
 #include "system_monitor.hpp"
@@ -166,6 +168,8 @@ private:
         double commission = 0.0;
     };
     std::vector<SessionRow> sessionRows_;  // History > By trading session
+    ImVec2 targetPopupPos_{0.0f, 0.0f};    // where the gear's popup opens
+    ImVec2 targetPopupPivot_{0.0f, 0.0f};
     uint64_t sessionRowsRev_ = ~uint64_t{0};
     bool newsUsdOnly_ = true;
     bool newsHideLow_ = true;

@@ -306,12 +306,15 @@ int main(int argc, char** argv) {
     // launch (for an unattended VPS that restarts the app on boot).
     std::string configArg;
     bool connectOnLaunch = false;
+    bool demo = false;  // --demo: preview data, never connects
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             configArg = argv[++i];
         } else if (arg == "--connect") {
             connectOnLaunch = true;
+        } else if (arg == "--demo") {
+            demo = true;
         }
     }
 
@@ -372,8 +375,9 @@ int main(int argc, char** argv) {
     dashboard.setRenderer(renderer.name(), renderer.software());
     dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
     if (!configArg.empty()) dashboard.setConfigPath(configArg);
+    if (demo) controller.enableDemo();
     // --connect, or the "Connect when the app opens" preference.
-    if ((connectOnLaunch || dashboard.autoConnect()) && !dashboard.configPath().empty()) {
+    if (!demo && (connectOnLaunch || dashboard.autoConnect()) && !dashboard.configPath().empty()) {
         controller.start(dashboard.configPath());
     }
 

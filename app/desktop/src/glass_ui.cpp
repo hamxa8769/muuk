@@ -427,4 +427,92 @@ void balanceBar(const char* id, float value, float negScale, float posScale, con
 
 float ease(const char* id, float target, float speed) { return animate(ImGui::GetID(id), target, speed); }
 
+void pnlBar(const char* id, float value, float negScale, float posScale, float height) {
+    struct BarState {
+        float shown = 0.0f;
+        float last = 0.0f;
+        float pulse = 0.0f;  // 0..1, decays after each move
+        bool rising = true;
+        bool init = false;
+    };
+    static std::unordered_map<ImGuiID, BarState> states;
+    BarState& st = states[ImGui::GetID(id)];
+
+    const float neg = std::max(negScale, 0.01f);
+    const float pos = std::max(posScale, 0.01f);
+    // Normalised to [-1, 1]: -1 = loss limit, +1 = target.
+    const float target = value >= 0.0f ? std::min(value / pos, 1.0f) : std::max(value / neg, -1.0f);
+    const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.25f);
+    if (!st.init) {
+        st.shown = st.last = target;
+        st.init = true;
+    }
+    const float move = target - st.last;
+    if (std::fabs(move) > 0.0005f) {
+        st.pulse = std::min(1.0f, st.pulse * 0.5f + 0.45f + std::fabs(move) * 8.0f);
+        st.rising = move > 0.0f;
+        st.last = target;
+    }
+    st.pulse *= std::exp(-3.2f * dt);
+    st.shown = g_lowPower ? target : st.shown + (target - st.shown) * (1.0f - std::exp(-16.0f * dt));
+    const float shown = st.shown;
+    const float strength = std::min(1.0f, std::fabs(shown));
+
+    const float h = height > 0.0f ? height : ImGui::GetFrameHeight() * 0.85f;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const ImVec2 b(a.x + w, a.y + h);
+    const float mid = a.x + w * 0.5f;
+    const float r = h * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Track: faint red / green halves; the side the basket is on glows more.
+    dl->AddRectFilled(a, b, col(g_dark ? ImVec4(1, 1, 1, 0.06f) : ImVec4(0, 0, 0, 0.06f)), r);
+    dl->AddRectFilled(a, ImVec2(mid, b.y), col(alpha(kRed, 0.07f + (shown < 0.0f ? 0.10f * strength : 0.0f))), r,
+                      ImDrawFlags_RoundCornersLeft);
+    dl->AddRectFilled(ImVec2(mid, a.y), b, col(alpha(kGreen, 0.07f + (shown > 0.0f ? 0.10f * strength : 0.0f))), r,
+                      ImDrawFlags_RoundCornersRight);
+    // Quarter marks for scale.
+    for (int q = 1; q <= 3; ++q) {
+        const float off = w * 0.5f * static_cast<float>(q) / 4.0f;
+        for (const float x : {mid - off, mid + off}) {
+            dl->AddLine(ImVec2(x, a.y + h * 0.3f), ImVec2(x, b.y - h * 0.3f),
+                        col(alpha(g_palette.textDim, 0.30f)), 1.0f);
+        }
+    }
+
+    if (std::fabs(shown) > 0.002f) {
+        const bool up = shown > 0.0f;
+        // Near zero a muted tone, deepening to full green / red towards the ends.
+        const ImVec4 full = up ? kGreen : kRed;
+        const ImVec4 dim = g_palette.textDim;
+        const float k = 0.40f + 0.60f * strength;
+        const ImVec4 c(dim.x + (full.x - dim.x) * k, dim.y + (full.y - dim.y) * k, dim.z + (full.z - dim.z) * k, 1.0f);
+        const float edge = mid + shown * (w * 0.5f);
+        const ImVec2 fa(up ? mid : edge, a.y);
+        const ImVec2 fb(up ? edge : mid, b.y);
+        const ImDrawFlags corners = up ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersLeft;
+        dl->AddRectFilled(fa, fb, col(c), r, corners);
+        // Gloss on the top half.
+        dl->AddRectFilled(fa, ImVec2(fb.x, a.y + h * 0.45f), col(ImVec4(1, 1, 1, g_dark ? 0.14f : 0.22f)), r,
+                          up ? ImDrawFlags_RoundCornersTopRight : ImDrawFlags_RoundCornersTopLeft);
+        // The moving edge: a bright head.
+        dl->AddRectFilled(ImVec2(edge - (up ? 3.0f : 0.0f), a.y + 1.0f), ImVec2(edge + (up ? 0.0f : 3.0f), b.y - 1.0f),
+                          col(ImVec4(1, 1, 1, 0.55f)), 1.5f);
+    }
+    // The beat: a glow at the edge on every move, coloured by its direction.
+    if (st.pulse > 0.02f) {
+        const float edge = mid + shown * (w * 0.5f);
+        const ImVec4 beat = st.rising ? kGreen : kRed;
+        const ImVec2 c(edge, a.y + r);
+        dl->AddCircleFilled(c, h * (0.55f + 0.75f * st.pulse), col(alpha(beat, 0.16f * st.pulse)), 24);
+        dl->AddCircleFilled(c, h * (0.35f + 0.35f * st.pulse), col(alpha(beat, 0.30f * st.pulse)), 20);
+        dl->AddRect(ImVec2(a.x - 1.0f, a.y - 1.0f), ImVec2(b.x + 1.0f, b.y + 1.0f), col(alpha(beat, 0.45f * st.pulse)),
+                    r + 1.0f, 0, 1.5f);
+    }
+    dl->AddLine(ImVec2(mid, a.y - 3.0f), ImVec2(mid, b.y + 3.0f), col(g_palette.text), 1.5f);
+    dl->AddRect(a, b, col(g_palette.cardBorder), r, 0, 1.0f);
+    ImGui::Dummy(ImVec2(w, h));
+}
+
 }  // namespace muuk::desktop::glass

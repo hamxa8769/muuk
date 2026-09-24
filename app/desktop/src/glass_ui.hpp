@@ -72,6 +72,14 @@ void progress(const char* id, float fraction, ImVec4 color, const char* overlay,
 void balanceBar(const char* id, float value, float negScale, float posScale, const char* overlay,
                 float height = 0.0f);
 
+// The net P/L bar: centred on zero, green grows right towards `posScale`
+// (the target), red grows left towards `negScale` (the loss limit). It
+// glides to each new value, its colour deepens with the size of the net,
+// and every move gives a short "beat" -- a glow at the moving edge, green
+// when the net rose, red when it fell, stronger for a bigger jump. No text
+// inside: labels go around it so they're always readable.
+void pnlBar(const char* id, float value, float negScale, float posScale, float height = 0.0f);
+
 // Eases a displayed value towards `target` (per-id), for smooth numbers.
 [[nodiscard]] float ease(const char* id, float target, float speed = 10.0f);
 
