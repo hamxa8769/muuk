@@ -53,6 +53,7 @@ struct CancelOrderCommand {
 
 struct CloseBasketCommand {
     double netPnlMoney = 0.0;
+    bool stopLoss = false;  // closed by StrategyConfig::basketStopLossMoney, not the profit target
     // The net open exposure being closed. A live driver needs this to send
     // an actual closing trade at the broker -- BacktestRunner doesn't (its
     // book is a pure internal accounting simulation, not a real position).

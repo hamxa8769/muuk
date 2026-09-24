@@ -341,9 +341,14 @@ void LiveRunner::run() {
             } else if (holdAutoStart_) {
                 log("[resume] not opening a range by itself after an interrupted basket -- press Open range");
             } else if (config_.connection.autoContinue) {
-                beginBasket();
-                for (const auto& cmd : engine_->start()) handleCommand(cmd);
-                started = true;
+                if (spreadTooWideLocked()) {
+                    reopenAfterManualClose_ = true;  // starts as soon as the spread is back in range
+                    reopenCooldownSeconds_ = 0;
+                } else {
+                    beginBasket();
+                    for (const auto& cmd : engine_->start()) handleCommand(cmd);
+                    started = true;
+                }
             }
         }
         log(started ? "engine is now active" : "connected -- waiting for Open range");
@@ -866,9 +871,71 @@ void LiveRunner::releaseWaitingOrdersLocked() {
     }
 }
 
+bool LiveRunner::spreadTooWideLocked() {
+    const int64_t limit = config_.strategy.riskLimits.maxSpreadTicks;
+    if (limit <= 0 || !latestBid_ || !latestAsk_) return false;
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const int64_t spread = Price::fromDouble(*latestAsk_, spec).ticks - Price::fromDouble(*latestBid_, spec).ticks;
+    if (spread <= limit) {
+        if (spreadWaitLogged_) log("[spread] back within the limit -- a new range can open");
+        spreadWaitLogged_ = false;
+        return false;
+    }
+    if (!spreadWaitLogged_) {
+        log("[spread] spread " + std::to_string(static_cast<double>(spread) * spec.tickSize) + " is above the limit " +
+            std::to_string(static_cast<double>(limit) * spec.tickSize) + " -- a new range waits until it narrows");
+        spreadWaitLogged_ = true;
+    }
+    return true;
+}
+
+void LiveRunner::finishAckCheckLocked(const std::vector<ExecutionReportInfo>& reports) {
+    std::unordered_set<OrderId> atBroker;
+    for (const auto& r : reports) {
+        if (const auto id = tryParseOrderId(r.clOrdId)) atBroker.insert(*id);
+    }
+    for (const OrderId id : awaitingAck_) {
+        if (placedOrderInfo_.count(id) == 0) continue;  // filled / rejected / cancelled meanwhile
+        const auto sent = orderSentAt_.find(std::to_string(id));
+        if (sent == orderSentAt_.end()) continue;  // its answer arrived meanwhile
+        orderSentAt_.erase(sent);
+        if (atBroker.count(id) > 0) {
+            log("[guard] order " + std::to_string(id) + " is working at the broker (its confirmation never arrived)");
+            continue;
+        }
+        log("[guard] MISSED: order " + std::to_string(id) + " never reached the broker -- placing it again");
+        placedOrderInfo_.erase(id);
+        markDirty();
+        if (engine_ && engine_->status() == EngineStatus::Active) {
+            for (const auto& cmd : engine_->replaceOrder(id)) handleCommand(cmd);
+        }
+    }
+    awaitingAck_.clear();
+}
+
 void LiveRunner::checkBasketHealthLocked() {
-    if (!engine_ || !tradeSession_ || engine_->status() != EngineStatus::Active || engine_->seeding() ||
-        !pendingCloses_.empty()) {
+    if (!engine_ || !tradeSession_) return;
+    // Orders the broker hasn't answered at all: ask it what it has.
+    const auto now = std::chrono::steady_clock::now();
+    if (!awaitingAck_.empty() && now - ackCheckSentAt_ > std::chrono::seconds(15)) {
+        log("[guard] the broker didn't answer the order check -- will ask again");
+        awaitingAck_.clear();
+        activeMassStatusReqId_.clear();
+    }
+    if (awaitingAck_.empty() && activeMassStatusReqId_.empty() && config_.connection.orderAckTimeoutSeconds > 0) {
+        const auto timeout = std::chrono::seconds(config_.connection.orderAckTimeoutSeconds);
+        for (const auto& [id, leg] : placedOrderInfo_) {
+            const auto sent = orderSentAt_.find(std::to_string(id));
+            if (sent != orderSentAt_.end() && now - sent->second > timeout) awaitingAck_.insert(id);
+        }
+        if (!awaitingAck_.empty()) {
+            log("[guard] no answer from the broker for " + std::to_string(awaitingAck_.size()) + " order(s) after " +
+                std::to_string(config_.connection.orderAckTimeoutSeconds) + "s -- checking with the broker");
+            ackCheckSentAt_ = now;
+            requestOrderStatusLocked();
+        }
+    }
+    if (engine_->status() != EngineStatus::Active || engine_->seeding() || !pendingCloses_.empty()) {
         return;
     }
     const SymbolSpec& spec = config_.strategy.symbol;
@@ -950,8 +1017,7 @@ void LiveRunner::maybeRestartAfterBasketClose() {
         return;  // the operator opens the next range by hand (openRange)
     }
 
-    const int cooldownSeconds =
-        afterManualClose ? config_.connection.manualCloseCooldownSeconds : config_.connection.basketCooldownSeconds;
+    const int cooldownSeconds = afterManualClose ? reopenCooldownSeconds_ : config_.connection.basketCooldownSeconds;
     if (cooldownSeconds > 0) {
         const auto now = std::chrono::steady_clock::now();
         if (!cooldownActive_) {
@@ -959,7 +1025,7 @@ void LiveRunner::maybeRestartAfterBasketClose() {
             // from right now, not from whenever it merely decided to close.
             cooldownActive_ = true;
             cooldownUntil_ = now + std::chrono::seconds(cooldownSeconds);
-            log(std::string(afterManualClose ? "[manual] range closed and flat" : "[basket] fully flat") +
+            log(std::string(afterManualClose ? "[range] flat" : "[basket] fully flat") +
                 "; next range opens after a " + std::to_string(cooldownSeconds) + "s cooldown");
             markDirty();
             return;
@@ -968,14 +1034,17 @@ void LiveRunner::maybeRestartAfterBasketClose() {
             return;  // still cooling down -- this function gets called again on the next tick
         }
     }
+    // A new range never starts into a spread spike: wait (re-checked on
+    // every tick) -- the cooldown, if any, stays served.
+    if (spreadTooWideLocked()) return;
 
     cooldownActive_ = false;
     markDirty();
     if (afterManualClose) {
-        reopenAfterManualClose_ = false;
         if (!latestBid_ || !latestAsk_) return;  // no live price to center on
+        reopenAfterManualClose_ = false;
         prepareNextCycle(true);
-        log("[manual] cooldown over -- opening a new range around " + std::to_string((*latestBid_ + *latestAsk_) / 2.0));
+        log("[range] opening a new range around " + std::to_string((*latestBid_ + *latestAsk_) / 2.0));
         closeReason_.clear();
         beginBasket();
         for (const auto& cmd : engine_->start()) handleCommand(cmd);
@@ -1039,10 +1108,11 @@ void LiveRunner::handleCommand(const Command& cmd) {
         }
         tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(cancel->id)));
     } else if (const auto* close = std::get_if<CloseBasketCommand>(&cmd)) {
-        log("[basket] target reached, net P/L = " + std::to_string(close->netPnlMoney) + ", " +
-            std::to_string(openLegs_.size()) + " leg(s) to flatten");
+        log(std::string(close->stopLoss ? "[basket] STOP LOSS reached" : "[basket] target reached") +
+            ", net P/L = " + std::to_string(close->netPnlMoney) + ", " + std::to_string(openLegs_.size()) +
+            " leg(s) to flatten");
         ++basketsClosed_;  // booked P/L itself comes from the real closing fills (see onTradeMessage)
-        setCloseReason("profit target");
+        setCloseReason(close->stopLoss ? "stop loss" : "profit target");
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
@@ -1234,6 +1304,8 @@ bool LiveRunner::openRange() {
         log("[manual] can't open a range: no live quote yet");
         return false;
     }
+    spreadWaitLogged_ = false;
+    if (spreadTooWideLocked()) return false;  // logs why
 
     if (engine_->status() != EngineStatus::Idle) engine_->stopCycle();  // Completed / HaltedByRisk -> Idle
     cooldownActive_ = false;
@@ -1257,6 +1329,7 @@ void LiveRunner::closeRange(bool reopen) {
     cooldownActive_ = false;
     reopenAfterManualClose_ =
         reopen && config_.connection.autoContinue && config_.connection.manualCloseCooldownSeconds > 0;
+    reopenCooldownSeconds_ = config_.connection.manualCloseCooldownSeconds;
     if (reopenAfterManualClose_) {
         log("[manual] a new range opens " + std::to_string(config_.connection.manualCloseCooldownSeconds) +
             "s after everything is closed (Auto-open is on)");
@@ -1475,6 +1548,11 @@ void LiveRunner::requestOrderStatusLocked() {
 }
 
 void LiveRunner::finishOrderSync(std::vector<ExecutionReportInfo> reports, bool known) {
+    if (!connectSync_) {  // a check for unconfirmed orders while running
+        activeMassStatusReqId_.clear();
+        finishAckCheckLocked(reports);
+        return;
+    }
     connectOrders_ = std::move(reports);
     connectOrdersKnown_ = known;
     activeMassStatusReqId_.clear();

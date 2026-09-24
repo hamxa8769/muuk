@@ -23,7 +23,7 @@ void StrategyEngine::resetCycleState() {
 }
 
 void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount,
-                                  std::optional<Price> priceOverride) {
+                                  std::optional<Price> priceOverride, bool initial) {
     const Volume lot = computeSequenceLot(config_.lotProgression, seqIndex, config_.symbol);
 
     RiskCheckInput riskInput;
@@ -39,8 +39,10 @@ void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex
     // does not own (it belongs to a broker/account adapter added in a later
     // phase). Left at 0 == "unconstrained" until that adapter exists.
     riskInput.marginUsageFraction = 0.0;
-    riskInput.currentSpreadTicks = lastTick_.ask.ticks - lastTick_.bid.ticks;
-    riskInput.estimatedSlippageTicks = static_cast<int64_t>(config_.costs.slippageBufferTicks);
+    // Spread and slippage are momentary market conditions: they may hold
+    // back a new cycle, never a running one (see tryArmOrder's comment).
+    riskInput.currentSpreadTicks = initial ? lastTick_.ask.ticks - lastTick_.bid.ticks : 0;
+    riskInput.estimatedSlippageTicks = initial ? static_cast<int64_t>(config_.costs.slippageBufferTicks) : 0;
 
     const RiskLimitKind breach = evaluateRisk(config_.riskLimits, riskInput);
     if (breach != RiskLimitKind::None) {
@@ -96,19 +98,19 @@ CommandBatch StrategyEngine::armInitialOrders() {
         // cancelled seed's slot was never actually used by a fill.
         const int seedSeq = nextSequenceIndex_;
         if (config_.startSide != StartSide::SellOnly) {
-            tryArmOrder(out, OrderSide::BuyStop, seedSeq, 0, seedUpper);
+            tryArmOrder(out, OrderSide::BuyStop, seedSeq, 0, seedUpper, true);
         }
         if (config_.startSide != StartSide::BuyOnly && status_ != EngineStatus::HaltedByRisk) {
-            tryArmOrder(out, OrderSide::SellStop, seedSeq, 0, seedLower);
+            tryArmOrder(out, OrderSide::SellStop, seedSeq, 0, seedLower, true);
         }
         ++nextSequenceIndex_;
     } else {
         if (config_.startSide != StartSide::SellOnly) {
-            tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_);
+            tryArmOrder(out, OrderSide::BuyStop, nextSequenceIndex_, 0, std::nullopt, true);
             ++nextSequenceIndex_;
         }
         if (config_.startSide != StartSide::BuyOnly && status_ != EngineStatus::HaltedByRisk) {
-            tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_);
+            tryArmOrder(out, OrderSide::SellStop, nextSequenceIndex_, 0, std::nullopt, true);
             ++nextSequenceIndex_;
         }
     }
@@ -245,12 +247,16 @@ CommandBatch StrategyEngine::onTick(const TickEvent& tick) {
     lastBasketPnl_ = evaluateBasketPnl(tick);
 
     const bool haveOpenExposure = (buyAggregate_.totalVolumeSteps + sellAggregate_.totalVolumeSteps) > 0;
-    if (haveOpenExposure && config_.basketProfitTargetMoney > 0.0 &&
-        lastBasketPnl_.netPnlMoney >= config_.basketProfitTargetMoney) {
+    const bool targetHit = config_.basketProfitTargetMoney > 0.0 &&
+                           lastBasketPnl_.netPnlMoney >= config_.basketProfitTargetMoney;
+    const bool stopHit = config_.basketStopLossMoney > 0.0 &&
+                         lastBasketPnl_.netPnlMoney <= -config_.basketStopLossMoney;
+    if (haveOpenExposure && (targetHit || stopHit)) {
         const int64_t netSteps = buyAggregate_.totalVolumeSteps - sellAggregate_.totalVolumeSteps;
         const OrderSide closeSide = netSteps >= 0 ? OrderSide::BuyStop : OrderSide::SellStop;
         const Volume closeVolume{netSteps >= 0 ? netSteps : -netSteps};
-        out.push_back(CloseBasketCommand{lastBasketPnl_.netPnlMoney, closeSide, closeVolume});
+        CloseBasketCommand close{lastBasketPnl_.netPnlMoney, !targetHit, closeSide, closeVolume};
+        out.push_back(close);
         for (const auto& armed : pendingOrders_) {
             out.push_back(CancelOrderCommand{armed.order.id});
         }

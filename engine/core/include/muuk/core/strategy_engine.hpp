@@ -33,6 +33,9 @@ struct StrategyConfig {
     RiskLimits riskLimits;
     CostInputs costs;
     double basketProfitTargetMoney = 0.0;
+    // >0: close the whole basket once its net P/L falls to -this (a hard
+    // loss cap; closes exactly like the profit target does). 0 = off.
+    double basketStopLossMoney = 0.0;
     int maxRejectRetries = 3;
     // true (default): proposal §4 behavior — on fill, immediately re-arm
     // the triggering side with the next lot in the progression
@@ -222,8 +225,12 @@ private:
     // `priceOverride`, when set, is used instead of
     // boundaryPriceForSide(side) — only seed orders (see seedOffsetPoints)
     // need this; every normal call omits it.
+    // `initial`: one of a new cycle's first orders. Only those are held back
+    // by the spread/slippage limits -- once a basket is running, its next
+    // order must always go out (a spread spike at that moment used to halt
+    // the whole basket, leaving its positions without their next order).
     void tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex, int retryCount = 0,
-                      std::optional<Price> priceOverride = std::nullopt);
+                      std::optional<Price> priceOverride = std::nullopt, bool initial = false);
 
     BasketPnlResult evaluateBasketPnl(const TickEvent& tick) const;
 

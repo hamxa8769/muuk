@@ -324,19 +324,35 @@ bool LiveController::resetData(const std::string& configPath) {
             std::filesystem::create_directories(liveFile.parent_path(), ec);
             liveLog_.open(liveFile, std::ios::app);
         }
+        const std::filesystem::path reports = dir / "muuk_reports";
+        if (std::filesystem::exists(reports, ec)) {
+            const std::filesystem::path archive = reports / "archive" / ("until_" + stamp);
+            std::filesystem::create_directories(archive);
+            for (const auto& entry : std::filesystem::directory_iterator(reports)) {
+                if (entry.is_regular_file()) std::filesystem::rename(entry.path(), archive / entry.path().filename());
+            }
+        }
         {
             std::scoped_lock lock(historyMutex_);
             history_.clear();
             historyLoadedFor_ = configPath;
             ++historyRevision_;
         }
+        reconnects_ = 0;
+        consecutiveFailures_ = 0;
+        lastDrop_.clear();
+        lastDropAt_.clear();
+        clearError();
         if (runner_ && running_.load()) {
             runner_->resetStats();
         } else {
             muuk::ctrader_fix::resetStateStatistics(muuk::ctrader_fix::defaultStateFile(configPath));
+            // Not connected: drop the last session's snapshot too, so nothing old stays on screen.
+            if (thread_.joinable()) thread_.join();
+            runner_.reset();
         }
-        appendLog("[reset] fresh start: basket history and log archived under muuk_history/archive and "
-                  "muuk_logs/archive; statistics start over now");
+        appendLog("[reset] fresh start: basket history, log and reports archived (muuk_history/archive, "
+                  "muuk_logs/archive, muuk_reports/archive); every statistic starts over now");
         return true;
     } catch (const std::exception& ex) {
         setError(std::string("reset: ") + ex.what());

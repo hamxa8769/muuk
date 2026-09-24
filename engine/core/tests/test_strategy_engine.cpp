@@ -738,3 +738,49 @@ TEST_CASE("armNextAfter arms the missing next order of a resumed basket; replace
     REQUIRE(placeCmd(after, 0).side == OrderSide::BuyStop);
     REQUIRE(placeCmd(after, 0).volume.toDouble(spec) == Catch::Approx(0.05));
 }
+
+TEST_CASE("Stop loss closes the whole basket once its net loss reaches the limit") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.basketProfitTargetMoney = 5.0;
+    cfg.basketStopLossMoney = 2.0;
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const PlaceOrderCommand buy1 = placeCmd(engine.start(), 0);
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price});  // BUY 0.01 @ 4337.00; Sell Stop pending
+
+    // -$1.50: still inside the limit.
+    REQUIRE(engine.onTick(TickEvent{Price::fromDouble(4335.50, spec), Price::fromDouble(4335.50, spec)}).empty());
+    // -$2.10 (the Sell Stop at 4336 would have filled in reality; here it stays pending): stop loss.
+    const CommandBatch out = engine.onTick(TickEvent{Price::fromDouble(4334.90, spec), Price::fromDouble(4334.90, spec)});
+    REQUIRE_FALSE(out.empty());
+    const auto& close = std::get<CloseBasketCommand>(out[0]);
+    REQUIRE(close.stopLoss);
+    REQUIRE(close.netPnlMoney == Catch::Approx(-2.10));
+    REQUIRE(engine.status() == EngineStatus::Completed);
+    REQUIRE(engine.activeOrderCount() == 0);
+}
+
+TEST_CASE("A spread spike never halts a running basket -- its next order still goes out") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.startSide = StartSide::BuyOnly;
+    cfg.riskLimits.maxSpreadTicks = 50;  // $0.50
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.60, spec)});
+    const PlaceOrderCommand buy1 = placeCmd(engine.start(), 0);
+
+    // News: the spread blows out to $1.20 right as the Buy Stop fills.
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.40, spec), Price::fromDouble(4337.60, spec)});
+    const CommandBatch after = engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price});
+    REQUIRE(engine.status() == EngineStatus::Active);  // not HaltedByRisk
+    REQUIRE(after.size() == 1);
+    REQUIRE(placeCmd(after, 0).side == OrderSide::SellStop);
+
+    // A NEW cycle, though, doesn't start into a spike.
+    StrategyEngine fresh(cfg);
+    (void)fresh.onTick(TickEvent{Price::fromDouble(4336.40, spec), Price::fromDouble(4337.60, spec)});
+    (void)fresh.start();
+    REQUIRE(fresh.status() == EngineStatus::HaltedByRisk);
+}

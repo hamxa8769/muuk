@@ -30,6 +30,10 @@ void FixSession::start(std::chrono::milliseconds timeout) {
     if (ec) {
         throw FixSessionError("failed to connect to " + host_ + ":" + port_ + ": " + ec.message());
     }
+    // Send every FIX message the moment it's written. Without this, TCP
+    // (Nagle's algorithm) may hold a small message -- an order -- back for up
+    // to ~200 ms waiting to batch it with the next one.
+    socket_.set_option(asio::ip::tcp::no_delay(true), ec);
 
     outgoingSeqNum_ = 1;
     loggedOn_ = false;

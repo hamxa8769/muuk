@@ -362,6 +362,11 @@ private:
     // positions and no pending order at all gets its next one. Both are
     // logged as MISSED. Caller must hold engineMutex_.
     void checkBasketHealthLocked();
+    // A new range may only start while the spread is within
+    // riskLimits.maxSpreadTicks (a running basket is never held back by it).
+    [[nodiscard]] bool spreadTooWideLocked();
+    // The answer to a mass status request sent for unconfirmed orders.
+    void finishAckCheckLocked(const std::vector<ExecutionReportInfo>& reports);
     [[nodiscard]] PersistedState buildStateLocked() const;
     void flushState();
     void markDirty() { stateDirty_ = true; }
@@ -559,8 +564,16 @@ private:
     std::atomic<bool> clockOffsetKnown_{false};
     uint64_t quoteMessages_ = 0;  // guarded by engineMutex_
     uint64_t statusTicks_ = 0;    // ticksProcessed_ at the last [status] line
-    // Close range asked for a new range after connection.manualCloseCooldownSeconds.
-    bool reopenAfterManualClose_ = false;  // a saved basket couldn't be resumed: the operator decides what's next
+    // A new range is due once the account is flat and reopenCooldownSeconds_
+    // have passed: after Close range (connection.manualCloseCooldownSeconds),
+    // or at connect when the spread was too wide to start right away (0).
+    bool reopenAfterManualClose_ = false;
+    int reopenCooldownSeconds_ = 0;
+    bool spreadWaitLogged_ = false;
+    // Orders waiting for the broker's first answer too long (see
+    // connection.orderAckTimeoutSeconds), being checked with a mass status request.
+    std::unordered_set<muuk::core::OrderId> awaitingAck_;
+    std::chrono::steady_clock::time_point ackCheckSentAt_;  // a saved basket couldn't be resumed: the operator decides what's next
 
     // Basket history.
     std::string sessionStartedAt_;

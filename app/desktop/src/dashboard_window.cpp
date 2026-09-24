@@ -278,6 +278,7 @@ void clampSettings(LiveSettings& s) {
     s.initialLot = std::max(0.01, s.initialLot);
     s.lotIncrement = std::max(0.0, s.lotIncrement);
     s.profitTarget = std::max(0.0, s.profitTarget);
+    s.stopLoss = std::max(0.0, s.stopLoss);
     s.cooldownSeconds = std::max(0, s.cooldownSeconds);
     s.manualCloseCooldownSeconds = std::max(0, s.manualCloseCooldownSeconds);
     s.maxOrders = std::max(1, s.maxOrders);
@@ -909,6 +910,10 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &s.rangeWidth, 0.10, "%.2f", &settingsDirty_);
         settingDouble("Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
                       &s.profitTarget, 0.25, "%.2f", &settingsDirty_);
+        settingDouble("Stop loss ($)",
+                      "Hard loss cap: when the basket's net P/L falls to minus this, every position is closed and "
+                      "every pending order cancelled -- the loss is taken instead of growing. 0 = off.",
+                      &s.stopLoss, 5.0, "%.2f", &settingsDirty_);
         settingDouble("First lot", "Lot size of the first order in each range.", &s.initialLot, 0.01, "%.2f",
                       &settingsDirty_);
         settingDouble("Lot increment", "Added to the lot size on every following order (0.01 -> 0.02 -> 0.03...).",
@@ -1246,9 +1251,9 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
             break;
         case Confirm::ResetData:
             title = "Start fresh?";
-            detail = "The basket history and the log are moved to archive folders next to your config file\n"
-                     "(nothing is deleted), and the statistics - totals, speed, basket numbers - start over.\n"
-                     "Settings, reports, and anything open at the broker are not touched.";
+            detail = "Every statistic goes back to zero: booked P/L, volume, history, speed, basket numbers,\n"
+                     "reconnect counts and the log. Old history, log and reports move to archive folders next\n"
+                     "to your config (nothing is deleted). Settings and anything open at the broker are not touched.";
             action = "Reset data";
             break;
         case Confirm::None:
@@ -1277,7 +1282,15 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
                 break;
             case Confirm::ResetData:
                 if (controller.resetData(configPathBuffer_.data())) {
-                    flash("Fresh start - old history and log are in the archive folders.");
+                    // The window's own running figures start over too.
+                    rttHistory_.clear();
+                    quoteHistory_.clear();
+                    lastTicks_ = 0;
+                    quotesPerSecond_ = 0.0;
+                    lastQuoteSeenAt_ = -1.0;
+                    volumeRevision_ = ~uint64_t{0};
+                    dismissedResumeNote_.clear();
+                    flash("Fresh start - every statistic is back to zero (old data is in the archive folders).");
                 }
                 break;
             case Confirm::None:

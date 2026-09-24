@@ -19,21 +19,23 @@ themselves if the connection drops.
   confirm with IC Markets, since this can change.
 - 2 vCPU and 2–4 GB RAM is plenty.
 - No graphics card needed. The app then draws in software and switches to
-  **Lite mode** by itself. Measured on 1 CPU core: about 5% with the window
-  open and idle, and 0% when minimized, covered, or with Remote Desktop
-  disconnected. RAM is about 50 MB.
+  **Lite mode** by itself. Measured on 1 CPU core: about 2.5% with the
+  window open and idle, about 0% when minimized, covered, or with Remote
+  Desktop disconnected. RAM is ~40 MB open and ~1 MB minimized (memory is
+  handed back to Windows).
 
 ### CPU
 
 | | CPU | When to use |
 |---|---|---|
-| `muuk-desktop`, Lite mode | ~5% of a core idle, ~0% minimized | you want to look at it now and then |
-| `muuk-desktop` while you move the mouse | up to ~50% of a core (10 frames/s) | only while you use it |
+| `muuk-desktop`, Lite mode | ~2.5% of a core idle, ~0% minimized | you want to look at it now and then |
+| `muuk-desktop` while you move the mouse | ~30% of a core (6 frames/s) | only while you use it |
 | `muuk-live` (console) | ~0% | least possible; watch the `[status]` line every minute |
 
 - Lite mode means a flat look, no animations or graphs, and redrawing
-  only when something happens: 1 frame/s idle, 10 frames/s for 3 s after
-  you touch it. Trading speed is the same in every mode.
+  only when needed. Without a GPU: the numbers refresh every 2 s when
+  idle, and 6 frames/s for 3 s after you touch it. Trading speed is the
+  same in every mode.
 - On a PC with a GPU you can switch it on too: Performance tab → *Lite
   mode*.
 - **Run one copy only.** Two copies on one login keep kicking each other
@@ -146,6 +148,18 @@ powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
 | `muuk-desktop`: close button with trades open | Asks: close everything and exit, keep them open, or cancel. |
 | `muuk-desktop`: Windows logoff / shutdown | Closes everything first (up to 8 s). |
 | Crash, killed process, power or VPS host failure | **Nothing can react at that moment.** Positions stay open until the bot is back (auto-start). Set **Max basket loss** and check the account from the cTrader app. |
+
+## Settings that protect the account
+
+- **Stop loss ($):** closes the whole basket once its net loss reaches
+  this amount, capping the loss per basket. 0 = off. Pick a value you
+  can afford per basket before going live.
+- **Max basket loss / Max orders / Max lot:** stop *adding* orders past
+  these limits. The basket stays open, so pair them with a stop loss.
+- **Spread limit:** a new range waits while the spread is too wide. A
+  running basket always places its next order, whatever the spread.
+- Orders the broker doesn't confirm within 8 s are checked with the
+  broker and placed again if they're missing (`MISSED` in the log).
 
 ## Before using real money
 

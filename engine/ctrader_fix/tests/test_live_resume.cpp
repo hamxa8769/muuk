@@ -647,3 +647,54 @@ TEST_CASE("Close range: after the manual-close cooldown a new range opens by its
     bot.finish();
     bot.rethrow();
 }
+
+TEST_CASE("An order the broker never confirms is checked with the broker and placed again") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.orderAckTimeoutSeconds = 1;
+    Bot bot(cfg, freshStateFile("ack_timeout"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage lost = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // never answered
+
+    // After the timeout the bot asks which orders the broker has...
+    const FixMessage check = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 5s);
+    FixMessage none = serverHeaderMessage(msgtype::BusinessMessageReject, seq++);
+    none.set(tag::BusinessRejectReason, int64_t{0});
+    none.set(tag::Text, std::string("ORDER_NOT_FOUND:no orders found"));
+    server.sendToClient(kTradeConn, none);
+
+    // ...and, since it isn't there, places it again.
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::Side) == 2);
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(again.getDouble(tag::OrderQty) == Catch::Approx(2.0));
+    REQUIRE(again.getString(tag::ClOrdID) != lost.getString(tag::ClOrdID));
+    (void)check;
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Stop loss: the basket is closed and recorded as a stop loss") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.strategy.basketProfitTargetMoney = 50.0;
+    cfg.strategy.basketStopLossMoney = 1.0;
+    Bot bot(cfg, freshStateFile("stop_loss"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // Sell Stop @ 4336
+    sendQuote(server, 2, 4335.80, 4335.90);  // -$1.15 net on the open BUY
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getInt(tag::OrdType) == 1);
+    REQUIRE(close.getString(tag::PosMaintRptID) == "P1");
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4335.80, 1.0, "P1");
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }));
+    REQUIRE(bot.runner().snapshot().baskets[0].closeReason == "stop loss");
+
+    bot.finish();
+    bot.rethrow();
+}

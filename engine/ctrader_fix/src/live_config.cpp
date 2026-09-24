@@ -53,6 +53,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.autoRangeWidthPoints = conn.value("autoRangeWidthPoints", 0.0);
     cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
     cfg.connection.manualCloseCooldownSeconds = conn.value("manualCloseCooldownSeconds", 15);
+    cfg.connection.orderAckTimeoutSeconds = conn.value("orderAckTimeoutSeconds", 8);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -76,6 +77,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.initialLot = config.strategy.lotProgression.initialLot.toDouble(spec);
     s.lotIncrement = config.strategy.lotProgression.lotIncrement.toDouble(spec);
     s.profitTarget = config.strategy.basketProfitTargetMoney;
+    s.stopLoss = config.strategy.basketStopLossMoney;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
     s.manualCloseCooldownSeconds = config.connection.manualCloseCooldownSeconds;
     s.maxOrders = config.strategy.riskLimits.maxOrders;
@@ -100,6 +102,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.lotProgression = LotProgressionConfig{Volume::fromDouble(s.initialLot, spec),
                                               Volume::fromDouble(s.lotIncrement, spec)};
     st.basketProfitTargetMoney = s.profitTarget;
+    st.basketStopLossMoney = s.stopLoss;
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
@@ -132,6 +135,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     st["seedOffsetPoints"] = s.seedOffset;
     st["startSide"] = muuk::config_json::startSideToString(s.startSide);
     st["basketProfitTargetMoney"] = s.profitTarget;
+    st["basketStopLossMoney"] = s.stopLoss;
     st["lotProgression"]["initialLot"] = s.initialLot;
     st["lotProgression"]["lotIncrement"] = s.lotIncrement;
     st["riskLimits"]["maxOrders"] = s.maxOrders;

@@ -43,12 +43,14 @@ void glfwErrorCallback(int error, const char* description) {
     std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
 
+bool g_smallFontAtlas = false;  // software renderer: 1x oversampling -- a far smaller font texture
+
 ImFont* tryAddFont(const char* path, float size, const ImWchar* ranges) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return nullptr;
     ImFontConfig cfg;
-    cfg.OversampleH = 3;  // smoother glyph edges at small sizes
-    cfg.OversampleV = 2;
+    cfg.OversampleH = g_smallFontAtlas ? 1 : 3;  // smoother glyph edges at small sizes
+    cfg.OversampleV = g_smallFontAtlas ? 1 : 2;
     return ImGui::GetIO().Fonts->AddFontFromFileTTF(path, size, &cfg, ranges);
 }
 
@@ -149,11 +151,16 @@ public:
             width_ = w;
             height_ = h;
         }
-        const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // fully covered by the glass backdrop every frame
         context_->OMSetRenderTargets(1, &target_, nullptr);
-        context_->ClearRenderTargetView(target_, clear);
+        if (!software_) {
+            // The glass backdrop covers every pixel anyway; drawing on the CPU,
+            // skip this extra full-window fill.
+            const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            context_->ClearRenderTargetView(target_, clear);
+        }
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        occluded_ = swapChain_->Present(1, 0) == DXGI_STATUS_OCCLUDED;  // vsync
+        // vsync on a GPU; without one the frame pacing in main() is the limit.
+        occluded_ = swapChain_->Present(software_ ? 0 : 1, 0) == DXGI_STATUS_OCCLUDED;
 #else
         glViewport(0, 0, w, h);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -227,7 +234,16 @@ private:
 double g_lastInputAt = 0.0;
 void noteInput() { g_lastInputAt = glfwGetTime(); }
 void installInputWatch(GLFWwindow* window) {
-    glfwSetCursorPosCallback(window, [](GLFWwindow*, double, double) { noteInput(); });
+    // Windows also sends a "mouse moved" when a window under a resting cursor
+    // repaints -- only a real change of position counts, or every frame would
+    // look like input and keep the window at its fast rate.
+    glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
+        static double lastX = -1.0;
+        static double lastY = -1.0;
+        if (x != lastX || y != lastY) noteInput();
+        lastX = x;
+        lastY = y;
+    });
     glfwSetMouseButtonCallback(window, [](GLFWwindow*, int, int, int) { noteInput(); });
     glfwSetScrollCallback(window, [](GLFWwindow*, double, double) { noteInput(); });
     glfwSetKeyCallback(window, [](GLFWwindow*, int, int, int, int) { noteInput(); });
@@ -319,10 +335,22 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // fixed single-window layout -- nothing worth persisting
 
+    installInputWatch(window);  // before the backend, so it chains to these
+    Renderer renderer;
+    if (!renderer.init(window)) {
+        std::fprintf(stderr, "could not start the graphics renderer\n");
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
+    g_smallFontAtlas = renderer.software();
+
     // Segoe UI (every Windows install has it) reads far better than ImGui's
     // built-in pixel font; fall back to the built-in one elsewhere. The
     // range covers Latin-1 plus general punctuation (dashes etc. used in
-    // log lines).
+    // log lines). Added after the renderer is up but before the first
+    // frame, which is when the backend builds the font texture.
     static const ImWchar kGlyphRanges[] = {0x0020, 0x00FF, 0x2000, 0x206F, 0};
     float xscale = 1.0f;
     float yscale = 1.0f;
@@ -337,16 +365,6 @@ int main(int argc, char** argv) {
     // figure style; Segoe UI Semibold if it's missing.
     ImFont* numbers = tryAddFont("C:/Windows/Fonts/bahnschrift.ttf", base * 1.55f, kGlyphRanges);
     if (!numbers) numbers = tryAddFont("C:/Windows/Fonts/seguisb.ttf", base * 1.45f, kGlyphRanges);
-
-    installInputWatch(window);  // before the backend, so it chains to these
-    Renderer renderer;
-    if (!renderer.init(window)) {
-        std::fprintf(stderr, "could not start the graphics renderer\n");
-        ImGui::DestroyContext();
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return 1;
-    }
 
     muuk::desktop::LiveController controller;
     muuk::desktop::DashboardWindow dashboard;
@@ -369,6 +387,8 @@ int main(int argc, char** argv) {
 #endif
 
     double lastFrameAt = -1.0;
+    bool wasHidden = false;
+    uint64_t framesTotal = 0;  // passes through the loop (drawn or not) -- see MUUK_FRAME_STATS
     while (!dashboard.exitApproved()) {
         // Frame pacing -- redraw often enough for live prices/P&L to keep
         // moving, but no more than the window needs: an unattended VPS
@@ -377,7 +397,8 @@ int main(int argc, char** argv) {
         // never slowed by any of this.
         //   hidden (minimized, covered, Remote Desktop disconnected): draw
         //       nothing, wake once a second for auto-reconnect;
-        //   lite mode: 10 frames/s for 3 s after any input, else 1 frame/s;
+        //   lite mode: 10 frames/s (6 without a GPU) for 3 s after any input,
+        //       else 1 frame/s (one every 2 s without a GPU);
         //   otherwise: 60 frames/s focused, 10 in the background.
         // Waiting until the frame is due (not just until the next window
         // message) is what keeps idle at 1 frame/s.
@@ -389,7 +410,11 @@ int main(int argc, char** argv) {
             if (hidden) {
                 interval = 1.0;
             } else if (dashboard.liteMode()) {
-                interval = now - g_lastInputAt < 3.0 ? 0.1 : 1.0;
+                // Without a GPU a frame costs ~50 ms of CPU: idle, refresh the
+                // numbers every 2 s; while you use it, 6 frames/s.
+                const double active = renderer.software() ? 1.0 / 6.0 : 0.1;
+                const double idle = renderer.software() ? 2.0 : 1.0;
+                interval = now - g_lastInputAt < 3.0 ? active : idle;
             } else if (!glfwGetWindowAttrib(window, GLFW_FOCUSED)) {
                 interval = 0.1;
             }
@@ -399,6 +424,7 @@ int main(int argc, char** argv) {
         }
         glfwPollEvents();
         lastFrameAt = glfwGetTime();
+        ++framesTotal;
 
         // Exit guard: the close button (or Alt+F4) only *asks* to exit; with
         // trades still open the dashboard shows a dialog first.
@@ -413,9 +439,15 @@ int main(int argc, char** argv) {
         }
 
         if (hidden) {
+#ifdef _WIN32
+            // Just went out of sight: hand unused memory back to Windows.
+            if (!wasHidden) SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+#endif
+            wasHidden = true;
             dashboard.tickWithoutDrawing(controller);
             continue;
         }
+        wasHidden = false;
 
         renderer.newFrame();
         ImGui::NewFrame();
@@ -427,6 +459,15 @@ int main(int argc, char** argv) {
     }
 
     controller.stop();
+    // MUUK_FRAME_STATS=1: how many frames the app went through, to check the pacing.
+#ifdef _WIN32
+    char* stats = nullptr;
+    std::size_t statsLen = 0;
+    if (_dupenv_s(&stats, &statsLen, "MUUK_FRAME_STATS") == 0 && stats != nullptr && stats[0] == '1') {
+        std::fprintf(stderr, "frames: %llu in %.1f s\n", static_cast<unsigned long long>(framesTotal), glfwGetTime());
+    }
+    std::free(stats);
+#endif
 
 #ifdef _WIN32
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_prevWndProc));

@@ -68,6 +68,11 @@ struct LiveConnectionConfig {
     // wait for Open range, like closeAllPositions/cancelAllPendingOrders.
     int manualCloseCooldownSeconds = 15;
 
+    // An order the broker hasn't confirmed at all after this long is
+    // checked with an Order Mass Status Request and placed again if the
+    // broker doesn't have it (logged as MISSED).
+    int orderAckTimeoutSeconds = 8;
+
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
     // false: only open a range when the operator asks (LiveRunner::openRange).
@@ -99,6 +104,7 @@ struct LiveSettings {
     double initialLot = 0.01;
     double lotIncrement = 0.01;
     double profitTarget = 1.0;   // basket net P/L ($) that books the basket
+    double stopLoss = 0.0;       // basket net loss ($) that closes the basket; 0 = off
     int cooldownSeconds = 0;     // pause after a basket is fully flat
     int manualCloseCooldownSeconds = 15;  // pause after Close range before a new range opens; 0 = don't reopen
     int maxOrders = 20;
