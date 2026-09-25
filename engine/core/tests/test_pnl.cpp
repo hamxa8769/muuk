@@ -117,3 +117,29 @@ TEST_CASE("Auto target: a percentage of the cost, never below one cent") {
     REQUIRE(autoTargetMoney(0.50, 150.0) == Catch::Approx(0.75));
     REQUIRE(autoTargetMoney(0.0, 200.0) == Catch::Approx(0.01));  // nothing open yet
 }
+
+#include "muuk/core/risk_table.hpp"
+
+TEST_CASE("Risk table: the worst case level by level, as in the discussion ($2 range, x2, 1:500)") {
+    RiskTableInput in;
+    in.spec = xauusdSpec();
+    in.spec.tickValue = 1.0;
+    in.lots = LotProgressionConfig{Volume::fromDouble(0.01, in.spec), Volume::fromDouble(0.01, in.spec), 2.0};
+    in.costs.commissionPerMillionPerSide = 30.0;
+    in.rangeWidth = 2.0;
+    in.price = 4270.0;
+    in.spread = 0.30;
+    in.leverage = 500.0;
+    in.levels = 10;
+    const auto rows = riskTable(in);
+    REQUIRE(rows.size() == 10);
+    REQUIRE(rows[6].lot == Catch::Approx(0.64));
+    REQUIRE(rows[6].worstLoss == Catch::Approx(155.0).margin(1.5));
+    REQUIRE(rows[7].totalLots == Catch::Approx(2.55));
+    REQUIRE(rows[7].worstLoss == Catch::Approx(312.0).margin(2.0));
+    REQUIRE(rows[7].margin == Catch::Approx(1452.0).margin(1.0));
+    REQUIRE(rows[7].recoveryMove == Catch::Approx(3.7).margin(0.1));
+    // A max lot cuts the table off.
+    in.maxLot = 0.30;
+    REQUIRE(riskTable(in).size() == 5);  // 0.01 .. 0.16; 0.32 is above the limit
+}

@@ -257,6 +257,12 @@ LiveSnapshot LiveController::demoSnapshot() const {
     s.settings.autoTargetPercent = 200;
     s.settings.stopLoss = 30.0;
     s.settings.commissionPerMillion = 30.0;
+    s.settings.accountBalance = 1000.0;
+    s.settings.leverage = 500.0;
+    s.settings.escapeFromLevel = 5;
+    s.settings.lockAtLoss = 100.0;
+    s.settings.lotMultiplier = 2.0;
+    s.settings.rangeWidth = 2.0;
     muuk::core::CostInputs costs;
     costs.commissionPerMillionPerSide = 30.0;
     const muuk::core::SymbolSpec spec;

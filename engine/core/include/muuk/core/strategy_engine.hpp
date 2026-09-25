@@ -42,6 +42,12 @@ struct StrategyConfig {
     // So one 0.01 lot aims low, and the target grows with every fill.
     bool autoProfitTarget = false;
     double autoTargetPercent = 100.0;
+    // Break-even escape: once the basket has filled this many levels, its
+    // target drops to escapeProfitMoney (net, after every cost) -- a deep
+    // basket closes at the first bounce back instead of waiting for the
+    // full target. 0 = off.
+    int escapeFromLevel = 0;
+    double escapeProfitMoney = 0.50;
     int maxRejectRetries = 3;
     // true (default): proposal §4 behavior — on fill, immediately re-arm
     // the triggering side with the next lot in the progression
@@ -102,6 +108,9 @@ struct EngineState {
     // at each fill price). <0 = unknown (an older state file): estimated
     // from the average entry prices on restore.
     double commissionAccrued = -1.0;
+    // Deepest level filled this cycle. <0 = unknown (older state file):
+    // estimated on restore.
+    int filledLevel = -1;
 };
 
 // Deterministic, I/O-free strategy state machine implementing the
@@ -162,6 +171,12 @@ public:
     void updateExitRules(const StrategyConfig& config);
     // The profit target the next tick would use (see StrategyConfig::autoProfitTarget).
     [[nodiscard]] double effectiveTargetMoney(const BasketPnlResult& pnl) const;
+    // Deepest level (1-based sequence index) filled this cycle; 0 = none.
+    [[nodiscard]] int filledLevel() const { return filledLevel_; }
+    // True once the break-even escape has lowered the target.
+    [[nodiscard]] bool escapeActive() const {
+        return config_.escapeFromLevel > 0 && filledLevel_ >= config_.escapeFromLevel;
+    }
 
     // Evaluates the current basket against the profit target and the risk
     // engine against live spread. Also updates the mark price used for
@@ -263,6 +278,7 @@ private:
     double slippageMoneyAccrued_ = 0.0;
     double swapMoneyAccrued_ = 0.0;
     double commissionAccrued_ = 0.0;
+    int filledLevel_ = 0;
     BasketPnlResult lastBasketPnl_{};
 };
 

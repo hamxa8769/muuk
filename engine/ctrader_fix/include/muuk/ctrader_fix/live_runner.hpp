@@ -176,6 +176,13 @@ struct LiveSnapshot {
     std::vector<AuditEvent> auditLog;     // what it found / did, newest last (last 60)
     double dayRealized = 0.0;             // today's booked net
     bool dailyLimitHit = false;           // no new range until tomorrow
+    // Lock & pause: the basket is hedged (loss frozen) and waits for the operator.
+    bool locked = false;
+    double lockedLoss = 0.0;              // floating net when it was locked
+    std::string lockedAt;
+    // Break-even escape: the deepest level filled, and whether the target was lowered.
+    int filledLevel = 0;
+    bool escapeActive = false;
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -651,7 +658,14 @@ private:
     bool dailyLimitHit_ = false;
     std::vector<AuditCheck> audit_;
     std::deque<AuditEvent> auditLog_;
-    std::string lastAuditText_[8];  // last event per check, so a lasting problem is logged once
+    std::string lastAuditText_[10];  // last event per check, so a lasting problem is logged once
+    bool locked_ = false;
+    double lockedLoss_ = 0.0;
+    std::string lockedAt_;
+    // Lock & pause: if the running basket's net has reached -lockAtLossMoney,
+    // cancel its pending orders and freeze the loss with one opposite market
+    // order for the net lots. Called on every quote.
+    void maybeLockLocked();
     void auditLocked();
     void auditEventLocked(int check, int level, const std::string& text);
     void addRealizedLocked(double net);

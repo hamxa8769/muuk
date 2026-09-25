@@ -89,6 +89,14 @@ struct LiveConnectionConfig {
     // running range is closed and no new range opens until tomorrow
     // (local date). 0 = off.
     double dailyLossLimitMoney = 0.0;
+    // Lock & pause: once the running basket's floating net reaches minus
+    // this, pending orders are cancelled and one opposite market order for
+    // the net lots freezes the loss (a hedge); the bot then waits for the
+    // operator. 0 = off.
+    double lockAtLossMoney = 0.0;
+    // Not sent over FIX -- typed in, for the risk calculator and margin warnings.
+    double accountBalance = 0.0;
+    double leverage = 500.0;
 
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
@@ -132,6 +140,11 @@ struct LiveSettings {
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit
     double dailyLossLimit = 0.0; // $; today's booked + floating net at minus this closes everything for the day; 0 = off
+    double lockAtLoss = 0.0;     // $; basket net at minus this is locked (hedged) and the bot pauses; 0 = off
+    int escapeFromLevel = 0;     // from this fill on the target drops to escapeProfit; 0 = off
+    double escapeProfit = 0.50;  // $ net, after every cost
+    double accountBalance = 0.0; // $, for the risk calculator
+    double leverage = 500.0;     // 1:leverage
     double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close) -- flat-rate brokers
     // $ per $1,000,000 traded, charged on the open and again on the close
     // (cTrader's own commission type; IC Markets Raw: 30). >0 replaces commissionPerLot.

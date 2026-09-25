@@ -2,6 +2,7 @@ add_library(muuk_core STATIC
     src/lot_progression.cpp
     src/pnl.cpp
     src/risk.cpp
+    src/risk_table.cpp
     src/strategy_engine.cpp
 )
 

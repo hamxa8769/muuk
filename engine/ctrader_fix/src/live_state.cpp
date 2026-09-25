@@ -107,7 +107,8 @@ nlohmann::json engineToJson(const EngineState& e) {
             {"seeding", e.seeding},
             {"slippageMoneyAccrued", e.slippageMoneyAccrued},
             {"swapMoneyAccrued", e.swapMoneyAccrued},
-            {"commissionAccrued", e.commissionAccrued}};
+            {"commissionAccrued", e.commissionAccrued},
+            {"filledLevel", e.filledLevel}};
 }
 
 EngineState engineFromJson(const nlohmann::json& j) {
@@ -138,6 +139,7 @@ EngineState engineFromJson(const nlohmann::json& j) {
     e.slippageMoneyAccrued = j.value("slippageMoneyAccrued", 0.0);
     e.swapMoneyAccrued = j.value("swapMoneyAccrued", 0.0);
     e.commissionAccrued = j.value("commissionAccrued", -1.0);
+    e.filledLevel = j.value("filledLevel", -1);
     return e;
 }
 
@@ -164,6 +166,9 @@ nlohmann::json stateToJson(const PersistedState& s) {
                         {"dayKey", s.dayKey},
                         {"dayRealized", s.dayRealized},
                         {"dailyLimitHit", s.dailyLimitHit},
+                        {"locked", s.locked},
+                        {"lockedLoss", s.lockedLoss},
+                        {"lockedAt", s.lockedAt},
                         {"ticksProcessed", s.ticksProcessed},
                         {"tickDecisionUs", totalsToJson(s.tickDecisionUs)},
                         {"fillReactionUs", totalsToJson(s.fillReactionUs)},
@@ -200,6 +205,9 @@ PersistedState stateFromJson(const nlohmann::json& j) {
     s.dayKey = j.value("dayKey", std::string());
     s.dayRealized = j.value("dayRealized", 0.0);
     s.dailyLimitHit = j.value("dailyLimitHit", false);
+    s.locked = j.value("locked", false);
+    s.lockedLoss = j.value("lockedLoss", 0.0);
+    s.lockedAt = j.value("lockedAt", std::string());
     s.ticksProcessed = j.value("ticksProcessed", uint64_t{0});
     s.tickDecisionUs = totalsFromJson(j, "tickDecisionUs");
     s.fillReactionUs = totalsFromJson(j, "fillReactionUs");

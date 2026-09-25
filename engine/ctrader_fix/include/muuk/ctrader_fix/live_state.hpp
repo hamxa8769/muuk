@@ -57,6 +57,11 @@ struct PersistedState {
     double dayRealized = 0.0;
     bool dailyLimitHit = false;
 
+    // A basket frozen by Lock & pause.
+    bool locked = false;
+    double lockedLoss = 0.0;
+    std::string lockedAt;
+
     // Lifetime statistics (since the last reset).
     std::string statsSince;
     uint64_t ticksProcessed = 0;

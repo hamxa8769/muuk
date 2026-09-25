@@ -844,3 +844,37 @@ TEST_CASE("Per-million commission is worked out per position at its fill price, 
     (void)old.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
     REQUIRE(old.lastBasketPnl().commissionMoney == Catch::Approx(0.78).margin(0.02));
 }
+
+TEST_CASE("Break-even escape: from the set level on, the target drops to the escape amount") {
+    const SymbolSpec spec = xauusdSpec();
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.basketProfitTargetMoney = 20.0;
+    cfg.escapeFromLevel = 2;
+    cfg.escapeProfitMoney = 0.50;
+    StrategyEngine engine(cfg);
+    (void)engine.onTick(TickEvent{Price::fromDouble(4336.50, spec), Price::fromDouble(4336.50, spec)});
+    const CommandBatch start = engine.start();  // Buy 0.01 @ 4337 (seq 1), Sell 0.02 @ 4336 (seq 2)
+    const PlaceOrderCommand buy1 = placeCmd(start, 0);
+    const PlaceOrderCommand sell2 = placeCmd(start, 1);
+
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buy1.id, buy1.price});
+    REQUIRE(engine.filledLevel() == 1);
+    REQUIRE_FALSE(engine.escapeActive());
+    REQUIRE(engine.effectiveTargetMoney(engine.lastBasketPnl()) == Catch::Approx(20.0));
+
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{sell2.id, sell2.price});
+    REQUIRE(engine.filledLevel() == 2);
+    REQUIRE(engine.escapeActive());
+    REQUIRE(engine.effectiveTargetMoney(engine.lastBasketPnl()) == Catch::Approx(0.50));
+
+    // Net +0.50 at mid 4337.50 (buy +0.50, sell -3.00... ) -- use a price where net just passes 0.50:
+    // buy 0.01 from 4337 and sell 0.02 from 4336: net = (p-4337)*1 - (p-4336)*2 = 4335 - p  -> p = 4334.40 gives +0.60.
+    const CommandBatch out =
+        engine.onTick(TickEvent{Price::fromDouble(4334.40, spec), Price::fromDouble(4334.40, spec)});
+    REQUIRE(engine.status() == EngineStatus::Completed);
+    REQUIRE_FALSE(out.empty());
+
+    // Survives export/restore.
+    EngineState saved = engine.exportState();
+    REQUIRE(saved.filledLevel == 2);
+}

@@ -14,6 +14,7 @@
 #include "config_discovery.hpp"
 #include "glass_ui.hpp"
 #include "open_path.hpp"
+#include "muuk/core/risk_table.hpp"
 #include "muuk/ctrader_fix/basket_history.hpp"
 
 namespace muuk::desktop {
@@ -164,6 +165,7 @@ CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (snap->closeFailed) return {"Close failed - needs attention", kRed};
     if (snap->closingInProgress) return {"Closing basket", kAmber};
     if (snap->cooldownRemainingSeconds > 0) return {"Cooldown", kBlue};
+    if (snap->locked) return {"LOCKED - loss frozen, waiting for you", kRed};
     if (snap->marketKnown && !snap->market.canOpenRange &&
         (snap->status == EngineStatus::Idle || snap->status == EngineStatus::Completed)) {
         return {snap->market.label.c_str(), phaseColor(snap->market.phase)};
@@ -417,6 +419,11 @@ void clampSettings(LiveSettings& s) {
     s.market.pauseMinutesAfter = std::clamp(s.market.pauseMinutesAfter, 0, 240);
     s.market.newsMinutesBefore = std::clamp(s.market.newsMinutesBefore, 0, 240);
     s.market.newsMinutesAfter = std::clamp(s.market.newsMinutesAfter, 0, 240);
+    s.accountBalance = std::max(0.0, s.accountBalance);
+    s.leverage = std::clamp(s.leverage, 1.0, 3000.0);
+    s.escapeFromLevel = std::clamp(s.escapeFromLevel, 0, 30);
+    s.escapeProfit = std::max(0.0, s.escapeProfit);
+    s.lockAtLoss = std::max(0.0, s.lockAtLoss);
 }
 
 
@@ -970,6 +977,15 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::TextColored(kBlue, "%ds", snap->cooldownRemainingSeconds);
     }
 
+    if (snap && snap->locked) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::TextWrapped("Locked since %s at %s: the pending orders were cancelled and a hedge froze the loss. "
+                           "It stays about the same wherever the price goes (swap is charged every night). "
+                           "Press Close range when you decide -- it closes both sides.",
+                           snap->lockedAt.size() > 11 ? snap->lockedAt.substr(11).c_str() : snap->lockedAt.c_str(),
+                           money(snap->lockedLoss).c_str());
+        ImGui::PopStyleColor();
+    }
     const float chartHeight = rangeChartHeight();
     if (snap && connected) {
         drawRangeChart(*snap, chartHeight);
@@ -1222,6 +1238,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     ImGui::EndDisabled();
     renderLotPreview(editSettings_, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
     ImGui::BeginDisabled(!settingsLoaded_);
+    renderRiskCalculator(snap);
     renderMarketSettings();
     ImGui::EndDisabled();
 
@@ -3036,9 +3053,10 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(net), "%s", money(net).c_str()); });
     const std::string targetText =
         "target " + money(target) +
-        (s.autoTarget ? "  (level " + std::to_string(targetLevel(s.autoTargetPercent)) + " = " +
-                            std::to_string(s.autoTargetPercent) + "%)"
-                      : "");
+        (snap.escapeActive ? "  (break-even escape, level " + std::to_string(snap.filledLevel) + ")"
+         : s.autoTarget    ? "  (level " + std::to_string(targetLevel(s.autoTargetPercent)) + " = " +
+                              std::to_string(s.autoTargetPercent) + "%)"
+                           : "");
     ImGui::SameLine(0.0f, 12.0f);
     const float targetW = ImGui::CalcTextSize(targetText.c_str()).x;
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -3182,6 +3200,154 @@ void DashboardWindow::renderAuditTab(const std::optional<LiveSnapshot>& snap, bo
         "Daily loss limit: closes everything and pauses until tomorrow (Settings).\n"
         "Risk settings: warns while there is no stop loss / no daily loss limit.");
     ImGui::EndChild();
+}
+
+void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& snap) {
+    LiveSettings& s = editSettings_;
+    ImGui::Spacing();
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Risk & capital");
+    });
+    ImGui::TextDisabled("The worst case: the price bounces between the two lines, so every fill adds the next lot "
+                        "on the other side.");
+
+    if (ImGui::BeginTable("risk_settings", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        settingDouble("Account balance ($)",
+                      "Your balance -- FIX doesn't send it. Used for this table and the margin warning in the Audit.",
+                      &s.accountBalance, 100.0, "%.2f", &settingsDirty_);
+        settingDouble("Leverage (1:x)", "Your account's leverage, e.g. 500 for 1:500. Sets the margin per lot.",
+                      &s.leverage, 50.0, "%.0f", &settingsDirty_);
+        settingInt("Break-even escape from level",
+                   "From this fill on, the target drops to the escape amount below: a deep basket closes at the "
+                   "first bounce back instead of waiting for the full target. 0 = off.",
+                   &s.escapeFromLevel, &settingsDirty_);
+        settingDouble("  escape at net ($)", "Net after every cost at which an escaping basket closes.",
+                      &s.escapeProfit, 0.25, "%.2f", &settingsDirty_);
+        settingDouble("Lock & pause at loss ($)",
+                      "When the basket's net reaches minus this: pending orders are cancelled and one opposite order "
+                      "freezes the loss (a hedge). The bot then waits for you -- the loss doesn't go away, and swap "
+                      "is charged every night. 0 = off.",
+                      &s.lockAtLoss, 10.0, "%.2f", &settingsDirty_);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Lot preset");
+        ImGui::SetItemTooltip("Aggressive: x2 each fill. Balanced: x1.5. Safe: +0.01 each fill. The table shows "
+                              "what each can lose.");
+        ImGui::TableNextColumn();
+        const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+        auto preset = [&](const char* label, double mult, ImVec4 color) {
+            const bool on = std::fabs(s.lotMultiplier - mult) < 0.01 && (mult > 1.0 || std::fabs(s.lotIncrement - 0.01) < 0.001);
+            if (glass::button(label, on ? color : glass::palette().neutral, ImVec2(third, 0))) {
+                s.lotMultiplier = mult;
+                if (mult <= 1.0) s.lotIncrement = 0.01;
+                settingsDirty_ = true;
+            }
+        };
+        preset("Aggressive x2", 2.0, kRed);
+        ImGui::SameLine();
+        preset("Balanced x1.5", 1.5, kAmber);
+        ImGui::SameLine();
+        preset("Safe +0.01", 1.0, kGreen);
+        ImGui::EndTable();
+    }
+    clampSettings(s);
+
+    // The table.
+    muuk::core::RiskTableInput in;
+    const muuk::core::SymbolSpec spec;
+    in.spec = spec;
+    in.lots = muuk::core::LotProgressionConfig{muuk::core::Volume::fromDouble(s.initialLot, spec),
+                                               muuk::core::Volume::fromDouble(s.lotIncrement, spec), s.lotMultiplier};
+    in.costs.commissionPerLotRoundTurn = s.commissionPerLot;
+    in.costs.commissionPerMillionPerSide = s.commissionPerMillion;
+    in.rangeWidth = s.rangeWidth;
+    const bool live = snap && snap->bid && snap->ask;
+    in.price = live ? (*snap->bid + *snap->ask) / 2.0 : 4270.0;
+    in.spread = live ? std::max(0.0, *snap->ask - *snap->bid) : 0.30;
+    in.leverage = s.leverage;
+    in.maxLot = s.maxLot;
+    in.levels = std::clamp(s.maxOrders, 1, 14);
+    const auto rows = muuk::core::riskTable(in);
+
+    const double balance = s.accountBalance;
+    int lastSafe = 0;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
+                                  ImGuiTableFlags_PadOuterX;
+    ImGui::TextDisabled("At %s%.2f, spread %.2f, 1:%.0f, range $%.2f:", live ? "" : "e.g. ", in.price, in.spread,
+                        in.leverage, in.rangeWidth);
+    if (ImGui::BeginTable("risk_table", 8, flags)) {
+        ImGui::TableSetupColumn("Level");
+        ImGui::TableSetupColumn("Lot");
+        ImGui::TableSetupColumn("Total lots");
+        ImGui::TableSetupColumn("Worst loss");
+        ImGui::TableSetupColumn("Margin");
+        ImGui::TableSetupColumn("Equity left");
+        ImGui::TableSetupColumn("Recovery move");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableHeadersRow();
+        bool lockShown = false;
+        for (const auto& r : rows) {
+            const double equity = balance - r.worstLoss;
+            const double marginLevel = r.margin > 0.0 ? equity / r.margin : 99.0;
+            const bool stopOut = balance > 0.0 && (equity <= 0.0 || marginLevel < 0.5);
+            const bool marginCall = balance > 0.0 && !stopOut && marginLevel < 1.0;
+            if (balance > 0.0 && !stopOut && !marginCall) lastSafe = r.level;
+            const ImVec4 rowColor = stopOut ? kRed : (marginCall ? kAmber : glass::palette().text);
+            ImGui::TableNextRow();
+            if (stopOut) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(withAlpha(kRed, 0.10f)));
+            ImGui::PushStyleColor(ImGuiCol_Text, rowColor);
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", r.level);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f", r.lot);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f", r.totalLots);
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", money(-r.worstLoss).c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("$%.0f", r.margin);
+            ImGui::TableNextColumn();
+            if (balance > 0.0) {
+                ImGui::Text("%s", money(equity).c_str());
+            } else {
+                ImGui::TextUnformatted("--");
+            }
+            ImGui::TableNextColumn();
+            if (r.recoveryMove > 0.0) {
+                ImGui::Text("$%.1f", r.recoveryMove);
+            } else {
+                ImGui::TextUnformatted("--");
+            }
+            ImGui::PopStyleColor();
+            ImGui::TableNextColumn();
+            std::string note;
+            if (stopOut) note = "stop-out";
+            else if (marginCall) note = "margin call";
+            if (s.escapeFromLevel > 0 && r.level >= s.escapeFromLevel) note += std::string(note.empty() ? "" : ", ") + "escape";
+            if (s.lockAtLoss > 0.0 && !lockShown && r.worstLoss >= s.lockAtLoss) {
+                note += std::string(note.empty() ? "" : ", ") + "lock here";
+                lockShown = true;
+            }
+            ImGui::TextColored(stopOut ? kRed : (marginCall ? kAmber : kBlue), "%s", note.c_str());
+        }
+        ImGui::EndTable();
+    }
+    ImGui::SetItemTooltip("Worst loss: floating at that fill with commission and spread. Recovery move: how far the "
+                          "price must then run past the last fill, without coming back to the other line, for the "
+                          "basket to be back at 0.");
+    if (balance <= 0.0) {
+        ImGui::TextColored(kAmber, "Enter your balance above to see where margin and balance run out.");
+    } else if (!rows.empty()) {
+        ImGui::TextColored(lastSafe >= static_cast<int>(rows.size()) ? kGreen : kAmber,
+                           "With $%.0f at 1:%.0f the account holds %d level(s) of bouncing%s.", balance,
+                           in.leverage, lastSafe,
+                           lastSafe >= static_cast<int>(rows.size()) ? " -- the whole table" : "; after that, margin call / stop-out");
+    }
 }
 
 }  // namespace muuk::desktop

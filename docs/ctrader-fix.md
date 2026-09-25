@@ -449,3 +449,23 @@ amber / red when something is off) and fixes what it can by itself:
 
 What it found and did is listed in the Audit tab and written to the log as
 `[audit]` lines.
+
+## Small accounts: risk calculator, break-even escape, lock & pause
+
+- **Risk calculator** (Settings > Risk & capital): for the current settings,
+  level by level, the lot, total lots, worst floating loss (price bouncing
+  between the lines, with commission and spread), margin (larger side at
+  `connection.leverage`), equity left from `connection.accountBalance`, and
+  the move needed to recover. Rows turn amber at margin call (<100 %) and red
+  at stop-out (<50 %). $1000 at 1:500 with $2 range and x2 lasts 7 levels.
+- **Lot presets**: Aggressive x2, Balanced x1.5, Safe +0.01.
+- **Break-even escape** (`strategy.breakEvenEscape: {"fromLevel": 5,
+  "profit": 0.5}`): from that fill on, the target drops to $0.50 net -- a
+  deep basket closes at the first bounce back.
+- **Lock & pause** (`connection.lockAtLossMoney`): at that floating loss the
+  pending orders are cancelled and one opposite market order for the net
+  lots freezes the loss; no new range until the operator closes it (Close
+  range). A lock does **not** turn the loss into profit: P/L(p) = sum q(p-e)
+  becomes constant, and hedging at any moment has the same expected result
+  as the loss at that moment (price has no memory) -- plus spread,
+  commission and nightly swap. It only stops the loss from growing.

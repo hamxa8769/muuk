@@ -1133,3 +1133,51 @@ TEST_CASE("Risk: the daily loss limit closes everything and no new range opens t
     bot.finish();
     bot.rethrow();
 }
+
+TEST_CASE("Lock & pause: at the loss limit the pending order is cancelled and one hedge freezes the loss") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.lockAtLossMoney = 0.50;
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    Bot bot(cfg, freshStateFile("lock_pause"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 2, 4336.20, 4336.30);  // net -0.80: past -0.50
+
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == sellStop.getString(tag::ClOrdID));
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(hedge.getInt(tag::OrdType) == 1);  // market
+    REQUIRE(hedge.getInt(tag::Side) == 2);     // sells the net long 0.01
+    REQUIRE(hedge.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    REQUIRE_FALSE(hedge.getOptionalString(tag::PosMaintRptID).has_value());  // a new position, not a close
+    sendFill(server, seq++, hedge.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 2; }));
+    LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE(s.locked);
+    REQUIRE(s.lockedLoss == Catch::Approx(-0.80));
+    REQUIRE(s.status == EngineStatus::Idle);
+    REQUIRE_FALSE(bot.runner().openRange());
+
+    // Frozen: wherever the price goes, the net stays put (buy 0.01 @ 4337 + sell 0.01 @ 4336.20).
+    sendQuote(server, 3, 4330.00, 4330.10);
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().bid && *bot.runner().snapshot().bid == Catch::Approx(4330.00); }));
+    REQUIRE(bot.runner().snapshot().live.net == Catch::Approx(-0.90));  // -0.80 frozen, the hedge paid the 0.10 spread
+
+    // Unwinding it by hand closes both; then the bot is free again.
+    bot.runner().closeRange();
+    const FixMessage c1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const FixMessage c2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, c1.getString(tag::ClOrdID), 4330.00, 1.0, c1.getString(tag::PosMaintRptID));
+    sendFill(server, seq++, c2.getString(tag::ClOrdID), 4330.10, 1.0, c2.getString(tag::PosMaintRptID));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    REQUIRE(bot.runner().snapshot().baskets[0].outcome == "locked");
+    REQUIRE(waitUntil([&] { return !bot.runner().snapshot().locked; }, 4s));
+
+    bot.finish();
+    bot.rethrow();
+}

@@ -58,6 +58,9 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.closeConfirmSeconds = conn.value("closeConfirmSeconds", 10);
     cfg.connection.quoteStaleSeconds = conn.value("quoteStaleSeconds", 120);
     cfg.connection.dailyLossLimitMoney = conn.value("dailyLossLimitMoney", 0.0);
+    cfg.connection.lockAtLossMoney = conn.value("lockAtLossMoney", 0.0);
+    cfg.connection.accountBalance = conn.value("accountBalance", 0.0);
+    cfg.connection.leverage = conn.value("leverage", 500.0);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -95,6 +98,11 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
     s.dailyLossLimit = config.connection.dailyLossLimitMoney;
+    s.lockAtLoss = config.connection.lockAtLossMoney;
+    s.escapeFromLevel = config.strategy.escapeFromLevel;
+    s.escapeProfit = config.strategy.escapeProfitMoney;
+    s.accountBalance = config.connection.accountBalance;
+    s.leverage = config.connection.leverage;
     s.commissionPerLot = config.strategy.costs.commissionPerLotRoundTurn;
     s.commissionPerMillion = config.strategy.costs.commissionPerMillionPerSide;
     s.autoContinue = config.connection.autoContinue;
@@ -123,6 +131,11 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
     config.connection.dailyLossLimitMoney = s.dailyLossLimit;
+    config.connection.lockAtLossMoney = s.lockAtLoss;
+    config.connection.accountBalance = s.accountBalance;
+    config.connection.leverage = s.leverage;
+    st.escapeFromLevel = s.escapeFromLevel;
+    st.escapeProfitMoney = s.escapeProfit;
     st.costs.commissionPerLotRoundTurn = s.commissionPerLot;
     st.costs.commissionPerMillionPerSide = s.commissionPerMillion;
     st.startSide = s.startSide;
@@ -256,6 +269,10 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["manualCloseCooldownSeconds"] = s.manualCloseCooldownSeconds;
     conn["autoContinue"] = s.autoContinue;
     conn["dailyLossLimitMoney"] = s.dailyLossLimit;
+    conn["lockAtLossMoney"] = s.lockAtLoss;
+    conn["accountBalance"] = s.accountBalance;
+    conn["leverage"] = s.leverage;
+    j["strategy"]["breakEvenEscape"] = {{"fromLevel", s.escapeFromLevel}, {"profit", s.escapeProfit}};
 
     auto& st = j["strategy"];
     st["seedOffsetPoints"] = s.seedOffset;

@@ -19,6 +19,7 @@ void StrategyEngine::resetCycleState() {
     slippageMoneyAccrued_ = 0.0;
     swapMoneyAccrued_ = 0.0;
     commissionAccrued_ = 0.0;
+    filledLevel_ = 0;
     lastBasketPnl_ = BasketPnlResult{};
     seeding_ = false;
 }
@@ -148,13 +149,17 @@ void StrategyEngine::updateExitRules(const StrategyConfig& config) {
     config_.basketStopLossMoney = config.basketStopLossMoney;
     config_.autoProfitTarget = config.autoProfitTarget;
     config_.autoTargetPercent = config.autoTargetPercent;
+    config_.escapeFromLevel = config.escapeFromLevel;
+    config_.escapeProfitMoney = config.escapeProfitMoney;
 }
 
 double StrategyEngine::effectiveTargetMoney(const BasketPnlResult& pnl) const {
-    if (!config_.autoProfitTarget) return config_.basketProfitTargetMoney;
-    // Full cost of the open positions: commission (open + close) and the
-    // whole spread (half paid getting in, half getting out).
-    return autoTargetMoney(pnl.commissionMoney + 2.0 * pnl.spreadCostMoney, config_.autoTargetPercent);
+    const double normal = config_.autoProfitTarget
+                              ? autoTargetMoney(pnl.commissionMoney + 2.0 * pnl.spreadCostMoney, config_.autoTargetPercent)
+                              : config_.basketProfitTargetMoney;
+    if (!escapeActive()) return normal;
+    const double escape = std::max(0.01, config_.escapeProfitMoney);
+    return normal > 0.0 ? std::min(normal, escape) : escape;
 }
 
 BasketPnlResult StrategyEngine::evaluateBasketPnl(const TickEvent& tick) const {
@@ -209,6 +214,7 @@ EngineState StrategyEngine::exportState() const {
     s.slippageMoneyAccrued = slippageMoneyAccrued_;
     s.swapMoneyAccrued = swapMoneyAccrued_;
     s.commissionAccrued = commissionAccrued_;
+    s.filledLevel = filledLevel_;
     return s;
 }
 
@@ -226,6 +232,9 @@ void StrategyEngine::restoreState(const EngineState& s) {
     seeding_ = s.seeding;
     slippageMoneyAccrued_ = s.slippageMoneyAccrued;
     swapMoneyAccrued_ = s.swapMoneyAccrued;
+    filledLevel_ = s.filledLevel >= 0
+                       ? s.filledLevel
+                       : std::max(0, s.nextSequenceIndex - 1 - static_cast<int>(s.pendingOrders.size()));
     if (s.commissionAccrued >= 0.0) {
         commissionAccrued_ = s.commissionAccrued;
     } else {
@@ -316,6 +325,8 @@ CommandBatch StrategyEngine::onOrderConfirmed(const OrderConfirmedEvent& event) 
 
     const ArmedOrder armed = pendingOrders_[foundIndex];
     pendingOrders_.erase_at(foundIndex);
+
+    filledLevel_ = std::max(filledLevel_, armed.order.sequenceIndex);
 
     // Gross P/L is measured from the price each order was *meant* to fill
     // at, and the gap to the actual fill is charged separately as slippage

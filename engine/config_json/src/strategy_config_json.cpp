@@ -56,6 +56,11 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
 
     cfg.basketProfitTargetMoney = j.value("basketProfitTargetMoney", 0.0);
     cfg.basketStopLossMoney = j.value("basketStopLossMoney", 0.0);
+    if (j.contains("breakEvenEscape") && j.at("breakEvenEscape").is_object()) {
+        const auto& be = j.at("breakEvenEscape");
+        cfg.escapeFromLevel = be.value("fromLevel", cfg.escapeFromLevel);
+        cfg.escapeProfitMoney = be.value("profit", cfg.escapeProfitMoney);
+    }
     if (j.contains("autoProfitTarget") && j.at("autoProfitTarget").is_object()) {
         const auto& at = j.at("autoProfitTarget");
         cfg.autoProfitTarget = at.value("enabled", cfg.autoProfitTarget);

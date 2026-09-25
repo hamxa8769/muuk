@@ -109,6 +109,9 @@ private:
     void renderNewsTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
                        bool connected);
     void renderMarketSettings();
+    // Risk & capital: balance, leverage, lot presets, break-even escape, lock,
+    // and the level-by-level worst case (muuk::core::riskTable).
+    void renderRiskCalculator(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     // Audit: every self-check with its state, and what it found / did.
     void renderAuditTab(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap, bool connected);
     void renderSessionStats();

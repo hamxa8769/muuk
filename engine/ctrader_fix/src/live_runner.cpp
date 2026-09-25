@@ -169,6 +169,11 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.auditLog.assign(auditLog_.begin(), auditLog_.end());
     snap.dayRealized = dayRealized_;
     snap.dailyLimitHit = dailyLimitHit_;
+    snap.locked = locked_;
+    snap.lockedLoss = lockedLoss_;
+    snap.lockedAt = lockedAt_;
+    snap.filledLevel = engine_ ? engine_->filledLevel() : 0;
+    snap.escapeActive = engine_ && engine_->status() == EngineStatus::Active && engine_->escapeActive();
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
     // the first new quote (e.g. during the daily break).
@@ -176,6 +181,10 @@ LiveSnapshot LiveRunner::snapshot() const {
                          ? muuk::core::autoTargetMoney(snap.live.commission + 2.0 * snap.live.spread,
                                                        config_.strategy.autoTargetPercent)
                          : config_.strategy.basketProfitTargetMoney;
+    if (snap.escapeActive) {
+        const double escape = std::max(0.01, config_.strategy.escapeProfitMoney);
+        snap.targetNow = snap.targetNow > 0.0 ? std::min(snap.targetNow, escape) : escape;
+    }
     return snap;
 }
 
@@ -914,8 +923,58 @@ void LiveRunner::maybeEmitTick() {
         currentBasket_->bestNet = std::max(currentBasket_->bestNet, net);
     }
     for (const auto& cmd : commands) handleCommand(cmd);
+    maybeLockLocked();
     releaseWaitingOrdersLocked();
     maybeRestartAfterBasketClose();
+}
+
+void LiveRunner::maybeLockLocked() {
+    const double lockAt = config_.connection.lockAtLossMoney;
+    if (lockAt <= 0.0 || locked_ || !engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
+    if (engine_->status() != EngineStatus::Active || openLegs_.empty() || !pendingCloses_.empty()) return;
+    PnlBreakdown live;
+    int64_t netSteps = 0;
+    for (const auto& leg : openLegs_) {
+        live += legPnl(leg);
+        netSteps += leg.side == OrderSide::BuyStop ? leg.volume.steps : -leg.volume.steps;
+    }
+    if (live.net > -lockAt) return;
+
+    const SymbolSpec& spec = config_.strategy.symbol;
+    locked_ = true;
+    lockedLoss_ = live.net;
+    lockedAt_ = localTimestamp();
+    markDirty();
+    setCloseReason("locked at " + std::to_string(live.net).substr(0, std::to_string(live.net).find('.') + 3));
+    cancelPendingLocked();
+    engine_->stopCycle();
+    cooldownActive_ = false;
+    reopenAfterManualClose_ = false;
+    std::string hedgeText = "already balanced -- nothing to add";
+    if (netSteps != 0) {
+        // One opposite market order for the net lots: a new position on a
+        // hedging account (no position id), so buys = sells and the P/L no
+        // longer moves with the price.
+        OpenLeg hedge;
+        hedge.id = nextAdoptedId_++;
+        hedge.side = netSteps > 0 ? OrderSide::SellStop : OrderSide::BuyStop;
+        hedge.volume = Volume{netSteps > 0 ? netSteps : -netSteps};
+        hedge.price = hedge.requestedPrice =
+            Price::fromDouble(hedge.side == OrderSide::BuyStop ? *latestAsk_ : *latestBid_, spec);
+        const std::string clOrdId = std::to_string(hedge.id);
+        const double lots = hedge.volume.toDouble(spec);
+        placedOrderInfo_[hedge.id] = hedge;
+        orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
+        tradeSession_->send(buildMarketOrderSingle(clOrdId, symbolId_, hedge.side == OrderSide::BuyStop ? 1 : 2,
+                                                   lots * kWireQtyPerLot));
+        hedgeText = std::string(hedge.side == OrderSide::BuyStop ? "BUY " : "SELL ") + std::to_string(lots).substr(0, 4) +
+                    " lot at market (ClOrdID=" + clOrdId + ")";
+    }
+    auditEventLocked(8, 2,
+                     "the basket reached " + std::to_string(live.net).substr(0, std::to_string(live.net).find('.') + 3) +
+                         " (lock at -" + std::to_string(lockAt).substr(0, std::to_string(lockAt).find('.') + 3) +
+                         "): pending orders cancelled, hedge " + hedgeText +
+                         " -- the loss is frozen; the bot waits for you (Close range to unwind)");
 }
 
 bool LiveRunner::accountFlat() const {
@@ -1731,6 +1790,7 @@ void LiveRunner::maybeFinalizeBasket() {
                 : startsWith("guard")             ? "guard"
                 : startsWith("market")            ? "market pause"
                 : startsWith("risk")              ? "daily limit"
+                : startsWith("locked")            ? "locked"
                 : startsWith("audit")             ? "audit"
                                                   : "closed";
     closeReason_.clear();
@@ -1840,6 +1900,13 @@ void LiveRunner::updateMarket() {
 }
 
 bool LiveRunner::marketBlocksLocked() {
+    if (locked_) {
+        if (!marketWaitLogged_) {
+            log("[risk] no new range: a basket is locked -- close it (Close range) to go on");
+            marketWaitLogged_ = true;
+        }
+        return true;
+    }
     if (dailyLimitHit_) {
         if (!marketWaitLogged_) {
             log("[risk] no new range: today's loss limit was hit -- trading resumes tomorrow");
@@ -1973,6 +2040,9 @@ void LiveRunner::reconcileOnConnectLocked() {
         dayKey_ = saved->dayKey;
         dayRealized_ = saved->dayRealized;
         dailyLimitHit_ = saved->dailyLimitHit;
+        locked_ = saved->locked && !saved->openLegs.empty();
+        lockedLoss_ = saved->lockedLoss;
+        lockedAt_ = saved->lockedAt;
         ticksProcessed_ += saved->ticksProcessed;
         tickDecisionUs_.carryOver(saved->tickDecisionUs);
         fillReactionUs_.carryOver(saved->fillReactionUs);
@@ -2376,6 +2446,7 @@ bool LiveRunner::adoptBasketFromBrokerLocked(std::string& why) {
                                                                     spec, config_.strategy.costs);
     }
     e.nextSequenceIndex = static_cast<int>(legs.size()) + 1;
+    e.filledLevel = static_cast<int>(legs.size());
     if (keptOrder) {
         muuk::core::EngineState::Armed armed;
         armed.order = PendingOrder{keptOrder->id, e.nextSequenceIndex, nextSide, keptOrder->price, nextLot,
@@ -2466,6 +2537,9 @@ PersistedState LiveRunner::buildStateLocked() const {
     s.dayKey = dayKey_;
     s.dayRealized = dayRealized_;
     s.dailyLimitHit = dailyLimitHit_;
+    s.locked = locked_;
+    s.lockedLoss = lockedLoss_;
+    s.lockedAt = lockedAt_;
     s.ticksProcessed = ticksProcessed_;
     s.tickDecisionUs = tickDecisionUs_.totals();
     s.fillReactionUs = fillReactionUs_.totals();
@@ -2530,12 +2604,14 @@ enum AuditIndex {
     kAuditEngine,
     kAuditDaily,
     kAuditRisk,
+    kAuditLock,
     kAuditCount
 };
 const char* const kAuditNames[kAuditCount] = {"Prices from the broker",   "Positions match the broker",
                                               "Pending order in place",   "Closing orders",
                                               "Profit target / stop loss", "Bot vs its positions",
-                                              "Daily loss limit",         "Risk settings"};
+                                              "Daily loss limit",         "Risk settings",
+                                              "Lock & pause"};
 
 std::string usd(double v) {
     char buf[32];
@@ -2796,12 +2872,50 @@ void LiveRunner::auditLocked() {
             warn = "no stop loss";
         }
         if (config_.connection.dailyLossLimitMoney <= 0.0) warn += std::string(warn.empty() ? "" : "; ") + "no daily loss limit";
-        if (warn.empty()) {
+        // Margin the next fill would need vs the typed-in balance (FIX sends neither).
+        const double balance = config_.connection.accountBalance;
+        if (balance > 0.0 && active && haveQuote) {
+            int64_t buy = 0;
+            int64_t sell = 0;
+            for (const auto& leg : openLegs_) (leg.side == OrderSide::BuyStop ? buy : sell) += leg.volume.steps;
+            for (const auto& [id, o] : placedOrderInfo_) (o.side == OrderSide::BuyStop ? buy : sell) += o.volume.steps;
+            const double price = (*latestBid_ + *latestAsk_) / 2.0;
+            const double margin = static_cast<double>(std::max(buy, sell)) * spec.volumeStep * spec.contractSize * price /
+                                  std::max(1.0, config_.connection.leverage);
+            const double equity = balance + dayRealized_ + live.net;
+            if (margin > equity * 0.8) {
+                warn += std::string(warn.empty() ? "" : "; ") + "the next fill needs " + usd(margin) +
+                        " margin, equity is about " + usd(equity) + " -- stop-out risk";
+            }
+        }
+        if (warn.find("stop-out") != std::string::npos) {
+            set(kAuditRisk, 2, warn, true);
+        } else if (warn.empty()) {
             set(kAuditRisk, 0, "stop loss " + usd(config_.strategy.basketStopLossMoney) + ", daily limit " +
                                    usd(config_.connection.dailyLossLimitMoney),
                 false);
         } else {
             set(kAuditRisk, 1, warn + " (Settings)", true);
+        }
+    }
+
+    // 9. Lock & pause.
+    {
+        if (locked_ && openLegs_.empty() && pendingCloses_.empty() && placedOrderInfo_.empty()) {
+            locked_ = false;
+            markDirty();
+            log("[risk] the locked basket is closed -- the bot can go on");
+        }
+        const double lockAt = config_.connection.lockAtLossMoney;
+        if (locked_) {
+            set(kAuditLock, 2,
+                "locked since " + lockedAt_.substr(11) + " at " + usd(lockedLoss_) + ", now " + usd(live.net) +
+                    " (swap is charged every night) -- close it when you decide (Close range)",
+                false);
+        } else if (lockAt <= 0.0) {
+            set(kAuditLock, 0, "off", false);
+        } else {
+            set(kAuditLock, 0, "locks the basket at -" + usd(lockAt).substr(1), false);
         }
     }
 }
