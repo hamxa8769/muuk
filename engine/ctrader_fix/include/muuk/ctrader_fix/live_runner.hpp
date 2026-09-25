@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -55,6 +56,19 @@ struct PnlBreakdown {
         net += o.net;
         return *this;
     }
+};
+
+// The audit: every check the bot runs on itself (about once a second), its
+// state now, and what it last did about it.
+struct AuditCheck {
+    std::string name;
+    int level = 0;  // 0 OK, 1 warning / fixed by itself, 2 needs you
+    std::string detail;
+};
+struct AuditEvent {
+    std::string time;
+    int level = 0;
+    std::string text;
 };
 
 struct PositionInfo {
@@ -156,6 +170,12 @@ struct LiveSnapshot {
     std::optional<double> clockOffsetMs; // this PC's clock minus the broker's SendingTime (includes one-way latency)
     std::vector<BasketRecord> baskets;           // completed this session, oldest first
     std::optional<BasketRecord> currentBasket;   // the basket in progress, if any
+
+    // Audit and risk.
+    std::vector<AuditCheck> audit;        // in a fixed order
+    std::vector<AuditEvent> auditLog;     // what it found / did, newest last (last 60)
+    double dayRealized = 0.0;             // today's booked net
+    bool dailyLimitHit = false;           // no new range until tomorrow
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -616,6 +636,25 @@ private:
     bool marketDirty_ = true;        // settings changed: rescan for the next change
     int64_t marketFullEvalMs_ = 0;
     bool marketWaitLogged_ = false;
+
+    // Audit (engineMutex_). See auditLocked().
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> closeSentAt_;  // close ClOrdID -> sent
+    std::unordered_map<std::string, int> closeAttempts_;  // position id -> closing orders sent for it
+    std::unordered_set<std::string> closeRecheck_;        // close ClOrdIDs to settle at the next position check
+    std::atomic<bool> auditSyncWanted_{false};            // ask the broker for positions now
+    std::chrono::steady_clock::time_point lastQuoteAt_{};
+    std::chrono::steady_clock::time_point marketOpenSince_{};
+    std::chrono::steady_clock::time_point lastStaleReconnect_{};
+    bool wasMarketOpen_ = false;
+    std::string dayKey_;
+    double dayRealized_ = 0.0;
+    bool dailyLimitHit_ = false;
+    std::vector<AuditCheck> audit_;
+    std::deque<AuditEvent> auditLog_;
+    std::string lastAuditText_[8];  // last event per check, so a lasting problem is logged once
+    void auditLocked();
+    void auditEventLocked(int check, int level, const std::string& text);
+    void addRealizedLocked(double net);
     bool closedForPause_ = false;    // closeRangeAt already acted on this pause
     void updateMarket();             // takes engineMutex_ itself
     bool marketBlocksLocked();       // true (and logs once) while no new range may open

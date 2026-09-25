@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
@@ -164,6 +165,10 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.settings = settingsFromConfig(config_);
     snap.market = marketStatus_;
     snap.marketKnown = marketKnown_;
+    snap.audit = audit_;
+    snap.auditLog.assign(auditLog_.begin(), auditLog_.end());
+    snap.dayRealized = dayRealized_;
+    snap.dailyLimitHit = dailyLimitHit_;
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
     // the first new quote (e.g. during the daily break).
@@ -423,6 +428,13 @@ void LiveRunner::run() {
             }
             if (loops % 5 == 0) updateMarket();
             if (loops % 5 == 0) {
+                {
+                    std::scoped_lock lock(engineMutex_);
+                    auditLocked();
+                }
+                if (auditSyncWanted_.exchange(false)) syncPositions();
+            }
+            if (loops % 5 == 0) {
                 std::scoped_lock lock(engineMutex_);
                 checkBasketHealthLocked();
                 // Cooldowns also end on quiet markets, not only on the next quote.
@@ -547,6 +559,9 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 if (const auto cit = pendingCloses_.find(*info.clOrdId); cit != pendingCloses_.end()) {
                     const OpenLeg leg = cit->second;
                     pendingCloses_.erase(cit);
+                    closeSentAt_.erase(*info.clOrdId);
+                    closeRecheck_.erase(*info.clOrdId);
+                    closeAttempts_.erase(leg.positionId);
                     closedPositionIds_.insert(leg.positionId);
 
                     // Book the real result: actual entry fill -> actual exit fill.
@@ -562,6 +577,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                             lotsClosed, leg.price.toDouble(spec), spec, config_.strategy.costs);
                         bookedGross_ += gross;
                         bookedCommission_ += commission;
+                        addRealizedLocked(gross - commission);
                         booked = ", booked " + std::to_string(gross - commission) + " net (gross " +
                                  std::to_string(gross) + ", commission " + std::to_string(commission) + ")";
                         recordLegClosed(leg, exitPrice.toDouble(spec), gross, commission);
@@ -596,20 +612,17 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 "): " + info.text.value_or("no reason given"));
 
             if (info.clOrdId && pendingCloses_.count(*info.clOrdId) > 0) {
-                // One of the closing trades was rejected: that leg's
-                // position is still open at the broker. Don't wait for a
-                // fill that will never come, but do NOT start a new cycle
-                // even once every other leg's close confirms -- that would
-                // pile a fresh basket on top of unflattened exposure,
-                // exactly the bug this mechanism exists to prevent. Needs
-                // operator attention (close the leftover position
-                // manually, then restart the bot).
+                // One of the closing trades was rejected. Either the position
+                // is already gone (closed in cTrader, stop-out...) or it's
+                // still open. The audit settles it at the next position check
+                // (asked for right away): gone -> booked as closed at the
+                // broker; still open -> closed again, up to 3 tries, and only
+                // then does it stop and wait for the operator. No new range
+                // opens while this close is outstanding.
                 std::scoped_lock lock(engineMutex_);
-                pendingCloses_.erase(*info.clOrdId);
-                basketCloseFailed_ = true;
-                log("[basket] CRITICAL: a closing trade was rejected (ClOrdID=" + *info.clOrdId +
-                    ") -- position is still open at the broker; next cycle will NOT start automatically. "
-                    "Close it manually, then restart the bot.");
+                closeRecheck_.insert(*info.clOrdId);
+                auditSyncWanted_ = true;
+                log("[audit] closing trade " + *info.clOrdId + " was rejected -- checking the position with the broker");
                 return;
             }
 
@@ -735,6 +748,25 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                 return;
             }
         }
+        // A close for a position the broker no longer has ("INCORRECT_POSITION_ID:
+        // Unknown position. PositionId=..."): settle it at the next position check.
+        {
+            const std::string text = msg.getOptionalString(tag::Text).value_or("");
+            const auto at = text.find("PositionId=");
+            if (at != std::string::npos) {
+                std::string pid = text.substr(at + 11);
+                pid = pid.substr(0, pid.find_first_not_of("0123456789"));
+                std::scoped_lock lock(engineMutex_);
+                for (const auto& [clOrdId, leg] : pendingCloses_) {
+                    if (leg.positionId == pid) {
+                        closeRecheck_.insert(clOrdId);
+                        auditSyncWanted_ = true;
+                        log("[audit] the broker says position " + pid + " isn't open (" + text +
+                            ") -- checking with the broker");
+                    }
+                }
+            }
+        }
         std::ostringstream oss;
         oss << "[trade] BusinessMessageReject: refMsgType=" << msg.getOptionalString(tag::RefMsgType).value_or("?")
             << " reason=" << msg.getOptionalString(tag::BusinessRejectReason).value_or("?")
@@ -826,6 +858,7 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
                 }
             }
             haveFullQuote = latestBid_.has_value() && latestAsk_.has_value();
+            lastQuoteAt_ = std::chrono::steady_clock::now();
             maybeEmitTick();
             // Clock check, now and then: how far this PC's clock is from the
             // broker's (a VPS with a drifting clock shows up here).
@@ -1278,6 +1311,8 @@ void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
             " lots=" + std::to_string(lots) + " (ClOrdID=" + closeClOrdId + ")");
         pendingCloses_.insert({closeClOrdId, leg});
         orderSentAt_[closeClOrdId] = std::chrono::steady_clock::now();
+        closeSentAt_[closeClOrdId] = std::chrono::steady_clock::now();
+        ++closeAttempts_[leg.positionId];
         tradeSession_->send(buildMarketOrderSingle(closeClOrdId, symbolId_, side, qty, leg.positionId));
     }
 }
@@ -1290,6 +1325,9 @@ void LiveRunner::syncPositions() {
     posReports_.clear();
     knownAtPosRequest_.clear();
     for (const auto& leg : openLegs_) {
+        if (!leg.positionId.empty()) knownAtPosRequest_.insert(leg.positionId);
+    }
+    for (const auto& [clOrdId, leg] : pendingCloses_) {
         if (!leg.positionId.empty()) knownAtPosRequest_.insert(leg.positionId);
     }
     if (connectSync_) log("[sync] requesting open positions from the broker");
@@ -1357,6 +1395,52 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
         engine_->stopCycle();
         cooldownActive_ = false;
         reopenAfterManualClose_ = false;
+    }
+
+    // Closing orders the broker never confirmed (rejected, lost, no answer):
+    // gone from the broker -> closed there; still open -> send the close
+    // again, at most 3 times, then stop and wait for the operator.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto confirm = std::chrono::seconds(std::max(1, config_.connection.closeConfirmSeconds));
+        std::vector<std::pair<std::string, OpenLeg>> closedThere;
+        std::vector<std::pair<std::string, OpenLeg>> retry;
+        for (const auto& [clOrdId, leg] : pendingCloses_) {
+            const auto sent = closeSentAt_.find(clOrdId);
+            const bool overdue = sent == closeSentAt_.end() || now - sent->second > confirm;
+            if (closeRecheck_.count(clOrdId) == 0 && !overdue) continue;
+            if (knownAtPosRequest_.count(leg.positionId) == 0) continue;  // sent after this question
+            (atBroker.count(leg.positionId) == 0 ? closedThere : retry).emplace_back(clOrdId, leg);
+        }
+        for (const auto& [clOrdId, leg] : closedThere) {
+            pendingCloses_.erase(clOrdId);
+            closeSentAt_.erase(clOrdId);
+            closeRecheck_.erase(clOrdId);
+            closeAttempts_.erase(leg.positionId);
+            closedPositionIds_.insert(leg.positionId);
+            recordLegClosed(leg, 0.0, 0.0, 0.0, "closed at the broker (no fill report) -- see cTrader for its price");
+            auditEventLocked(3, 1, "position " + leg.positionId + " is already closed at the broker -- booked as closed");
+        }
+        for (const auto& [clOrdId, leg] : retry) {
+            pendingCloses_.erase(clOrdId);
+            closeSentAt_.erase(clOrdId);
+            closeRecheck_.erase(clOrdId);
+            if (closeAttempts_[leg.positionId] < 3) {
+                auditEventLocked(3, 1, "position " + leg.positionId + " is still open -- closing it again (try " +
+                                           std::to_string(closeAttempts_[leg.positionId] + 1) + " of 3)");
+                closeLegs({leg});
+            } else {
+                openLegs_.push_back(leg);
+                basketCloseFailed_ = true;
+                auditEventLocked(3, 2, "position " + leg.positionId +
+                                           " still open after 3 closing orders -- close it in cTrader, then press "
+                                           "Sync from broker");
+            }
+        }
+        if (!closedThere.empty() && pendingCloses_.empty()) {
+            maybeFinalizeBasket();
+            if (engine_) maybeRestartAfterBasketClose();
+        }
     }
 
     // Positions the broker has that the bot doesn't track: adopt them.
@@ -1646,6 +1730,8 @@ void LiveRunner::maybeFinalizeBasket() {
                 : startsWith("interrupted")       ? "interrupted"
                 : startsWith("guard")             ? "guard"
                 : startsWith("market")            ? "market pause"
+                : startsWith("risk")              ? "daily limit"
+                : startsWith("audit")             ? "audit"
                                                   : "closed";
     closeReason_.clear();
     for (const auto& l : b.legs) {
@@ -1754,6 +1840,13 @@ void LiveRunner::updateMarket() {
 }
 
 bool LiveRunner::marketBlocksLocked() {
+    if (dailyLimitHit_) {
+        if (!marketWaitLogged_) {
+            log("[risk] no new range: today's loss limit was hit -- trading resumes tomorrow");
+            marketWaitLogged_ = true;
+        }
+        return true;
+    }
     if (!marketKnown_ || marketStatus_.canOpenRange) {
         marketWaitLogged_ = false;
         return false;
@@ -1877,6 +1970,9 @@ void LiveRunner::reconcileOnConnectLocked() {
         nextCloseReqId_ = std::max<uint64_t>(nextCloseReqId_.load(), saved->nextCloseReqId);
         nextAdoptedId_ = std::max<OrderId>(nextAdoptedId_, saved->nextAdoptedId);
         statsSince_ = saved->statsSince;
+        dayKey_ = saved->dayKey;
+        dayRealized_ = saved->dayRealized;
+        dailyLimitHit_ = saved->dailyLimitHit;
         ticksProcessed_ += saved->ticksProcessed;
         tickDecisionUs_.carryOver(saved->tickDecisionUs);
         fillReactionUs_.carryOver(saved->fillReactionUs);
@@ -2367,6 +2463,9 @@ PersistedState LiveRunner::buildStateLocked() const {
     s.nextCloseReqId = nextCloseReqId_.load();
     s.nextAdoptedId = nextAdoptedId_;
     s.statsSince = statsSince_;
+    s.dayKey = dayKey_;
+    s.dayRealized = dayRealized_;
+    s.dailyLimitHit = dailyLimitHit_;
     s.ticksProcessed = ticksProcessed_;
     s.tickDecisionUs = tickDecisionUs_.totals();
     s.fillReactionUs = fillReactionUs_.totals();
@@ -2409,10 +2508,302 @@ void LiveRunner::resetStats() {
         basketCounter_ = 0;
         statsSince_ = localTimestamp();
         resumeNote_.clear();
+        dayRealized_ = 0.0;
+        dailyLimitHit_ = false;
+        auditLog_.clear();
         markDirty();
         log("[reset] statistics and basket numbering start over from now");
     }
     flushState();
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+
+namespace {
+enum AuditIndex {
+    kAuditPrices,
+    kAuditBroker,
+    kAuditPending,
+    kAuditCloses,
+    kAuditTarget,
+    kAuditEngine,
+    kAuditDaily,
+    kAuditRisk,
+    kAuditCount
+};
+const char* const kAuditNames[kAuditCount] = {"Prices from the broker",   "Positions match the broker",
+                                              "Pending order in place",   "Closing orders",
+                                              "Profit target / stop loss", "Bot vs its positions",
+                                              "Daily loss limit",         "Risk settings"};
+
+std::string usd(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s$%.2f", v < 0.0 ? "-" : "", v < 0.0 ? -v : v);
+    return buf;
+}
+std::string priceText(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", v);
+    return buf;
+}
+std::string lotsText(int64_t steps, const SymbolSpec& spec) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(steps) * spec.volumeStep);
+    return buf;
+}
+}  // namespace
+
+void LiveRunner::auditEventLocked(int check, int level, const std::string& text) {
+    if (check >= 0 && check < kAuditCount) {
+        if (lastAuditText_[check] == text) return;  // a lasting problem is reported once
+        lastAuditText_[check] = text;
+    }
+    const std::string line = std::string(check >= 0 && check < kAuditCount ? kAuditNames[check] : "Audit") + ": " + text;
+    auditLog_.push_back(AuditEvent{localTimestamp().substr(11), level, line});
+    while (auditLog_.size() > 60) auditLog_.pop_front();
+    log(std::string(level >= 2 ? "[audit] NEEDS ATTENTION -- " : "[audit] ") + line);
+}
+
+void LiveRunner::addRealizedLocked(double net) {
+    const std::string today = localTimestamp().substr(0, 10);
+    if (dayKey_ != today) {
+        dayKey_ = today;
+        dayRealized_ = 0.0;
+        dailyLimitHit_ = false;
+    }
+    dayRealized_ += net;
+    markDirty();
+}
+
+void LiveRunner::auditLocked() {
+    if (!engine_) return;
+    const auto now = std::chrono::steady_clock::now();
+    const SymbolSpec& spec = config_.strategy.symbol;
+    audit_.assign(kAuditCount, AuditCheck{});
+    for (int i = 0; i < kAuditCount; ++i) audit_[i].name = kAuditNames[i];
+    auto set = [&](int i, int level, const std::string& detail, bool event) {
+        audit_[i].level = level;
+        audit_[i].detail = detail;
+        if (level == 0) {
+            lastAuditText_[i].clear();
+        } else if (event) {
+            auditEventLocked(i, level, detail);
+        }
+    };
+    const bool haveQuote = latestBid_ && latestAsk_;
+    PnlBreakdown live;
+    if (haveQuote) {
+        for (const auto& leg : openLegs_) live += legPnl(leg);
+    }
+    const bool active = engine_->status() == EngineStatus::Active;
+
+    // 1. Prices: a feed that stopped while the market is open is reconnected.
+    {
+        const bool marketOpen = !marketKnown_ || marketStatus_.marketOpen;
+        if (marketOpen && !wasMarketOpen_) marketOpenSince_ = now;
+        wasMarketOpen_ = marketOpen;
+        const int stale = config_.connection.quoteStaleSeconds;
+        const bool anyQuote = lastQuoteAt_.time_since_epoch().count() != 0;
+        const auto age = anyQuote ? std::chrono::duration_cast<std::chrono::seconds>(now - lastQuoteAt_).count() : -1;
+        if (!marketOpen) {
+            set(kAuditPrices, 0, "market closed -- no prices expected", false);
+        } else if (!anyQuote) {
+            set(kAuditPrices, 1, "no price received yet", false);
+        } else if (stale > 0 && age > stale && now - marketOpenSince_ > std::chrono::seconds(stale)) {
+            if (now - lastStaleReconnect_ > std::chrono::minutes(10) || lastStaleReconnect_.time_since_epoch().count() == 0) {
+                lastStaleReconnect_ = now;
+                set(kAuditPrices, 2,
+                    "no price for " + std::to_string(age) + " s while the market is open -- the price feed looks dead, "
+                    "reconnecting",
+                    true);
+                {
+                    std::scoped_lock infoLock(infoMutex_);
+                    disconnectReason_ = "audit: no prices for " + std::to_string(age) + " s";
+                }
+                running_ = false;  // run() ends; the app / muuk-live reconnect by themselves
+            } else {
+                set(kAuditPrices, 2,
+                    "no price for " + std::to_string(age) + " s -- already reconnected in the last 10 min; check the "
+                    "internet / broker",
+                    true);
+            }
+        } else {
+            set(kAuditPrices, 0, "last price " + std::to_string(std::max<long long>(0, age)) + " s ago", false);
+        }
+    }
+
+    // 2. Positions and orders vs the broker's own lists (every verifySeconds).
+    {
+        int recent = 0;
+        std::string last;
+        for (const auto& [at, issue] : brokerIssues_) {
+            if (now - at < std::chrono::minutes(5)) {
+                ++recent;
+                last = issue;
+            }
+        }
+        if (brokerCheckedAt_.empty()) {
+            set(kAuditBroker, 0, "first check running", false);
+        } else if (recent > 0) {
+            set(kAuditBroker, 1, std::to_string(recent) + " difference(s) in the last 5 min, handled: " + last, false);
+        } else {
+            set(kAuditBroker, 0, "matched at " + brokerCheckedAt_.substr(11), false);
+        }
+    }
+
+    // 3. The running range always has its next pending order.
+    {
+        const std::size_t pending = placedOrderInfo_.size() + waitingOrders_.size();
+        if (!active) {
+            set(kAuditPending, 0, "no range running", false);
+        } else if (engine_->seeding()) {
+            set(kAuditPending, 0, "entry orders out", false);
+        } else if (pending == 0 && config_.strategy.reArmOnFill && pendingCloses_.empty()) {
+            set(kAuditPending, healthRearms_ < 3 ? 1 : 2,
+                healthRearms_ < 3 ? "no pending order -- placing the next one"
+                                  : "no pending order and re-placing it failed 3 times -- press Close range / Open range",
+                true);
+        } else if (pending > 0) {
+            const auto& o = !placedOrderInfo_.empty() ? placedOrderInfo_.begin()->second : waitingOrders_.begin()->second;
+            set(kAuditPending, 0,
+                std::string(o.side == OrderSide::BuyStop ? "Buy" : "Sell") + " Stop " + lotsText(o.volume.steps, spec) +
+                    " @ " + priceText(o.price.toDouble(spec)) +
+                    (placedOrderInfo_.empty() ? " (held by the bot)" : (o.confirmed ? " (at the broker)" : " (sent)")),
+                false);
+        } else {
+            set(kAuditPending, 0, "none needed", false);
+        }
+    }
+
+    // 4. Closing orders: every one is confirmed, or settled with the broker.
+    {
+        if (basketCloseFailed_) {
+            set(kAuditCloses, 2,
+                "a position couldn't be closed -- close it in cTrader, then press Sync from broker (Positions tab)", true);
+        } else if (!pendingCloses_.empty()) {
+            const auto confirm = std::chrono::seconds(std::max(1, config_.connection.closeConfirmSeconds));
+            long long oldest = 0;
+            for (const auto& [clOrdId, leg] : pendingCloses_) {
+                const auto sent = closeSentAt_.find(clOrdId);
+                if (sent == closeSentAt_.end()) {
+                    closeRecheck_.insert(clOrdId);  // e.g. resumed from the state file
+                    auditSyncWanted_ = true;
+                    continue;
+                }
+                oldest = std::max<long long>(oldest, std::chrono::duration_cast<std::chrono::seconds>(now - sent->second).count());
+                if (now - sent->second > confirm) {
+                    closeRecheck_.insert(clOrdId);
+                    auditSyncWanted_ = true;
+                }
+            }
+            if (oldest > config_.connection.closeConfirmSeconds) {
+                set(kAuditCloses, 1,
+                    std::to_string(pendingCloses_.size()) + " closing order(s) not confirmed after " +
+                        std::to_string(oldest) + " s -- checking with the broker",
+                    true);
+            } else {
+                set(kAuditCloses, 0, std::to_string(pendingCloses_.size()) + " closing, waiting for the fills", false);
+            }
+        } else {
+            set(kAuditCloses, 0, "nothing closing", false);
+        }
+    }
+
+    // 5. Target / stop loss reached must mean the basket closes.
+    {
+        const muuk::core::BasketPnlResult pnl = engine_->lastBasketPnl();
+        const double target = engine_->effectiveTargetMoney(pnl);
+        const double stop = config_.strategy.basketStopLossMoney;
+        if (!active || openLegs_.empty() || !pendingCloses_.empty() || !haveQuote) {
+            set(kAuditTarget, 0, active ? "watching" : "no range running", false);
+        } else if ((target > 0.0 && pnl.netPnlMoney >= target) || (stop > 0.0 && pnl.netPnlMoney <= -stop)) {
+            // The engine closes on the tick that reaches it; if that didn't
+            // happen, give it the live price again, then close by hand.
+            for (const auto& cmd : engine_->onTick(latestTick())) handleCommand(cmd);
+            if (engine_->status() == EngineStatus::Active) {
+                closeRangeLocked(true, "audit: target / stop loss reached but the basket didn't close");
+            }
+            set(kAuditTarget, 1, "net " + usd(pnl.netPnlMoney) + " reached the target / stop loss but was still open -- closed it", true);
+        } else {
+            set(kAuditTarget, 0,
+                "net " + usd(pnl.netPnlMoney) + ", target " + usd(target) + (stop > 0.0 ? ", stop -" + usd(stop).substr(1) : ", no stop loss"),
+                false);
+        }
+    }
+
+    // 6. The range's own count of lots vs its positions at the broker.
+    {
+        if (!active || !pendingCloses_.empty() || engine_->seeding()) {
+            set(kAuditEngine, 0, active ? "watching" : "no range running", false);
+        } else {
+            const muuk::core::EngineState st = engine_->exportState();
+            int64_t buy = 0;
+            int64_t sell = 0;
+            for (const auto& leg : openLegs_) {
+                if (leg.adopted) continue;
+                (leg.side == OrderSide::BuyStop ? buy : sell) += leg.volume.steps;
+            }
+            if (buy != st.buyVolumeSteps || sell != st.sellVolumeSteps) {
+                set(kAuditEngine, 1,
+                    "the range counts buy " + lotsText(st.buyVolumeSteps, spec) + " / sell " +
+                        lotsText(st.sellVolumeSteps, spec) + " lots, its positions are buy " + lotsText(buy, spec) +
+                        " / sell " + lotsText(sell, spec) + " -- a position was closed by hand or partly filled",
+                    true);
+            } else {
+                set(kAuditEngine, 0, "buy " + lotsText(buy, spec) + " / sell " + lotsText(sell, spec) + " lots, matching", false);
+            }
+        }
+    }
+
+    // 7. Daily loss limit: booked today + floating.
+    {
+        const std::string today = localTimestamp().substr(0, 10);
+        if (dayKey_ != today) {
+            if (dailyLimitHit_) log("[risk] a new day -- the daily loss limit is reset");
+            dayKey_ = today;
+            dayRealized_ = 0.0;
+            dailyLimitHit_ = false;
+            markDirty();
+        }
+        const double limit = config_.connection.dailyLossLimitMoney;
+        const double todayNet = dayRealized_ + live.net;
+        if (limit <= 0.0) {
+            set(kAuditDaily, 0, "off -- today " + usd(todayNet), false);
+        } else if (dailyLimitHit_) {
+            set(kAuditDaily, 2, "hit today (" + usd(todayNet) + ") -- no new range until tomorrow", true);
+        } else if (todayNet <= -limit) {
+            dailyLimitHit_ = true;
+            markDirty();
+            set(kAuditDaily, 2,
+                "today's net " + usd(todayNet) + " reached the limit -" + usd(limit).substr(1) +
+                    " -- closing everything; no new range until tomorrow",
+                true);
+            const bool somethingOpen =
+                active || !openLegs_.empty() || !placedOrderInfo_.empty() || !waitingOrders_.empty();
+            if (somethingOpen && tradeSession_) closeRangeLocked(true, "risk: daily loss limit");
+        } else {
+            set(kAuditDaily, 0, "today " + usd(todayNet) + " of -" + usd(limit).substr(1), false);
+        }
+    }
+
+    // 8. Risk settings that leave losses open-ended.
+    {
+        std::string warn;
+        if (config_.strategy.basketStopLossMoney <= 0.0 && config_.strategy.lotProgression.multiplier > 1.0) {
+            warn = "no stop loss while lots multiply";
+        } else if (config_.strategy.basketStopLossMoney <= 0.0) {
+            warn = "no stop loss";
+        }
+        if (config_.connection.dailyLossLimitMoney <= 0.0) warn += std::string(warn.empty() ? "" : "; ") + "no daily loss limit";
+        if (warn.empty()) {
+            set(kAuditRisk, 0, "stop loss " + usd(config_.strategy.basketStopLossMoney) + ", daily limit " +
+                                   usd(config_.connection.dailyLossLimitMoney),
+                false);
+        } else {
+            set(kAuditRisk, 1, warn + " (Settings)", true);
+        }
+    }
 }
 
 }  // namespace muuk::ctrader_fix

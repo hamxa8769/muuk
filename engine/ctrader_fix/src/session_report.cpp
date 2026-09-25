@@ -259,9 +259,11 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
     const std::vector<std::pair<std::string, std::string>> items = {
         {"First order", start},
         {"Range width", fmt("$%.2f", s.rangeWidth)},
-        {"Profit target (net)", s.autoTarget ? "auto: " + std::to_string(s.autoTargetPercent) + "% of the positions' cost"
+        {"Profit target (net)", s.autoTarget ? "auto level " + std::to_string((s.autoTargetPercent - 160) / 2) + ": " +
+                                                   std::to_string(s.autoTargetPercent) + "% of the positions' cost"
                                              : fmt("$%.2f", s.profitTarget)},
         {"Stop loss (net)", s.stopLoss > 0 ? fmt("$%.2f", s.stopLoss) : std::string("off")},
+        {"Daily loss limit", s.dailyLossLimit > 0 ? fmt("$%.2f", s.dailyLossLimit) : std::string("off")},
         {"Market hours filter", s.market.enabled ? "on, pause " + std::to_string(s.market.pauseMinutesBefore) +
                                                        " min before / " + std::to_string(s.market.pauseMinutesAfter) +
                                                        " min after session ends"

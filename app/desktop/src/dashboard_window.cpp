@@ -53,6 +53,10 @@ ImVec4 pnlColor(double v) {
     return kGrey;
 }
 
+// Auto-target levels 20 / 40 / 60 / 80 / 100 = 200 / 240 / 280 / 320 / 360 % of the cost.
+int targetLevel(int percent) { return std::clamp((percent - 160) / 2, 20, 100); }
+int levelPercent(int level) { return 160 + 2 * level; }
+
 // "2h 05m", "12m 30s", "45s", "3d 4h".
 std::string countdown(int64_t ms) {
     if (ms <= 0) return "now";
@@ -408,7 +412,7 @@ void clampSettings(LiveSettings& s) {
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
     s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
-    s.autoTargetPercent = std::clamp(s.autoTargetPercent, 100, 200);
+    s.autoTargetPercent = std::clamp(s.autoTargetPercent, 200, 360);  // levels 20..100 (see targetLevel)
     s.market.pauseMinutesBefore = std::clamp(s.market.pauseMinutesBefore, 0, 240);
     s.market.pauseMinutesAfter = std::clamp(s.market.pauseMinutesAfter, 0, 240);
     s.market.newsMinutesBefore = std::clamp(s.market.newsMinutesBefore, 0, 240);
@@ -619,7 +623,7 @@ void DashboardWindow::render(LiveController& controller) {
     if (historyPath_ != configPath) {
         std::error_code ec;
         // Only for a real file -- not for every half-typed path.
-        if (!running && std::filesystem::is_regular_file(configPath, ec)) {
+        if ((!running || controller.demo()) && std::filesystem::is_regular_file(configPath, ec)) {
             controller.attachData(configPath);
             historyPath_ = configPath;
         } else if (running) {
@@ -643,7 +647,8 @@ void DashboardWindow::render(LiveController& controller) {
     ImGui::SameLine();
 
     glass::beginCard("right", ImVec2(0, 0));
-    if (ImGui::BeginTabBar("tabs")) {
+    // Tabs never get cut short: when they don't fit, the bar scrolls (arrows + mouse wheel).
+    if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
         const std::string posLabel =
             "  Positions  " + std::to_string(snap ? snap->positions.size() : 0) + "  ###positions";
         if (ImGui::BeginTabItem(posLabel.c_str(), nullptr, tabFlags(Tab::Positions))) {
@@ -683,17 +688,35 @@ void DashboardWindow::render(LiveController& controller) {
             }
         }
         if (ImGui::BeginTabItem("  Volume  ###volume", nullptr, tabFlags(Tab::Volume))) {
+            ImGui::BeginChild("volume_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
             renderVolumeTab();
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("  Performance  ###performance", nullptr, tabFlags(Tab::Performance))) {
+            ImGui::BeginChild("performance_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
             renderPerformanceTab(controller, snap);
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
         if (ImGui::BeginTabItem(settingsLabel.c_str(), nullptr, tabFlags(Tab::Settings))) {
             renderSettingsPanel(controller, snap, connected);
             ImGui::EndTabItem();
+        }
+        {
+            int worst = 0;
+            if (snap) {
+                for (const auto& c : snap->audit) worst = std::max(worst, c.level);
+            }
+            if (worst > 0) ImGui::PushStyleColor(ImGuiCol_Text, worst >= 2 ? kRed : kAmber);
+            const bool open = ImGui::BeginTabItem(worst >= 2 ? "  Audit !  ###audit" : "  Audit  ###audit", nullptr,
+                                                  tabFlags(Tab::Audit));
+            if (worst > 0) ImGui::PopStyleColor();
+            if (open) {
+                renderAuditTab(snap, connected);
+                ImGui::EndTabItem();
+            }
         }
         if (ImGui::BeginTabItem("  Log  ###log", nullptr, tabFlags(Tab::Log))) {
             renderLogTab(controller);
@@ -748,6 +771,25 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::TextDisabled("%s  |  %s", symbol.c_str(), host.c_str());
         ImGui::SameLine(0.0f, 14.0f);
+    }
+    // Audit: the bot's own checks, worst first.
+    if (connected && live && !live->audit.empty()) {
+        int worst = 0;
+        int flagged = 0;
+        std::string list;
+        for (const auto& c : live->audit) {
+            worst = std::max(worst, c.level);
+            if (c.level > 0) {
+                ++flagged;
+                list += c.name + ": " + c.detail + "\n";
+            }
+        }
+        const std::string text = worst == 0 ? "Audit OK" : (worst >= 2 ? "Audit: needs you" : "Audit: " + std::to_string(flagged) + " warning" + (flagged > 1 ? "s" : ""));
+        glass::pill(text.c_str(), worst == 0 ? kGreen : (worst >= 2 ? kRed : kAmber), worst >= 2);
+        if (ImGui::IsItemClicked()) selectTab_ = Tab::Audit;
+        ImGui::SetItemTooltip("%s", worst == 0 ? "Every self-check passed (checked every second). Click for details."
+                                               : (list + "Click for details.").c_str());
+        ImGui::SameLine(0.0f, 10.0f);
     }
     // Broker check: the bot's positions/orders compared with the broker's own lists.
     if (connected && live && !live->brokerCheckedAt.empty()) {
@@ -1106,11 +1148,11 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::SameLine();
         ImGui::BeginDisabled(!s.autoTarget);
         ImGui::SetNextItemWidth(-FLT_MIN);
-        const char* pctItems[] = {"100% of cost", "120% of cost", "140% of cost", "160% of cost", "180% of cost",
-                                  "200% of cost"};
-        int pctIndex = std::clamp((s.autoTargetPercent - 100) / 20, 0, 5);
-        if (ImGui::Combo("##autopct", &pctIndex, pctItems, 6)) {
-            s.autoTargetPercent = 100 + pctIndex * 20;
+        const char* levelItems[] = {"20  =  200% of cost", "40  =  240% of cost", "60  =  280% of cost",
+                                    "80  =  320% of cost", "100  =  360% of cost"};
+        int levelIndex = std::clamp(targetLevel(s.autoTargetPercent) / 20 - 1, 0, 4);
+        if (ImGui::Combo("##autopct", &levelIndex, levelItems, 5)) {
+            s.autoTargetPercent = levelPercent((levelIndex + 1) * 20);
             settingsDirty_ = true;
         }
         ImGui::EndDisabled();
@@ -1158,6 +1200,10 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       &settingsDirty_);
         settingDouble("Max basket loss ($)", "Safety limit: stop placing new orders past this floating loss. 0 = off.",
                       &s.maxBasketLoss, 10.0, "%.2f", &settingsDirty_);
+        settingDouble("Daily loss limit ($)",
+                      "Once today's booked + floating net reaches minus this, the running range is closed and no new "
+                      "range opens until tomorrow (your computer's date). 0 = off.",
+                      &s.dailyLossLimit, 10.0, "%.2f", &settingsDirty_);
         settingDouble("Commission ($ per $1M)",
                       "How cTrader brokers charge: $ per 1,000,000 USD traded, once when a position opens and again "
                       "when it closes. IC Markets Raw = 30 ($3 per $100k). One side = lots x 100 oz x entry price x "
@@ -1687,6 +1733,9 @@ void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
 }
 
 void DashboardWindow::renderHistoryTab(LiveController& controller, const std::optional<LiveSnapshot>& snap) {
+    // One scroll for the whole tab: the summary, the per-session table and
+    // every basket -- however long it gets.
+    ImGui::BeginChild("history_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     const std::string configPath(configPathBuffer_.data());
 
     // Summary across every saved basket.
@@ -1801,7 +1850,6 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
     }
     ImGui::Separator();
 
-    ImGui::BeginChild("history_list", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     if (snap && snap->currentBasket && !snap->currentBasket->legs.empty()) {
         const BasketRecord& b = *snap->currentBasket;
         ImGui::PushID("current");
@@ -1829,8 +1877,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
 
     // Newest first. Only the most recent ones are listed -- the PDF report
     // and the history file have all of them.
-    constexpr std::size_t kMaxShown = 500;
-    const std::size_t shown = std::min(history_.size(), kMaxShown);
+    const std::size_t shown = std::min(history_.size(), historyShown_);
     std::string lastSession;
     for (std::size_t k = 0; k < shown; ++k) {
         const std::size_t i = history_.size() - 1 - k;
@@ -1875,9 +1922,22 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
         ImGui::PopID();
     }
     if (history_.size() > shown) {
-        ImGui::TextDisabled("... %zu older basket(s) - see the PDF report or the history file.", history_.size() - shown);
+        ImGui::TextDisabled("%zu older basket(s)", history_.size() - shown);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Show 500 more")) historyShown_ += 500;
     }
     ImGui::EndChild();
+}
+
+void DashboardWindow::selectTabByName(const std::string& name) {
+    const std::pair<const char*, Tab> tabs[] = {{"positions", Tab::Positions}, {"orders", Tab::Orders},
+                                                {"history", Tab::History},     {"news", Tab::News},
+                                                {"audit", Tab::Audit},         {"volume", Tab::Volume},
+                                                {"performance", Tab::Performance}, {"settings", Tab::Settings},
+                                                {"log", Tab::Log}};
+    for (const auto& [n, t] : tabs) {
+        if (name == n) selectTab_ = t;
+    }
 }
 
 void DashboardWindow::requestExit(LiveController& controller) {
@@ -2975,7 +3035,10 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     ImGui::SameLine();
     withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(net), "%s", money(net).c_str()); });
     const std::string targetText =
-        "target " + money(target) + (s.autoTarget ? "  (auto " + std::to_string(s.autoTargetPercent) + "%)" : "");
+        "target " + money(target) +
+        (s.autoTarget ? "  (level " + std::to_string(targetLevel(s.autoTargetPercent)) + " = " +
+                            std::to_string(s.autoTargetPercent) + "%)"
+                      : "");
     ImGui::SameLine(0.0f, 12.0f);
     const float targetW = ImGui::CalcTextSize(targetText.c_str()).x;
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -3017,15 +3080,18 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
         if (ImGui::Checkbox("Auto - from what the open positions cost", &autoOn)) {
             quickApply(controller, opt, connected, [autoOn](LiveSettings& x) { x.autoTarget = autoOn; });
         }
-        ImGui::TextDisabled("Target = this %% of the cost (commission open + close + spread) of every open\n"
-                            "position: small for one 0.01 lot, bigger with every fill. 200%% = twice the cost.");
+        ImGui::TextDisabled("Target = a multiple of the cost (commission open + close + spread) of every open\n"
+                            "position: small for one 0.01 lot, bigger with every fill.\n"
+                            "Level 20 = 200%% (twice the cost), 40 = 240%%, 60 = 280%%, 80 = 320%%, 100 = 360%%.");
         ImGui::BeginDisabled(!autoOn);
-        for (int p : {100, 120, 140, 160, 180, 200}) {
-            if (p != 100) ImGui::SameLine();
-            const std::string label = std::to_string(p) + "%";
-            if (ImGui::RadioButton(label.c_str(), s.autoTargetPercent == p)) {
+        for (int level : {20, 40, 60, 80, 100}) {
+            if (level != 20) ImGui::SameLine();
+            const std::string label = std::to_string(level);
+            const int p = levelPercent(level);
+            if (ImGui::RadioButton(label.c_str(), targetLevel(s.autoTargetPercent) == level)) {
                 quickApply(controller, opt, connected, [p](LiveSettings& x) { x.autoTargetPercent = p; });
             }
+            ImGui::SetItemTooltip("Level %d: target = %d%% of the cost", level, p);
         }
         ImGui::EndDisabled();
         const double cost = snap.live.commission + 2.0 * snap.live.spread;
@@ -3034,7 +3100,8 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
         ImGui::TextDisabled("  commission %s + spread %s", money(snap.live.commission).c_str(),
                             money(2.0 * snap.live.spread).c_str());
         if (autoOn) {
-            ImGui::Text("Target now: %s  (%d%% of the cost%s)", money(target).c_str(), s.autoTargetPercent,
+            ImGui::Text("Target now: %s  (level %d = %d%% of the cost%s)", money(target).c_str(),
+                        targetLevel(s.autoTargetPercent), s.autoTargetPercent,
                         snap.positions.empty() ? ", set by the first fill" : "");
         } else {
             ImGui::Text("Fixed target: %s  (Settings > Profit target)", money(s.profitTarget).c_str());
@@ -3042,6 +3109,79 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
         ImGui::TextDisabled("Applies at once, also to the running basket. Saved to your config.");
         ImGui::EndPopup();
     }
+}
+
+void DashboardWindow::renderAuditTab(const std::optional<LiveSnapshot>& snap, bool connected) {
+    ImGui::BeginChild("audit_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    withFont(boldFont_, [] { ImGui::TextUnformatted("Audit"); });
+    ImGui::SameLine();
+    ImGui::TextDisabled("-- the bot checks itself every second and fixes what it can by itself");
+    if (!connected || !snap || snap->audit.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Connect to run the audit.");
+        ImGui::EndChild();
+        return;
+    }
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
+                                  ImGuiTableFlags_PadOuterX;
+    if (ImGui::BeginTable("audit", 3, flags)) {
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 22.0f);
+        ImGui::TableSetupColumn("Check", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("Now", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+        ImGui::TableHeadersRow();
+        for (const auto& c : snap->audit) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const ImVec4 color = c.level == 0 ? kGreen : (c.level >= 2 ? kRed : kAmber);
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float h = ImGui::GetTextLineHeight();
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(p.x + 8.0f, p.y + h * 0.5f + 1.0f), 5.5f,
+                                                        ImGui::GetColorU32(color), 14);
+            ImGui::Dummy(ImVec2(16.0f, h));
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(c.name.c_str());
+            ImGui::TableNextColumn();
+            if (c.level == 0) {
+                ImGui::TextDisabled("%s", c.detail.c_str());
+            } else {
+                ImGui::TextColored(color, "%s", c.detail.c_str());
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("What it found and did"); });
+    if (snap->auditLog.empty()) {
+        ImGui::TextDisabled("Nothing so far.");
+    } else {
+        for (auto it = snap->auditLog.rbegin(); it != snap->auditLog.rend(); ++it) {
+            ImGui::TextDisabled("%s", it->time.c_str());
+            ImGui::SameLine();
+            const ImVec4 color = it->level >= 2 ? kRed : (it->level == 1 ? kAmber : glass::palette().text);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", it->text.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("What each check does by itself"); });
+    ImGui::TextWrapped(
+        "Prices: no price for 2 min while the market is open = a dead feed; the bot reconnects and carries on with "
+        "the saved basket.\n"
+        "Positions: every 30 s the broker's own position and order lists are compared with the bot's. A missing "
+        "pending order is placed again; a position closed outside the bot stops the range safely; a position the bot "
+        "didn't open is listed.\n"
+        "Pending order: a running range always has its next order; if it's missing it's placed again (3 tries).\n"
+        "Closing orders: a close that isn't confirmed within 10 s, or is rejected, is checked with the broker -- "
+        "already closed there: booked; still open: closed again (3 tries), then it waits for you.\n"
+        "Target / stop loss: if the net passed the target or stop loss and the basket is still open, it's closed.\n"
+        "Bot vs positions: warns when the range's own lot count differs from its positions (a hand close or a "
+        "partial fill).\n"
+        "Daily loss limit: closes everything and pauses until tomorrow (Settings).\n"
+        "Risk settings: warns while there is no stop loss / no daily loss limit.");
+    ImGui::EndChild();
 }
 
 }  // namespace muuk::desktop

@@ -68,11 +68,13 @@ public:
     // the positions open, or stay. The app quits once exitApproved().
     void requestExit(LiveController& controller);
     [[nodiscard]] bool exitApproved() const { return exitApproved_; }
+    // Opens on this tab ("positions", "history", "audit", ...; --tab on the command line).
+    void selectTabByName(const std::string& name);
 
 private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
     // The tabs on the right; a KPI card click selects one.
-    enum class Tab { None, Positions, Orders, History, News, Volume, Performance, Settings, Log };
+    enum class Tab { None, Positions, Orders, History, News, Audit, Volume, Performance, Settings, Log };
     [[nodiscard]] int tabFlags(Tab tab) const;
 
     void setTheme(bool dark);
@@ -107,6 +109,8 @@ private:
     void renderNewsTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
                        bool connected);
     void renderMarketSettings();
+    // Audit: every self-check with its state, and what it found / did.
+    void renderAuditTab(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap, bool connected);
     void renderSessionStats();
     // The net P/L bar with its target, and the gear that sets the auto target.
     void renderTargetBar(LiveController& controller, const muuk::ctrader_fix::LiveSnapshot& snap, bool connected);
@@ -137,6 +141,7 @@ private:
     std::vector<muuk::ctrader_fix::BasketRecord> history_;
     uint64_t historyRevision_ = ~uint64_t{0};  // forces the first copy
     std::string historyPath_;  // config path the history was loaded for
+    std::size_t historyShown_ = 500;  // baskets listed in the History tab (Show more adds 500)
 
     // Volume tab, recomputed when the history changes (or the day might have).
     int volumePeriod_ = 0;  // 0 day, 1 week, 2 month

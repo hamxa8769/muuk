@@ -398,12 +398,13 @@ price against a pending order's `StopPx` itself.
 
 ## Auto profit target
 
-`strategy.autoProfitTarget: {"enabled": true, "percent": 150}` (the gear next
+`strategy.autoProfitTarget: {"enabled": true, "percent": 240}` (the gear next
 to the net P/L bar): instead of a fixed dollar target, the basket is booked
 once its net profit reaches *percent* of what the open positions cost --
 commission (open + close) plus the full spread. One 0.01 lot aims low; every
-fill raises the target. 100 / 120 / 140 / 160 / 180 / 200 % in the app
-(also in Settings > Auto profit target). Target, stop
+fill raises the target. In the app it's a level: 20 / 40 / 60 / 80 / 100 =
+200 / 240 / 280 / 320 / 360 % of the cost (Settings > Auto profit target, or
+the gear). A config with less than 200 % is read as 200 %. Target, stop
 loss and the auto target apply at once, also to a running basket.
 
 ## Market hours, sessions and the news guard
@@ -429,3 +430,22 @@ or at every pause).
   currencies (USD). Releases can also be added by hand in the News tab.
 - Every basket records the session(s) open when it started; History and
   the PDF report show the results per session.
+
+## Audit and risk
+
+The bot checks itself about once a second (Audit tab; the header pill turns
+amber / red when something is off) and fixes what it can by itself:
+
+| Check | What it does |
+|---|---|
+| Prices from the broker | No price for `quoteStaleSeconds` (120) while the market is open: the feed is dead -- the bot reconnects (at most every 10 min) and resumes the saved basket. |
+| Positions match the broker | Every `verifySeconds` (30) the broker's position and order lists are compared with the bot's: missing pending orders are placed again, a basket position closed outside the bot stops the range safely, unknown positions are listed. |
+| Pending order in place | A running range always has its next order; placed again if missing (3 tries). |
+| Closing orders | A close not confirmed within `closeConfirmSeconds` (10), rejected, or answered "Unknown position" is checked against the broker: already closed there -> booked as closed; still open -> closed again (3 tries), then it waits for the operator. Before, a rejected or unanswered close left the basket stuck. |
+| Profit target / stop loss | Net past the target or stop loss but the basket still open -> closed. |
+| Bot vs its positions | Warns when the range's own lot count differs from its positions (hand close, partial fill). |
+| Daily loss limit | `connection.dailyLossLimitMoney`: today's booked + floating net at minus this closes everything; no new range until the next local day. |
+| Risk settings | Warns while there is no stop loss (especially with multiplying lots) or no daily loss limit. |
+
+What it found and did is listed in the Audit tab and written to the log as
+`[audit]` lines.

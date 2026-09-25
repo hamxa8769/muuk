@@ -79,6 +79,17 @@ struct LiveConnectionConfig {
     // working orders and compares them with its own view. 0 = only on connect.
     int verifySeconds = 30;
 
+    // Audit: a closing order the broker hasn't confirmed after this long is
+    // checked against the broker's position list (settled or sent again).
+    int closeConfirmSeconds = 10;
+    // Audit: no price for this long while the market is open = a dead
+    // price feed; the bot reconnects. 0 = off.
+    int quoteStaleSeconds = 120;
+    // Risk: once today's booked + floating net reaches minus this, the
+    // running range is closed and no new range opens until tomorrow
+    // (local date). 0 = off.
+    double dailyLossLimitMoney = 0.0;
+
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
     // false: only open a range when the operator asks (LiveRunner::openRange).
@@ -120,6 +131,7 @@ struct LiveSettings {
     int maxOrders = 20;
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit
+    double dailyLossLimit = 0.0; // $; today's booked + floating net at minus this closes everything for the day; 0 = off
     double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close) -- flat-rate brokers
     // $ per $1,000,000 traded, charged on the open and again on the close
     // (cTrader's own commission type; IC Markets Raw: 30). >0 replaces commissionPerLot.

@@ -52,6 +52,11 @@ struct PersistedState {
     uint64_t nextCloseReqId = 1;
     uint64_t nextAdoptedId = 1'000'000'000;
 
+    // Today's booked net (local date), for the daily loss limit.
+    std::string dayKey;
+    double dayRealized = 0.0;
+    bool dailyLimitHit = false;
+
     // Lifetime statistics (since the last reset).
     std::string statsSince;
     uint64_t ticksProcessed = 0;

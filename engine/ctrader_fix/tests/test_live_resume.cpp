@@ -1004,3 +1004,132 @@ TEST_CASE("Auto profit target: a percentage of what the open positions cost, gro
     bot.finish();
     bot.rethrow();
 }
+
+namespace {
+void sendRejectReport(MockFixServer& server, int seq, const std::string& clOrdId, const std::string& text) {
+    FixMessage r = serverHeaderMessage(msgtype::ExecutionReport, seq);
+    r.set(tag::OrderID, "B" + clOrdId);
+    r.set(tag::ClOrdID, clOrdId);
+    r.set(tag::ExecType, std::string("8"));
+    r.set(tag::OrdStatus, std::string("8"));
+    r.set(tag::Text, text);
+    server.sendToClient(kTradeConn, r);
+}
+
+// Opens a 0.01 lot buy (position `positionId`) and presses Close range; returns the closing order.
+FixMessage openThenCloseRange(MockFixServer& server, Bot& bot, int& seq, const std::string& positionId) {
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, positionId);
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // the Sell Stop
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 1; }));
+    bot.runner().closeRange();
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getString(tag::PosMaintRptID) == positionId);
+    return close;
+}
+
+bool auditLogHas(const LiveSnapshot& s, const std::string& text) {
+    return std::any_of(s.auditLog.begin(), s.auditLog.end(),
+                       [&](const AuditEvent& e) { return e.text.find(text) != std::string::npos; });
+}
+}  // namespace
+
+TEST_CASE("Audit: a rejected close whose position is already gone is booked as closed -- the basket doesn't get stuck") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.manualCloseCooldownSeconds = 0;  // no reopen after Close range
+    Bot bot(cfg, freshStateFile("audit_close_gone"));
+    int seq = handshake(server, {}, {});
+    const FixMessage close = openThenCloseRange(server, bot, seq, "P1");
+
+    sendRejectReport(server, seq++, close.getString(tag::ClOrdID), "POSITION_NOT_FOUND");
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {});  // the broker has nothing any more
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    const LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE_FALSE(s.closeFailed);
+    REQUIRE_FALSE(s.closingInProgress);
+    REQUIRE(s.positions.empty());
+    REQUIRE(s.baskets[0].legs[0].note.find("closed at the broker") != std::string::npos);
+    REQUIRE(auditLogHas(s, "already closed at the broker"));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Audit: a rejected close whose position is still open is sent again") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    Bot bot(cfg, freshStateFile("audit_close_retry"));
+    int seq = handshake(server, {}, {});
+    const FixMessage close = openThenCloseRange(server, bot, seq, "P1");
+
+    sendRejectReport(server, seq++, close.getString(tag::ClOrdID), "MARKET_CLOSED");
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {{"P1", true, 0.01, 4337.00}});  // still open
+
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(again.getString(tag::PosMaintRptID) == "P1");
+    REQUIRE(again.getString(tag::ClOrdID) != close.getString(tag::ClOrdID));
+    sendFill(server, seq++, again.getString(tag::ClOrdID), 4337.50, 1.0, "P1");
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    const LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE_FALSE(s.closeFailed);
+    REQUIRE(s.baskets[0].legs[0].exitPrice == Catch::Approx(4337.50));
+    REQUIRE(auditLogHas(s, "closing it again"));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Audit: the broker's \"Unknown position\" answer to a close settles it with the broker") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    Bot bot(cfg, freshStateFile("audit_unknown_position"));
+    int seq = handshake(server, {}, {});
+    (void)openThenCloseRange(server, bot, seq, "675409669");
+
+    FixMessage bmr = serverHeaderMessage(msgtype::BusinessMessageReject, seq++);
+    bmr.set(tag::BusinessRejectReason, int64_t{0});
+    bmr.set(tag::Text, std::string("INCORRECT_POSITION_ID:Unknown position. PositionId=675409669"));
+    server.sendToClient(kTradeConn, bmr);
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {});
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    REQUIRE_FALSE(bot.runner().snapshot().closingInProgress);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Risk: the daily loss limit closes everything and no new range opens that day") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.dailyLossLimitMoney = 0.50;
+    Bot bot(cfg, freshStateFile("daily_limit"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // the Sell Stop
+    sendQuote(server, 2, 4336.00, 4336.10);  // net -$1.00, past the -$0.50 limit
+
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(close.getString(tag::PosMaintRptID) == "P1");
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4336.00, 1.0, "P1");
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    const LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE(s.dailyLimitHit);
+    REQUIRE(s.baskets[0].outcome == "daily limit");
+    REQUIRE(s.dayRealized == Catch::Approx(-1.00));
+    REQUIRE_FALSE(bot.runner().openRange());
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}

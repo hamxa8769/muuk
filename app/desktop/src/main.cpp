@@ -307,6 +307,7 @@ int main(int argc, char** argv) {
     std::string configArg;
     bool connectOnLaunch = false;
     bool demo = false;  // --demo: preview data, never connects
+    std::string tabArg;  // --tab <name>: open on that tab
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
@@ -315,6 +316,8 @@ int main(int argc, char** argv) {
             connectOnLaunch = true;
         } else if (arg == "--demo") {
             demo = true;
+        } else if (arg == "--tab" && i + 1 < argc) {
+            tabArg = argv[++i];
         }
     }
 
@@ -376,6 +379,7 @@ int main(int argc, char** argv) {
     dashboard.setThemeChangedCallback([window](bool dark) { setNativeTitleBarDark(window, dark); });
     if (!configArg.empty()) dashboard.setConfigPath(configArg);
     if (demo) controller.enableDemo();
+    if (!tabArg.empty()) dashboard.selectTabByName(tabArg);
     // --connect, or the "Connect when the app opens" preference.
     if (!demo && (connectOnLaunch || dashboard.autoConnect()) && !dashboard.configPath().empty()) {
         controller.start(dashboard.configPath());

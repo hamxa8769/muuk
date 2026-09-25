@@ -294,6 +294,16 @@ LiveSnapshot LiveController::demoSnapshot() const {
     s.market = muuk::ctrader_fix::evaluateMarket(muuk::ctrader_fix::utcNowMs(), s.settings.market, nullptr, false);
     s.marketKnown = true;
     s.brokerCheckedAt = muuk::ctrader_fix::localTimestamp();
+    s.audit = {{"Prices from the broker", 0, "last price 0 s ago"},
+               {"Positions match the broker", 0, "matched at " + s.brokerCheckedAt.substr(11)},
+               {"Pending order in place", 0, "Sell Stop 0.08 @ 4271.13 (at the broker)"},
+               {"Closing orders", 0, "nothing closing"},
+               {"Profit target / stop loss", 0, "watching"},
+               {"Bot vs its positions", 1, "preview: the range counts buy 0.05 / sell 0.02 lots, its positions differ"},
+               {"Daily loss limit", 0, "off"},
+               {"Risk settings", 1, "no daily loss limit (Settings)"}};
+    s.auditLog = {{"04:10:12", 1, "Closing orders: position 675409669 is already closed at the broker -- booked as closed"},
+                  {"04:12:40", 0, "Pending order in place: placed again"}};
     return s;
 }
 

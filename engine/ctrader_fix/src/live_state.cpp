@@ -161,6 +161,9 @@ nlohmann::json stateToJson(const PersistedState& s) {
                         {"nextCloseReqId", s.nextCloseReqId},
                         {"nextAdoptedId", s.nextAdoptedId},
                         {"statsSince", s.statsSince},
+                        {"dayKey", s.dayKey},
+                        {"dayRealized", s.dayRealized},
+                        {"dailyLimitHit", s.dailyLimitHit},
                         {"ticksProcessed", s.ticksProcessed},
                         {"tickDecisionUs", totalsToJson(s.tickDecisionUs)},
                         {"fillReactionUs", totalsToJson(s.fillReactionUs)},
@@ -194,6 +197,9 @@ PersistedState stateFromJson(const nlohmann::json& j) {
     s.nextCloseReqId = j.value("nextCloseReqId", uint64_t{1});
     s.nextAdoptedId = j.value("nextAdoptedId", uint64_t{1'000'000'000});
     s.statsSince = j.value("statsSince", std::string());
+    s.dayKey = j.value("dayKey", std::string());
+    s.dayRealized = j.value("dayRealized", 0.0);
+    s.dailyLimitHit = j.value("dailyLimitHit", false);
     s.ticksProcessed = j.value("ticksProcessed", uint64_t{0});
     s.tickDecisionUs = totalsFromJson(j, "tickDecisionUs");
     s.fillReactionUs = totalsFromJson(j, "fillReactionUs");

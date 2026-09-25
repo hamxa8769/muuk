@@ -55,6 +55,9 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.manualCloseCooldownSeconds = conn.value("manualCloseCooldownSeconds", 15);
     cfg.connection.orderAckTimeoutSeconds = conn.value("orderAckTimeoutSeconds", 8);
     cfg.connection.verifySeconds = conn.value("verifySeconds", 30);
+    cfg.connection.closeConfirmSeconds = conn.value("closeConfirmSeconds", 10);
+    cfg.connection.quoteStaleSeconds = conn.value("quoteStaleSeconds", 120);
+    cfg.connection.dailyLossLimitMoney = conn.value("dailyLossLimitMoney", 0.0);
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -64,6 +67,8 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
 
     cfg.strategy = muuk::config_json::parseStrategyConfig(j.at("strategy"));
     if (j.contains("market")) cfg.market = marketHoursFromJson(j.at("market"));
+    // Auto-target levels 20..100 are 200..360 % of the cost.
+    cfg.strategy.autoTargetPercent = std::clamp(cfg.strategy.autoTargetPercent, 200.0, 360.0);
 
     return cfg;
 }
@@ -89,6 +94,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.maxOrders = config.strategy.riskLimits.maxOrders;
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
+    s.dailyLossLimit = config.connection.dailyLossLimitMoney;
     s.commissionPerLot = config.strategy.costs.commissionPerLotRoundTurn;
     s.commissionPerMillion = config.strategy.costs.commissionPerMillionPerSide;
     s.autoContinue = config.connection.autoContinue;
@@ -116,6 +122,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
+    config.connection.dailyLossLimitMoney = s.dailyLossLimit;
     st.costs.commissionPerLotRoundTurn = s.commissionPerLot;
     st.costs.commissionPerMillionPerSide = s.commissionPerMillion;
     st.startSide = s.startSide;
@@ -248,6 +255,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["basketCooldownSeconds"] = s.cooldownSeconds;
     conn["manualCloseCooldownSeconds"] = s.manualCloseCooldownSeconds;
     conn["autoContinue"] = s.autoContinue;
+    conn["dailyLossLimitMoney"] = s.dailyLossLimit;
 
     auto& st = j["strategy"];
     st["seedOffsetPoints"] = s.seedOffset;
