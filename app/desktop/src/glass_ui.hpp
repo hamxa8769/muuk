@@ -87,6 +87,11 @@ void pnlBar(const char* id, float value, float negScale, float posScale, float h
 bool railItem(const char* label, const char* badge, ImVec4 badgeColor, bool selected, ImVec4 accent,
               float height = 0.0f);
 
+// The menu button: a rounded glass square with three bars (a "hamburger").
+// `open` (0..1) morphs the bars as the menu slides out; `alert` adds a red
+// dot. Returns true while the mouse is over it.
+bool menuIcon(const char* id, float size, float open, bool alert);
+
 // Eases a displayed value towards `target` (per-id), for smooth numbers.
 [[nodiscard]] float ease(const char* id, float target, float speed = 10.0f);
 

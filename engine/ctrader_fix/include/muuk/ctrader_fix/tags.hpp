@@ -97,6 +97,31 @@ inline constexpr int LongQty = 704;
 inline constexpr int ShortQty = 705;
 inline constexpr int SettlPrice = 730;
 
+// Muuk's own tags (user-defined range) -- only in the AccountInfo message
+// the MT5 bridge sends (msgtype::MuukAccountInfo). cTrader never sends them.
+inline constexpr int MuukBalance = 20001;
+inline constexpr int MuukEquity = 20002;
+inline constexpr int MuukMargin = 20003;
+inline constexpr int MuukFreeMargin = 20004;
+inline constexpr int MuukCurrency = 20005;
+inline constexpr int MuukLeverage = 20006;
+inline constexpr int MuukHedgedMarginPercent = 20007;  // <0 = not given
+inline constexpr int MuukContractSize = 20008;
+inline constexpr int MuukVolumeMin = 20009;
+inline constexpr int MuukVolumeStep = 20010;
+inline constexpr int MuukLogin = 20011;
+inline constexpr int MuukServer = 20012;
+inline constexpr int MuukCompany = 20013;
+inline constexpr int MuukHedging = 20014;  // "Y" / "N"
+inline constexpr int MuukSymbol = 20015;
+inline constexpr int MuukTickSize = 20016;
+inline constexpr int MuukTickValue = 20017;     // account money per tick per 1 lot
+inline constexpr int MuukMarginPerLot = 20018;  // account money, 1 lot at the current price
+inline constexpr int MuukNoPositionCosts = 20020;  // repeating group:
+inline constexpr int MuukCostPositionId = 20021;   //   position id
+inline constexpr int MuukCostSwap = 20022;         //   swap so far (money, + = credited)
+inline constexpr int MuukCostCommission = 20023;   //   commission so far (money, - = charged)
+
 }  // namespace muuk::ctrader_fix::tag
 
 // MsgType(35) string values.
@@ -125,5 +150,7 @@ inline constexpr const char* BusinessMessageReject = "j";
 inline constexpr const char* OrderMassStatusRequest = "AF";
 inline constexpr const char* RequestForPositions = "AN";
 inline constexpr const char* PositionReport = "AP";
+// Muuk's own: account figures from the MT5 bridge, about once a second.
+inline constexpr const char* MuukAccountInfo = "UAI";
 
 }  // namespace muuk::ctrader_fix::msgtype

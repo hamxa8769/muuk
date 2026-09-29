@@ -17,6 +17,7 @@
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/news_feed.hpp"
+#include "muuk/mt5_bridge/mt5_gateway.hpp"
 
 namespace muuk::desktop {
 
@@ -57,6 +58,11 @@ public:
         std::string lastDropAt;
     };
     [[nodiscard]] ConnectionHealth connectionHealth() const;
+
+    // MetaTrader 5 bridge (only for a config with "platform": "mt5"): started
+    // with the first connect and kept up across reconnects, so the EA in MT5
+    // stays connected. nullopt when no bridge is running.
+    [[nodiscard]] std::optional<muuk::mt5_bridge::EaStatus> bridgeStatus() const;
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
@@ -162,6 +168,11 @@ private:
     std::atomic<uint64_t> historyRevision_{0};
 
     std::unique_ptr<muuk::ctrader_fix::LiveRunner> runner_;
+    std::unique_ptr<muuk::mt5_bridge::Mt5Gateway> bridge_;
+    int bridgeEaPort_ = 0;
+    int bridgeFixPort_ = 0;
+    // Starts (or keeps) the bridge for an MT5 config; false (with the error set) if it can't listen.
+    bool ensureBridge(const muuk::ctrader_fix::LiveConfig& config);
     std::thread thread_;
     std::atomic<bool> running_{false};
     // One bot per config (see InstanceLock): held from start() to stop(),

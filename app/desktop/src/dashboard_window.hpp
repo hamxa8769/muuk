@@ -174,6 +174,8 @@ private:
 
     Tab selectTab_ = Tab::None;  // switch to this tab on the next frame
     Tab currentTab_ = Tab::Positions;
+    bool menuOpen_ = false;        // the menu drawer is out (mouse over the icon / drawer)
+    bool menuSuppressed_ = false;  // a page was just picked: stay shut until the mouse leaves
 
     // Market hours / news, offline view (see currentMarket).
     muuk::ctrader_fix::MarketStatus uiMarket_;
@@ -229,7 +231,12 @@ private:
         std::array<char, 32> symbolName{};
         std::array<char, 16> symbolId{};
         std::array<char, 96> newFileName{};
+        int platform = 0;  // 0 cTrader FIX, 1 MetaTrader 5 bridge
+        int mt5EaPort = 5200;
+        int mt5FixPort = 5201;
     };
+    int bridgeEaPortHint_ = 5200;
+    void renderMt5AccountFields();
     AccountForm account_;
     std::string accountLoadedFor_;
     bool accountDirty_ = false;

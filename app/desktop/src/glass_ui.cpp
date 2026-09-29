@@ -366,6 +366,44 @@ bool railItem(const char* label, const char* badge, ImVec4 badgeColor, bool sele
     return pressed;
 }
 
+bool menuIcon(const char* id, float size, float open, bool alert) {
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const ImVec2 b(a.x + size, a.y + size);
+    ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    const float h = std::max(animate(ImGui::GetItemID(), hovered ? 1.0f : 0.0f, 16.0f), open);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = size * 0.28f;
+    if (h > 0.01f && !g_lowPower) {
+        for (int i = 1; i <= 3; ++i) {
+            const float g = static_cast<float>(i) * 1.5f;
+            dl->AddRect(ImVec2(a.x - g, a.y - g), ImVec2(b.x + g, b.y + g),
+                        col(alpha(kBlue, 0.12f * h * (1.0f - static_cast<float>(i) / 4.0f))), r + g, 0, 1.5f);
+        }
+    }
+    dl->AddRectFilled(a, b, col(alpha(kBlue, 0.10f + 0.16f * h)), r);
+    if (!g_lowPower) {
+        dl->AddRectFilled(a, ImVec2(b.x, a.y + size * 0.5f), col(ImVec4(1, 1, 1, 0.06f)), r, ImDrawFlags_RoundCornersTop);
+    }
+    dl->AddRect(a, b, col(alpha(kBlue, 0.30f + 0.45f * h)), r, 0, 1.0f);
+    // Three bars; the middle one shortens and the others tilt towards an arrow as it opens.
+    const float cx = (a.x + b.x) * 0.5f;
+    const float cy = (a.y + b.y) * 0.5f;
+    const float half = size * 0.24f;
+    const float gap = size * 0.16f;
+    const float thick = std::max(2.0f, size * 0.07f);
+    const ImU32 barColor = col(g_palette.text);
+    const float tilt = gap * 0.55f * open;
+    dl->AddLine(ImVec2(cx - half, cy - gap), ImVec2(cx + half, cy - gap + tilt), barColor, thick);
+    dl->AddLine(ImVec2(cx - half, cy), ImVec2(cx + half - size * 0.12f * open, cy), barColor, thick);
+    dl->AddLine(ImVec2(cx - half, cy + gap), ImVec2(cx + half, cy + gap - tilt), barColor, thick);
+    if (alert) {
+        const float pulse = g_lowPower ? 1.0f : 0.75f + 0.25f * std::sin(static_cast<float>(ImGui::GetTime()) * 5.0f);
+        dl->AddCircleFilled(ImVec2(b.x - size * 0.14f, a.y + size * 0.14f), size * 0.10f, col(alpha(kRed, pulse)));
+    }
+    return hovered;
+}
+
 void pill(const char* text, ImVec4 color, bool pulse) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 textSize = ImGui::CalcTextSize(text);

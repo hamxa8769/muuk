@@ -115,9 +115,17 @@ bool gearButton(const char* id, float size) {
     return pressed;
 }
 
+// A cent account (MT5 "USC"): every amount is in US cents, shown as 12.50¢.
+bool g_centUnits = false;
+
 std::string money(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%s$%.2f", v < -0.005 ? "-" : (v > 0.005 ? "+" : ""), std::fabs(v));
+    char buf[40];
+    const char* sign = v < -0.005 ? "-" : (v > 0.005 ? "+" : "");
+    if (g_centUnits) {
+        std::snprintf(buf, sizeof(buf), "%s%.2f\xC2\xA2", sign, std::fabs(v));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s$%.2f", sign, std::fabs(v));
+    }
     return buf;
 }
 
@@ -640,6 +648,7 @@ void DashboardWindow::render(LiveController& controller) {
     const std::optional<LiveSnapshot> snap = controller.snapshot();
     samplePerformance(snap);
     const bool connected = running && snap && snap->connected;
+    g_centUnits = (snap && snap->brokerAccountFresh && snap->brokerAccount.cent()) || editSettings_.accountKind == "cent";
 
     // Load the tunable settings from the config file once, so they can be
     // reviewed/edited before connecting; while connected (and not being
@@ -767,6 +776,23 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
         }
         ImGui::SameLine(0.0f, 10.0f);
     }
+    if (const auto bridge = controller.bridgeStatus()) {
+        if (bridge->ready) {
+            const std::string text = "MT5 " + bridge->login + (bridge->currency == "USC" ? "  cent" : "");
+            glass::pill(text.c_str(), bridge->hedging ? kGreen : kRed);
+            ImGui::SetItemTooltip("MetaTrader 5 through the Muuk bridge\n%s -- %s\nAccount %s, %s, 1:%.0f%s\nSymbol %s, min lot "
+                                  "%.2f\nBalance %.2f  Equity %.2f  Margin %.2f",
+                                  bridge->company.c_str(), bridge->server.c_str(), bridge->login.c_str(),
+                                  bridge->currency.c_str(), bridge->leverage, bridge->hedging ? ", hedging" : ", NETTING (not usable)",
+                                  bridge->symbol.c_str(), bridge->volumeMin, bridge->balance, bridge->equity, bridge->margin);
+        } else {
+            glass::pill("MT5: EA not connected", kRed, true);
+            ImGui::SetItemTooltip("Open MetaTrader 5, attach MuukBridge to the gold chart and allow algo trading "
+                                  "(see docs/mt5.md). The bridge waits on port %d.",
+                                  bridgeEaPortHint_);
+        }
+        ImGui::SameLine(0.0f, 10.0f);
+    }
     if (connected) {
         glass::pill("Live", kGreen, true);
     } else if (running) {
@@ -885,24 +911,21 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
         {Tab::Log, "Log", "", kGrey},
     };
 
-    // The menu: always all visible, one click (or Ctrl+number) per page.
-    const float railWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.2f, 160.0f, 210.0f);
-    ImGui::BeginChild("rail", ImVec2(railWidth, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-    for (int i = 0; i < kPages; ++i) {
-        const Item& it = items[i];
-        const std::string id = std::string(it.label) + "##rail";
-        if (glass::railItem(id.c_str(), it.badge.c_str(), it.color, currentTab_ == it.tab, kBlue)) currentTab_ = it.tab;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+%d", (i + 1) % 10);
-    }
+    // The menu: one icon on the left. Hovering it slides the whole menu out
+    // over the page; picking a page closes it again. The page always gets
+    // all the width next to the icon.
+    const float railWidth = 54.0f;
+    const float iconSize = 40.0f;
+    const ImVec2 railPos = ImGui::GetCursorScreenPos();
+    const float railHeight = ImGui::GetContentRegionAvail().y;
+    const bool alert = worst >= 2 || (snap && (snap->locked || snap->guardLockPending));
+    const float openness = glass::ease("menu_drawer", menuOpen_ ? 1.0f : 0.0f, 14.0f);
+    ImGui::BeginChild("rail", ImVec2(railWidth, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos(ImVec2((railWidth - iconSize) * 0.5f, 4.0f));
+    glass::menuIcon("##menu_icon", iconSize, openness, alert);
     ImGui::EndChild();
     ImGui::SameLine();
-    {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        dl->AddLine(ImVec2(p.x - 5.0f, p.y + 4.0f), ImVec2(p.x - 5.0f, p.y + ImGui::GetContentRegionAvail().y - 4.0f),
-                    ImGui::GetColorU32(glass::palette().cardBorder), 1.0f);
-    }
-
     ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     switch (currentTab_) {
         case Tab::None:
@@ -950,6 +973,74 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
             break;
     }
     ImGui::EndChild();
+
+    // The drawer.
+    const float drawerWidth = 236.0f;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    auto inside = [&](ImVec2 a, ImVec2 b) { return mouse.x >= a.x && mouse.x < b.x && mouse.y >= a.y && mouse.y < b.y; };
+    const float width = railWidth + (drawerWidth - railWidth) * openness;
+    const bool overIcon = inside(railPos, ImVec2(railPos.x + railWidth, railPos.y + iconSize + 12.0f));
+    const bool overDrawer = openness > 0.05f && inside(railPos, ImVec2(railPos.x + width, railPos.y + railHeight));
+    if (menuSuppressed_ && !overIcon && !overDrawer) menuSuppressed_ = false;  // left it after a pick
+    menuOpen_ = !menuSuppressed_ && (overIcon || (menuOpen_ && overDrawer));
+    if (openness < 0.01f) return;
+
+    ImGui::SetNextWindowPos(railPos);
+    ImGui::SetNextWindowSize(ImVec2(width, railHeight));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##menu_drawer", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground);
+    ImGui::PopStyleVar(2);
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 a = railPos;
+        const ImVec2 b(railPos.x + width, railPos.y + railHeight);
+        const float r = 14.0f;
+        if (!glass::lowPower()) {
+            for (int i = 1; i <= 6; ++i) {
+                const float g = static_cast<float>(i) * 2.0f;
+                dl->AddRectFilled(ImVec2(a.x, a.y + g * 0.5f), ImVec2(b.x + g, b.y + g * 0.5f),
+                                  ImGui::GetColorU32(withAlpha(glass::palette().shadow, 0.05f * openness)), r + g);
+            }
+        }
+        ImVec4 fill = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+        fill.w = 0.97f * std::min(1.0f, openness * 1.6f);
+        dl->AddRectFilled(a, b, ImGui::GetColorU32(fill), r);
+        dl->AddRect(a, b, ImGui::GetColorU32(withAlpha(kBlue, 0.30f * openness)), r, 0, 1.0f);
+    }
+    ImGui::SetCursorPos(ImVec2((railWidth - iconSize) * 0.5f, 4.0f));
+    glass::menuIcon("##menu_icon_open", iconSize, openness, alert);
+    if (openness > 0.35f) {
+        ImGui::SameLine(railWidth + 4.0f);
+        ImGui::SetCursorPosY(4.0f + (iconSize - ImGui::GetTextLineHeight()) * 0.5f);
+        withFont(boldFont_, [&] { ImGui::TextColored(withAlpha(glass::palette().text, openness), "Menu"); });
+    }
+    ImGui::SetCursorPos(ImVec2(10.0f, iconSize + 16.0f));
+    if (openness > 0.25f) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp((openness - 0.25f) / 0.6f, 0.0f, 1.0f));
+        ImGui::BeginGroup();
+        ImGui::PushItemWidth(width - 20.0f);
+        for (int i = 0; i < kPages; ++i) {
+            const Item& it = items[i];
+            const std::string id = std::string(it.label) + "##rail";
+            ImGui::SetCursorPosX(10.0f);
+            ImGui::BeginChild(("row" + std::to_string(i)).c_str(), ImVec2(width - 20.0f, ImGui::GetFrameHeight() + 8.0f),
+                              ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+            if (glass::railItem(id.c_str(), it.badge.c_str(), it.color, currentTab_ == it.tab, kBlue)) {
+                currentTab_ = it.tab;
+                menuOpen_ = false;
+                menuSuppressed_ = true;  // closes now; opens again once the mouse has left and comes back
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+%d", (i + 1) % 10);
+            ImGui::EndChild();
+        }
+        ImGui::PopItemWidth();
+        ImGui::EndGroup();
+        ImGui::PopStyleVar();
+    }
+    ImGui::End();
 }
 
 void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bool connected) {
@@ -2524,6 +2615,10 @@ void DashboardWindow::loadAccountForm(const std::string& configPath) {
         copyTo(f.tradePort, a.tradePort);
         copyTo(f.symbolName, a.symbolName);
         copyTo(f.symbolId, a.symbolId);
+        f.platform = a.platform == "mt5" ? 1 : 0;
+        f.mt5EaPort = a.mt5EaPort;
+        f.mt5FixPort = a.mt5FixPort;
+        bridgeEaPortHint_ = a.mt5EaPort;
         f.loaded = true;
     } catch (const std::exception&) {
         f.loaded = false;  // no such file yet / not a config -- the form stays empty
@@ -2544,7 +2639,49 @@ muuk::ctrader_fix::AccountSettings DashboardWindow::accountFromForm() const {
     a.tradePort = account_.tradePort.data();
     a.symbolName = account_.symbolName.data();
     a.symbolId = account_.symbolId.data();
+    a.platform = account_.platform == 1 ? "mt5" : "ctrader";
+    a.mt5EaPort = account_.mt5EaPort;
+    a.mt5FixPort = account_.mt5FixPort;
     return a;
+}
+
+void DashboardWindow::renderMt5AccountFields() {
+    ImGui::PushStyleColor(ImGuiCol_Text, glass::palette().textDim);
+    ImGui::TextWrapped("MetaTrader 5 through the Muuk bridge: MuukBridge (tools/mt5) runs in MT5 on this PC and "
+                       "connects to the app -- no FIX login. Use a HEDGING account. Cent accounts work: amounts are "
+                       "then in US cents. Setup: docs/mt5.md.");
+    ImGui::PopStyleColor();
+    if (ImGui::BeginTable("account_mt5", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        auto row = [&](const char* label, const char* help) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            if (help) ImGui::SetItemTooltip("%s", help);
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+        };
+        row("Account type", nullptr);
+        int env = account_.live ? 1 : 0;
+        if (ImGui::Combo("##env5", &env, "Demo\0LIVE (real money)\0")) {
+            account_.live = env == 1;
+            accountDirty_ = true;
+        }
+        row("MT5 account number", "Only a label here (the EA reports the real one).");
+        if (ImGui::InputText("##login5", account_.traderLogin.data(), account_.traderLogin.size(),
+                             ImGuiInputTextFlags_CharsDecimal)) {
+            accountDirty_ = true;
+        }
+        row("Symbol", "Keep XAUUSD -- the bridge maps it to the chart's symbol (XAUUSDc, XAUUSD.m, ...).");
+        if (ImGui::InputText("##sym5", account_.symbolName.data(), account_.symbolName.size())) accountDirty_ = true;
+        row("EA port", "MuukBridge's BridgePort input must be the same (default 5200).");
+        if (ImGui::InputInt("##eaport", &account_.mt5EaPort, 0)) accountDirty_ = true;
+        row("Bot port", "Local port between the bot and the bridge (default 5201).");
+        if (ImGui::InputInt("##fixport", &account_.mt5FixPort, 0)) accountDirty_ = true;
+        ImGui::EndTable();
+    }
 }
 
 void DashboardWindow::renderAccountSection(bool running) {
@@ -2557,6 +2694,19 @@ void DashboardWindow::renderAccountSection(bool running) {
         ImGui::TextColored(kAmber, "Disconnect first to change the account.");
     }
     ImGui::BeginDisabled(running);
+
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Platform");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##platform", &account_.platform, "cTrader (FIX API)\0MetaTrader 5 (Muuk bridge)\0")) {
+            accountDirty_ = true;
+        }
+    }
+    if (account_.platform == 1) {
+        renderMt5AccountFields();
+    } else {
 
     // Paste from cTrader: Settings > FIX API shows "SenderCompID" as demo.broker.12345.
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -2631,6 +2781,7 @@ void DashboardWindow::renderAccountSection(bool running) {
               "empty = look up by name");
         ImGui::EndTable();
     }
+    }  // cTrader fields
     if (account_.live) {
         ImGui::TextColored(kRed, "LIVE account: every order uses real money. Set a Stop loss and test on demo first.");
     }
@@ -3327,6 +3478,14 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
     ImGui::TextDisabled("The worst case: the price bounces between the two lines, so every fill adds the next lot "
                         "on the other side.");
 
+    const bool fromMt5 = snap && snap->brokerAccountFresh;
+    if (fromMt5) {
+        const auto& a = snap->brokerAccount;
+        ImGui::TextColored(kGreen, "From MT5 (%s): balance %s, equity %s, margin %s, free %s, 1:%.0f%s", a.login.c_str(),
+                           money(a.balance).c_str(), money(a.equity).c_str(), money(a.margin).c_str(),
+                           money(a.freeMargin).c_str(), a.leverage, a.cent() ? " -- cent account, amounts in US cents" : "");
+        ImGui::TextDisabled("The table and the guards use these; the balance and leverage below are only for cTrader.");
+    }
     if (ImGui::BeginTable("risk_settings", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -3439,6 +3598,14 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
     in.levels = std::clamp(s.maxOrders, 1, 16);
     in.balance = s.accountBalance;
     in.hedgedPercent = s.recovery.hedgedMarginPercent;
+    if (fromMt5) {
+        // In the account's own money (cents on a cent account), at MT5's margin per lot.
+        in.spec.contractSize = snap->moneyPerPointPerLot;
+        in.spec.tickValue = snap->moneyPerPointPerLot * in.spec.tickSize;
+        if (snap->marginLeverage > 0.0) in.leverage = snap->marginLeverage;
+        in.balance = snap->brokerAccount.balance;
+        if (snap->brokerAccount.hedgedMarginPercent >= 0.0) in.hedgedPercent = snap->brokerAccount.hedgedMarginPercent;
+    }
     const auto rows = muuk::core::riskTable(in);
     const double lockGuard = s.recovery.guardLockMarginLevel;
     const double stopGuard = s.recovery.guardStopMarginLevel;
@@ -3452,7 +3619,7 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
         }
     }
 
-    const double balance = s.accountBalance;
+    const double balance = in.balance;
     int lastSafe = 0;
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
                                   ImGuiTableFlags_PadOuterX;
@@ -3611,7 +3778,8 @@ void DashboardWindow::renderReverseCalculator(const std::optional<LiveSnapshot>&
         buys = (r.totalLots + r.netLots) / 2.0;
         sells = (r.totalLots - r.netLots) / 2.0;
         floating = -r.worstLoss;
-        if (s.accountBalance > 0.0) equity = s.accountBalance - r.worstLoss;
+        const double bal = snap && snap->brokerAccountFresh ? snap->brokerAccount.balance : s.accountBalance;
+        if (bal > 0.0) equity = bal - r.worstLoss;
     } else if (haveLive) {
         for (const auto& p : snap->positions) (p.side == OrderSide::BuyStop ? buys : sells) += p.lots;
         floating = snap->live.net;
@@ -3626,6 +3794,12 @@ void DashboardWindow::renderReverseCalculator(const std::optional<LiveSnapshot>&
     in.costs.commissionPerLotRoundTurn = s.commissionPerLot;
     in.costs.commissionPerMillionPerSide = s.commissionPerMillion;
     in.margin = muuk::core::MarginRule{std::max(1.0, s.leverage), s.recovery.hedgedMarginPercent};
+    if (snap && snap->brokerAccountFresh) {
+        in.spec.contractSize = snap->moneyPerPointPerLot;
+        in.spec.tickValue = snap->moneyPerPointPerLot * in.spec.tickSize;
+        if (snap->marginLeverage > 0.0) in.margin.leverage = snap->marginLeverage;
+        if (snap->brokerAccount.hedgedMarginPercent >= 0.0) in.margin.hedgedPercent = snap->brokerAccount.hedgedMarginPercent;
+    }
     in.buyLots = buys;
     in.sellLots = sells;
     in.floating = floating;

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -17,6 +18,7 @@
 #include "muuk/ctrader_fix/live_config.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/live_state.hpp"
+#include "muuk/mt5_bridge/mt5_gateway.hpp"
 
 namespace {
 muuk::ctrader_fix::LiveRunner* g_runner = nullptr;
@@ -114,8 +116,18 @@ int main(int argc, char** argv) {
     }
 
     // A bad config is a mistake to fix, not something to retry.
+    std::unique_ptr<muuk::mt5_bridge::Mt5Gateway> bridge;
     try {
-        (void)muuk::ctrader_fix::loadLiveConfig(credentialsPath);
+        const auto config = muuk::ctrader_fix::loadLiveConfig(credentialsPath);
+        if (config.connection.isMt5()) {
+            // MetaTrader 5: the bridge stays up for the whole run, across reconnects.
+            muuk::mt5_bridge::GatewayConfig gc;
+            gc.eaPort = static_cast<uint16_t>(config.connection.mt5EaPort);
+            gc.fixPort = static_cast<uint16_t>(config.connection.mt5FixPort);
+            bridge = std::make_unique<muuk::mt5_bridge::Mt5Gateway>(
+                gc, [](const std::string& line) { std::cerr << line << "\n"; });
+            bridge->start();
+        }
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << "\n";
         return 1;

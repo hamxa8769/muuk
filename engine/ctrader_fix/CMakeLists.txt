@@ -24,8 +24,7 @@ if(WIN32)
     target_link_libraries(muuk_ctrader_fix PRIVATE winhttp)
 endif()
 
-add_executable(muuk-live cli/main.cpp)
-target_link_libraries(muuk-live PRIVATE muuk_ctrader_fix)
+
 
 if(MUUK_BUILD_TESTS)
     add_executable(muuk_ctrader_fix_tests

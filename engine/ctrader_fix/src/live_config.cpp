@@ -66,8 +66,20 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
 
     LiveConfig cfg;
     const auto& conn = j.at("connection");
-    cfg.connection.quote = parseEndpoint(conn.at("quote"), "connection.quote");
-    cfg.connection.trade = parseEndpoint(conn.at("trade"), "connection.trade");
+    cfg.connection.platform = conn.value("platform", std::string("ctrader"));
+    if (conn.contains("mt5")) {
+        cfg.connection.mt5EaPort = conn.at("mt5").value("eaPort", 5200);
+        cfg.connection.mt5FixPort = conn.at("mt5").value("fixPort", 5201);
+    }
+    const bool mt5 = cfg.connection.isMt5();
+    if (mt5) {
+        // The bridge on this PC is the "broker".
+        cfg.connection.quote = FixEndpoint{"127.0.0.1", std::to_string(cfg.connection.mt5FixPort)};
+        cfg.connection.trade = cfg.connection.quote;
+    } else {
+        cfg.connection.quote = parseEndpoint(conn.at("quote"), "connection.quote");
+        cfg.connection.trade = parseEndpoint(conn.at("trade"), "connection.trade");
+    }
     cfg.connection.environment = conn.value("environment", std::string("demo"));
     cfg.connection.brokerUid = conn.value("brokerUid", "");
     cfg.connection.traderLogin = conn.value("traderLogin", "");
@@ -92,9 +104,16 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
-    requireNonEmpty(cfg.connection.brokerUid, "connection.brokerUid");
-    requireNonEmpty(cfg.connection.traderLogin, "connection.traderLogin");
-    requireNonEmpty(cfg.connection.password, "connection.password");
+    if (mt5) {
+        if (cfg.connection.brokerUid.empty()) cfg.connection.brokerUid = "mt5";
+        if (cfg.connection.traderLogin.empty()) cfg.connection.traderLogin = "mt5";
+        if (cfg.connection.password.empty()) cfg.connection.password = "mt5";
+        if (cfg.connection.targetCompId == "CSERVER") cfg.connection.targetCompId = "MT5";
+    } else {
+        requireNonEmpty(cfg.connection.brokerUid, "connection.brokerUid");
+        requireNonEmpty(cfg.connection.traderLogin, "connection.traderLogin");
+        requireNonEmpty(cfg.connection.password, "connection.password");
+    }
 
     cfg.strategy = muuk::config_json::parseStrategyConfig(j.at("strategy"));
     if (j.contains("market")) cfg.market = marketHoursFromJson(j.at("market"));
@@ -236,6 +255,11 @@ AccountSettings accountFromConfigFile(const std::filesystem::path& path) {
     }
     a.symbolName = c.value("symbolName", std::string("XAUUSD"));
     a.symbolId = jsonString(c, "symbolId");
+    a.platform = c.value("platform", std::string("ctrader"));
+    if (c.contains("mt5")) {
+        a.mt5EaPort = c.at("mt5").value("eaPort", 5200);
+        a.mt5FixPort = c.at("mt5").value("fixPort", 5201);
+    }
     return a;  // password deliberately left empty
 }
 
@@ -249,6 +273,30 @@ void saveAccountSettings(const std::filesystem::path& path, const AccountSetting
             throw std::runtime_error(std::string(what) + " must be a port number");
         }
     };
+    if (a.platform == "mt5") {
+        // MetaTrader 5 through the bridge: no FIX login -- just the two local ports.
+        if (a.mt5EaPort <= 0 || a.mt5EaPort > 65535 || a.mt5FixPort <= 0 || a.mt5FixPort > 65535 ||
+            a.mt5EaPort == a.mt5FixPort) {
+            throw std::runtime_error("MT5 bridge ports must be two different numbers from 1 to 65535");
+        }
+        nlohmann::json j = readJsonFile(copyFrom ? *copyFrom : path);
+        auto& c = j["connection"];
+        c["platform"] = "mt5";
+        c["mt5"] = {{"eaPort", a.mt5EaPort}, {"fixPort", a.mt5FixPort}};
+        c["environment"] = a.environment;
+        c["traderLogin"] = a.traderLogin;  // the MT5 account number (only a label here)
+        c["symbolName"] = a.symbolName;
+        if (copyFrom) {
+            // A new MT5 file never inherits another account's FIX login.
+            c.erase("password");
+            c.erase("brokerUid");
+            c["symbolId"] = "";
+        }
+        std::error_code ec;
+        if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
+        writeJsonFileAtomically(path, j);
+        return;
+    }
     if (a.environment != "demo" && a.environment != "live") throw std::runtime_error("environment must be demo or live");
     require(a.brokerUid, "Broker UID");
     require(a.traderLogin, "Account number");
@@ -274,6 +322,7 @@ void saveAccountSettings(const std::filesystem::path& path, const AccountSetting
     c["symbolName"] = a.symbolName;
     // A symbol id belongs to one broker's symbol list: keep it only if it was given, or the symbol didn't change.
     c["symbolId"] = !a.symbolId.empty() ? a.symbolId : (a.symbolName == oldSymbol && !copyFrom ? jsonString(c, "symbolId") : "");
+    c["platform"] = "ctrader";
     if (!a.password.empty()) {
         c["password"] = a.password;
     } else if (oldPassword.empty() || copyFrom) {

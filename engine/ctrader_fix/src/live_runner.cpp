@@ -221,6 +221,17 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.escapeTradeOpen = escape_.legId != 0;
     snap.escapeTrailing = escape_.trailing;
     snap.escapeTries = escapeTries_;
+    snap.platform = config_.connection.platform;
+    snap.brokerAccount = brokerAccount_;
+    snap.brokerAccountFresh = brokerAccountFreshLocked();
+    snap.moneyPerPointPerLot = spec.tickValue / spec.tickSize;
+    if (snap.brokerAccountFresh) snap.marginLeverage = marginRuleLocked().leverage;
+    if (snap.brokerAccountFresh) {  // MT5's own figures
+        snap.equityNow = brokerAccount_.equity;
+        snap.marginNow = brokerAccount_.margin;
+        snap.marginLevelNow = brokerAccount_.margin > 0.0 ? marginLevelPercent(brokerAccount_.equity, brokerAccount_.margin)
+                                                          : (openLegs_.empty() ? -1.0 : 1e9);
+    }
     snap.escapeActive = engine_ && engine_->status() == EngineStatus::Active && engine_->escapeActive();
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
@@ -255,7 +266,8 @@ PnlBreakdown LiveRunner::legPnl(const OpenLeg& leg) const {
     p.spread = (buy ? mid - static_cast<double>(bid.ticks) : static_cast<double>(ask.ticks) - mid) * moneyPerTick;
     p.commission = muuk::core::roundTurnCommissionMoney(lotsHeld, leg.price.toDouble(spec), spec,
                                                         config_.strategy.costs);
-    p.swap = 0.0;
+    // Swap is only known on MT5 (the bridge reports it per position); a cost here, so charged swap is positive.
+    if (const auto sw = positionSwap_.find(leg.positionId); sw != positionSwap_.end()) p.swap = -sw->second;
     p.net = p.gross - p.slippage - p.spread - p.commission - p.swap;
     return p;
 }
@@ -308,10 +320,25 @@ void LiveRunner::run() {
 
         quoteSession_ = std::make_unique<FixSession>(config_.connection.quote.host, config_.connection.quote.port,
                                                        quoteCreds,
-                                                       [this](const FixMessage& m) { onQuoteMessage(m); });
+                                                       [this](const FixMessage& m) {
+                                                           try {
+                                                               onQuoteMessage(m);
+                                                           } catch (const std::exception& ex) {
+                                                               log("[quote] couldn't handle a " + m.msgType() +
+                                                                   " message: " + ex.what());
+                                                           }
+                                                       });
         tradeSession_ = std::make_unique<FixSession>(config_.connection.trade.host, config_.connection.trade.port,
                                                        tradeCreds,
-                                                       [this](const FixMessage& m) { onTradeMessage(m); });
+                                                       [this](const FixMessage& m) {
+                                                           // One malformed message must never take the bot down.
+                                                           try {
+                                                               onTradeMessage(m);
+                                                           } catch (const std::exception& ex) {
+                                                               log("[trade] couldn't handle a " + m.msgType() +
+                                                                   " message: " + ex.what());
+                                                           }
+                                                       });
 
         quoteSession_->setDisconnectHandler([this](const std::string& reason) {
             log("[quote session] ended: " + reason);
@@ -334,6 +361,18 @@ void LiveRunner::run() {
         quoteSession_->start();
         log("logged on to both Quote and Trade sessions");
 
+        if (config_.connection.isMt5()) {
+            // The bridge sends the account right after logon; the symbol's
+            // money units come from it, so wait for it (briefly) first.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (std::chrono::steady_clock::now() < deadline) {
+                {
+                    std::scoped_lock lock(engineMutex_);
+                    if (brokerAccount_.known) break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
         resolveSymbol();
         log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
 
@@ -785,6 +824,12 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
         return;
     }
 
+    if (type == msgtype::MuukAccountInfo) {
+        std::scoped_lock lock(engineMutex_);
+        onAccountInfoLocked(msg);
+        return;
+    }
+
     if (type == msgtype::PositionReport) {
         const PositionReportInfo info = parsePositionReport(msg);
         std::scoped_lock lock(engineMutex_);
@@ -1105,20 +1150,121 @@ double LiveRunner::netAtMidLocked(double mid) const {
     return net;
 }
 
+void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
+    auto num = [&](int t, double fallback = 0.0) {
+        const auto v = msg.getOptionalString(t);
+        if (!v || v->empty()) return fallback;
+        try {
+            return std::stod(*v);
+        } catch (...) {
+            return fallback;
+        }
+    };
+    auto str = [&](int t) { return msg.getOptionalString(t).value_or(""); };
+    const bool first = !brokerAccount_.known;
+    BrokerAccountInfo a;
+    a.known = num(tag::MuukBalance) > 0.0 || num(tag::MuukEquity) > 0.0;  // zeros = not heard from MT5 yet
+    a.balance = num(tag::MuukBalance);
+    a.equity = num(tag::MuukEquity);
+    a.margin = num(tag::MuukMargin);
+    a.freeMargin = num(tag::MuukFreeMargin);
+    a.currency = str(tag::MuukCurrency);
+    a.leverage = num(tag::MuukLeverage);
+    a.hedgedMarginPercent = num(tag::MuukHedgedMarginPercent, -1.0);
+    a.contractSize = num(tag::MuukContractSize);
+    a.volumeMin = num(tag::MuukVolumeMin);
+    a.volumeStep = num(tag::MuukVolumeStep);
+    a.login = str(tag::MuukLogin);
+    a.server = str(tag::MuukServer);
+    a.company = str(tag::MuukCompany);
+    a.hedging = str(tag::MuukHedging) != "N";
+    a.symbol = str(tag::MuukSymbol);
+    a.tickSize = num(tag::MuukTickSize);
+    a.tickValue = num(tag::MuukTickValue);
+    a.marginPerLot = num(tag::MuukMarginPerLot);
+    // Per-position swap: a repeating group, one id then its swap and commission.
+    positionSwap_.clear();
+    const auto ids = msg.getAll(tag::MuukCostPositionId);
+    const auto swaps = msg.getAll(tag::MuukCostSwap);
+    for (std::size_t i = 0; i < ids.size() && i < swaps.size(); ++i) {
+        try {
+            const double sw = std::stod(swaps[i]);
+            positionSwap_[ids[i]] = sw;
+            a.swapTotal += sw;
+        } catch (...) {
+        }
+    }
+    brokerAccount_ = a;
+    brokerAccountAt_ = std::chrono::steady_clock::now();
+    if (first && a.known) {
+        log("[mt5] account " + a.login + " on " + a.server + " (" + a.company + "): " + a.currency + " " +
+            usdText(a.balance).substr(a.balance < 0.0 ? 2 : 1) + ", 1:" + std::to_string(static_cast<int>(a.leverage)) +
+            (a.cent() ? " -- a cent account (every amount is in US cents)" : "") + ", symbol " + a.symbol);
+    }
+    if (!brokerSpecChecked_ && a.known && a.volumeMin > 0.0) {
+        brokerSpecChecked_ = true;
+        SymbolSpec& spec = config_.strategy.symbol;
+        // Count P/L, commission and margin in the account's own money: the
+        // broker's tick value per lot (US cents on a cent account). Only
+        // before the engine exists -- it keeps its own copy of the spec.
+        if (!engine_ && a.tickSize > 0.0 && a.tickValue > 0.0) {
+            if (std::fabs(a.tickSize - spec.tickSize) < 1e-9) {
+                spec.tickValue = a.tickValue;
+                spec.contractSize = a.tickValue / a.tickSize;  // money per 1.00 move per lot
+                spec.volumeMax = std::max(spec.volumeMax, a.volumeMin);
+                log("[mt5] P/L counted in " + a.currency + ": " + priceTextOf(spec.contractSize) +
+                    " per 1.00 move per lot (tick value " + std::to_string(a.tickValue) + ")");
+            } else {
+                noteBrokerIssueLocked("this MT5 symbol's price step is " + std::to_string(a.tickSize) +
+                                      ", the config says " + std::to_string(spec.tickSize) +
+                                      " -- set strategy.symbol.tickSize / digits to match");
+            }
+        }
+        const double firstLot = config_.strategy.lotProgression.initialLot.toDouble(spec);
+        if (firstLot + 1e-9 < a.volumeMin) {
+            noteBrokerIssueLocked("the first lot " + lotsTextOf(config_.strategy.lotProgression.initialLot.steps, spec) +
+                                  " is below this MT5 symbol's minimum " + priceTextOf(a.volumeMin) +
+                                  " -- set First lot to at least that in Settings");
+        }
+
+    }
+}
+
+bool LiveRunner::brokerAccountFreshLocked() const {
+    return brokerAccount_.known && std::chrono::steady_clock::now() - brokerAccountAt_ < std::chrono::seconds(15);
+}
+
 double LiveRunner::equityEstimateLocked(double floating) const {
+    if (brokerAccountFreshLocked()) {
+        // MT5's own equity, moved by how far `floating` is from the positions' net now.
+        const double now = latestBid_ && latestAsk_ ? floatingNetLocked() : floating;
+        return brokerAccount_.equity + (floating - now);
+    }
     const double balance = config_.connection.accountBalance;
     if (balance <= 0.0) return -1.0;
     return balance + dayRealized_ + floating;
 }
 
 muuk::core::MarginRule LiveRunner::marginRuleLocked() const {
+    if (brokerAccountFreshLocked()) {
+        // The leverage that reproduces MT5's own margin for 1 lot at this price.
+        double leverage = brokerAccount_.leverage;
+        if (brokerAccount_.marginPerLot > 0.0 && latestBid_ && latestAsk_) {
+            leverage = config_.strategy.symbol.contractSize * (*latestBid_ + *latestAsk_) / 2.0 / brokerAccount_.marginPerLot;
+        }
+        return muuk::core::MarginRule{
+            leverage > 0.0 ? leverage : std::max(1.0, config_.connection.leverage),
+            brokerAccount_.hedgedMarginPercent >= 0.0 ? brokerAccount_.hedgedMarginPercent
+                                                      : config_.connection.recovery.hedgedMarginPercent};
+    }
     return muuk::core::MarginRule{std::max(1.0, config_.connection.leverage),
                                   config_.connection.recovery.hedgedMarginPercent};
 }
 
 bool LiveRunner::guardsOnLocked() const {
     const RecoveryConfig& rc = config_.connection.recovery;
-    return config_.connection.accountBalance > 0.0 && (rc.guardLockMarginLevel > 0.0 || rc.guardStopMarginLevel > 0.0);
+    return (config_.connection.accountBalance > 0.0 || brokerAccountFreshLocked()) &&
+           (rc.guardLockMarginLevel > 0.0 || rc.guardStopMarginLevel > 0.0);
 }
 
 double LiveRunner::breakEvenMoneyLocked() const {

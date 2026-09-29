@@ -127,6 +127,7 @@ add_subdirectory(engine/core)
 add_subdirectory(engine/config_json)
 add_subdirectory(engine/backtester)
 add_subdirectory(engine/ctrader_fix)
+add_subdirectory(engine/mt5_bridge)
 
 if(MUUK_BUILD_DESKTOP_APP)
     add_subdirectory(app/desktop)

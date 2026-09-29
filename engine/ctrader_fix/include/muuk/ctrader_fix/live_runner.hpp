@@ -100,6 +100,35 @@ struct PendingOrderInfo {
     bool waiting = false;
 };
 
+// The account as MetaTrader 5 reports it (through the Muuk bridge's
+// AccountInfo message, about once a second). cTrader's FIX sends none of
+// this, so on cTrader `known` stays false and the Settings balance is used.
+struct BrokerAccountInfo {
+    bool known = false;
+    std::string login;
+    std::string server;
+    std::string company;
+    std::string currency;      // "USC" = a cent account
+    std::string symbol;        // the MT5 symbol traded, e.g. "XAUUSDc"
+    bool hedging = true;
+    double balance = 0.0;
+    double equity = 0.0;
+    double margin = 0.0;
+    double freeMargin = 0.0;
+    double leverage = 0.0;
+    double hedgedMarginPercent = -1.0;  // <0 = not given
+    double contractSize = 0.0;
+    double volumeMin = 0.0;
+    double volumeStep = 0.0;
+    double swapTotal = 0.0;    // the bot's open positions, + = credited
+    double tickSize = 0.0;
+    double tickValue = 0.0;    // account money per tick per 1 lot
+    double marginPerLot = 0.0; // account money, 1 lot at the current price
+    [[nodiscard]] bool cent() const {
+        return currency == "USC" || currency == "USc" || currency == "UScent" || currency == "USX";
+    }
+};
+
 // A point-in-time read of LiveRunner's state, for a UI (or anything else)
 // to poll without needing its own hooks into the engine internals. Built
 // from the same data onQuoteMessage/onTradeMessage already maintain, so
@@ -197,6 +226,15 @@ struct LiveSnapshot {
     bool escapeTradeOpen = false;
     bool escapeTrailing = false;
     int escapeTries = 0;
+    // MT5 through the bridge: the account as MT5 reports it (exact balance,
+    // equity, margin and swap). brokerAccountFresh: heard from in the last 15 s.
+    std::string platform = "ctrader";
+    BrokerAccountInfo brokerAccount;
+    bool brokerAccountFresh = false;
+    // The symbol as the bot counts it (MT5: taken from the broker, so money is
+    // in the account's currency -- US cents on a cent account).
+    double moneyPerPointPerLot = 100.0;  // P/L of 1 lot for a 1.00 price move
+    double marginLeverage = 0.0;         // the leverage that gives MT5's margin per lot (0 = Settings)
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -711,6 +749,13 @@ private:
     [[nodiscard]] muuk::core::MarginRule marginRuleLocked() const;
     [[nodiscard]] bool guardsOnLocked() const;
     [[nodiscard]] double breakEvenMoneyLocked() const;
+    // MT5 bridge account figures (engineMutex_).
+    BrokerAccountInfo brokerAccount_;
+    std::chrono::steady_clock::time_point brokerAccountAt_{};
+    std::unordered_map<std::string, double> positionSwap_;  // position id -> swap so far (+ = credited)
+    bool brokerSpecChecked_ = false;
+    [[nodiscard]] bool brokerAccountFreshLocked() const;
+    void onAccountInfoLocked(const FixMessage& msg);
     muuk::core::OrderId guardLockOrderId_ = 0;
     muuk::core::Price guardRangeLow_{};
     muuk::core::Price guardRangeHigh_{};

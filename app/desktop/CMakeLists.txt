@@ -9,7 +9,7 @@ add_executable(muuk-desktop
     src/system_monitor.cpp
 )
 
-target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix imgui)
+target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix muuk_mt5_bridge imgui)
 if(WIN32)
     # dwmapi: dark native title bar to match the app theme; shell32: open PDFs/folders.
     target_link_libraries(muuk-desktop PRIVATE dwmapi shell32 psapi wtsapi32)

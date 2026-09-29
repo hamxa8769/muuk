@@ -54,6 +54,16 @@ struct RecoveryConfig {
 // the same for both; only the endpoint and TargetSubID/SenderSubID differ
 // (handled by LiveRunner, not part of this config).
 struct LiveConnectionConfig {
+    // "ctrader" (default): the broker's cTrader FIX API.
+    // "mt5": MetaTrader 5 through the Muuk bridge -- MuukBridge.mq5 runs in
+    // MT5 and connects to the app on 127.0.0.1:mt5EaPort; the bot talks FIX
+    // to the bridge on 127.0.0.1:mt5FixPort (quote/trade are set to that).
+    // No FIX login is needed; traderLogin may hold the MT5 account number.
+    std::string platform = "ctrader";
+    int mt5EaPort = 5200;
+    int mt5FixPort = 5201;
+    [[nodiscard]] bool isMt5() const { return platform == "mt5"; }
+
     FixEndpoint quote;  // "Price connection" in cTrader's settings screen
     FixEndpoint trade;
     std::string environment = "demo";  // "demo" or "live" — used to build SenderCompID
@@ -205,6 +215,9 @@ struct AccountSettings {
     std::string tradePort;
     std::string symbolName = "XAUUSD";
     std::string symbolId;              // empty = look it up by name on connect
+    std::string platform = "ctrader";  // or "mt5" (see LiveConnectionConfig::platform)
+    int mt5EaPort = 5200;
+    int mt5FixPort = 5201;
 
     // cTrader shows the SenderCompID as "<environment>.<brokerUid>.<login>".
     [[nodiscard]] std::string senderCompId() const { return environment + "." + brokerUid + "." + traderLogin; }

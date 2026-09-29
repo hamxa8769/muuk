@@ -62,6 +62,25 @@ if ($crt) {
 Copy-Item (Join-Path $PSScriptRoot "vps\*") $Out -Force
 Copy-Item (Join-Path $repo "docs\vps.md") (Join-Path $Out "README-VPS.md") -Force
 
+# MetaTrader 5 bridge: the EA's source, compiled with MetaEditor when this PC has it.
+$mt5Out = Join-Path $Out "mt5"
+New-Item -ItemType Directory -Force $mt5Out | Out-Null
+Copy-Item (Join-Path $PSScriptRoot "mt5\MuukBridge.mq5") $mt5Out -Force
+Copy-Item (Join-Path $repo "docs\mt5.md") (Join-Path $Out "README-MT5.md") -Force
+Copy-Item (Join-Path $repo "engine\ctrader_fix\config.mt5.example.json") (Join-Path $mt5Out "mt5_account.example.json") -Force
+$metaEditor = Get-ChildItem "C:\Program Files\*\metaeditor64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($metaEditor) {
+    $log = Join-Path $env:TEMP "muukbridge_compile.log"
+    $p = Start-Process -FilePath $metaEditor.FullName -ArgumentList "/compile:`"$mt5Out\MuukBridge.mq5`"", "/log:`"$log`"" -Wait -PassThru -WindowStyle Hidden
+    if (Test-Path (Join-Path $mt5Out "MuukBridge.ex5")) {
+        Write-Host "MuukBridge.ex5 compiled with $($metaEditor.FullName)"
+    } else {
+        Write-Warning "MuukBridge didn't compile -- see $log. The .mq5 is in the package; compile it in MetaEditor."
+    }
+} else {
+    Write-Warning "MetaEditor not found: only MuukBridge.mq5 is packaged -- open it in MetaEditor (F4 in MT5) and press Compile."
+}
+
 if ($Config) {
     $cfg = Resolve-Path $Config
     Copy-Item $cfg $Out -Force

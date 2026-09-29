@@ -36,6 +36,34 @@ std::string timestampPrefix() {
 LiveController::~LiveController() {
     stop();
     if (news_) news_->stop();
+    if (bridge_) bridge_->stop();
+}
+
+bool LiveController::ensureBridge(const LiveConfig& config) {
+    if (!config.connection.isMt5()) return true;
+    if (bridge_ && bridgeEaPort_ == config.connection.mt5EaPort && bridgeFixPort_ == config.connection.mt5FixPort) {
+        return true;
+    }
+    if (bridge_) bridge_->stop();
+    muuk::mt5_bridge::GatewayConfig gc;
+    gc.eaPort = static_cast<uint16_t>(config.connection.mt5EaPort);
+    gc.fixPort = static_cast<uint16_t>(config.connection.mt5FixPort);
+    bridge_ = std::make_unique<muuk::mt5_bridge::Mt5Gateway>(gc, [this](const std::string& line) { appendLog(line); });
+    try {
+        bridge_->start();
+    } catch (const std::exception& ex) {
+        bridge_.reset();
+        setError(ex.what());
+        return false;
+    }
+    bridgeEaPort_ = config.connection.mt5EaPort;
+    bridgeFixPort_ = config.connection.mt5FixPort;
+    return true;
+}
+
+std::optional<muuk::mt5_bridge::EaStatus> LiveController::bridgeStatus() const {
+    if (!bridge_) return std::nullopt;
+    return bridge_->status();
 }
 
 void LiveController::startNews(const std::filesystem::path& cacheFile) {
@@ -77,6 +105,7 @@ bool LiveController::startRunner(const std::string& configPath) {
         return false;
     }
 
+    if (!ensureBridge(config)) return false;
     attachData(configPath);
     appendLog("---- connecting (" + configPath + ") ----");
     configPath_ = configPath;
