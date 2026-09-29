@@ -16,7 +16,21 @@
     "heartBtIntSeconds": 30,
     "symbolName": "XAUUSD",
     "symbolId": "OPTIONAL_LEAVE_EMPTY_TO_AUTO_RESOLVE_OR_SET_THE_NUMERIC_ID_FROM_SETTINGS",
-    "autoRangeWidthPoints": 2.0
+    "autoRangeWidthPoints": 2.0,
+    "accountBalance": 1000.0,
+    "leverage": 500.0,
+    "accountKind": "standard",
+    "recovery": {
+      "guardLockMarginLevel": 300,
+      "guardStopMarginLevel": 200,
+      "hedgedMarginPercent": 100,
+      "closeAtBreakEven": true,
+      "escapeEnabled": false,
+      "escapeMove": 2.0,
+      "escapeBuffer": 0.30,
+      "escapeTrailAt": 1.0,
+      "escapeMaxTries": 2
+    }
   },
   "strategy": {
     "symbol": {

@@ -169,6 +169,17 @@ nlohmann::json stateToJson(const PersistedState& s) {
                         {"locked", s.locked},
                         {"lockedLoss", s.lockedLoss},
                         {"lockedAt", s.lockedAt},
+                        {"recovery",
+                         {{"guardLockOrderId", s.guardLockOrderId},
+                          {"guardRangeLowTicks", s.guardRangeLowTicks},
+                          {"guardRangeHighTicks", s.guardRangeHighTicks},
+                          {"escapeBuyStopId", s.escapeBuyStopId},
+                          {"escapeSellStopId", s.escapeSellStopId},
+                          {"escapeLegId", s.escapeLegId},
+                          {"escapeBuy", s.escapeBuy},
+                          {"escapeEntryTicks", s.escapeEntryTicks},
+                          {"escapeTrailing", s.escapeTrailing},
+                          {"escapeTries", s.escapeTries}}},
                         {"ticksProcessed", s.ticksProcessed},
                         {"tickDecisionUs", totalsToJson(s.tickDecisionUs)},
                         {"fillReactionUs", totalsToJson(s.fillReactionUs)},
@@ -208,6 +219,19 @@ PersistedState stateFromJson(const nlohmann::json& j) {
     s.locked = j.value("locked", false);
     s.lockedLoss = j.value("lockedLoss", 0.0);
     s.lockedAt = j.value("lockedAt", std::string());
+    if (j.contains("recovery")) {
+        const auto& r = j.at("recovery");
+        s.guardLockOrderId = r.value("guardLockOrderId", uint64_t{0});
+        s.guardRangeLowTicks = r.value("guardRangeLowTicks", int64_t{0});
+        s.guardRangeHighTicks = r.value("guardRangeHighTicks", int64_t{0});
+        s.escapeBuyStopId = r.value("escapeBuyStopId", uint64_t{0});
+        s.escapeSellStopId = r.value("escapeSellStopId", uint64_t{0});
+        s.escapeLegId = r.value("escapeLegId", uint64_t{0});
+        s.escapeBuy = r.value("escapeBuy", false);
+        s.escapeEntryTicks = r.value("escapeEntryTicks", int64_t{0});
+        s.escapeTrailing = r.value("escapeTrailing", false);
+        s.escapeTries = r.value("escapeTries", 0);
+    }
     s.ticksProcessed = j.value("ticksProcessed", uint64_t{0});
     s.tickDecisionUs = totalsFromJson(j, "tickDecisionUs");
     s.fillReactionUs = totalsFromJson(j, "fillReactionUs");

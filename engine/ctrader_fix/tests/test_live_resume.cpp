@@ -1181,3 +1181,234 @@ TEST_CASE("Lock & pause: at the loss limit the pending order is cancelled and on
     bot.finish();
     bot.rethrow();
 }
+
+namespace {
+// $20,000 at 1:1 on the $1 test range: after the first fill (buy 0.01 @ 4337)
+// level 2 (Sell Stop 0.02 @ 4336) would need 0.02 x 433,600 = $8,672 of
+// margin -- about 230 %, under a 300 % guard.
+LiveConfig guardConfig(const MockFixServer& server) {
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.accountBalance = 20000.0;
+    cfg.connection.leverage = 1.0;
+    cfg.connection.recovery.guardLockMarginLevel = 300.0;
+    cfg.connection.recovery.guardStopMarginLevel = 0.0;
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    return cfg;
+}
+}  // namespace
+
+TEST_CASE("Margin guard: the next level is held back and a lock stop for the net lots waits at its line") {
+    MockFixServer server;
+    Bot bot(guardConfig(server), freshStateFile("guard_lock_stop"));
+    int seq = handshake(server, {}, {});
+    sendQuote(server, 2, 4336.40, 4336.50);
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+
+    const FixMessage lock = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(lock.getInt(tag::OrdType) == 3);  // a stop order, not at market
+    REQUIRE(lock.getInt(tag::Side) == 2);
+    REQUIRE(lock.getDouble(tag::OrderQty) == Catch::Approx(1.0));  // the net 0.01, not the level's 0.02
+    REQUIRE(lock.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().guardLockPending; }));
+    LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE(s.status == EngineStatus::Idle);
+    REQUIRE(auditLogHas(s, "not placed"));
+    REQUIRE(s.marginLevelNow > 300.0);  // now: only the 0.01 buy
+
+    // The price falls to the line: the lock fills and the loss is frozen.
+    sendQuote(server, 3, 4335.90, 4336.00);
+    sendFill(server, seq++, lock.getString(tag::ClOrdID), 4336.00, 1.0, "P2");
+    REQUIRE(waitUntil([&] {
+        const LiveSnapshot x = bot.runner().snapshot();
+        return x.locked && !x.guardLockPending && x.positions.size() == 2;
+    }));
+    REQUIRE_FALSE(bot.runner().openRange());
+    // No escape (off by default): nothing else is sent.
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Margin guard: if the price turns back first, the basket closes at break-even and a new range opens") {
+    MockFixServer server;
+    LiveConfig cfg = guardConfig(server);
+    cfg.connection.manualCloseCooldownSeconds = 1;  // the next range after this pause
+    Bot bot(cfg, freshStateFile("guard_break_even"));
+    int seq = handshake(server, {}, {});
+    sendQuote(server, 2, 4336.40, 4336.50);
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage lock = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, lock.getString(tag::ClOrdID));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().guardLockPending; }));
+
+    sendQuote(server, 3, 4337.60, 4337.70);  // net +0.60, past the $0.50 break-even amount
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == lock.getString(tag::ClOrdID));
+    const FixMessage close = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(close.getString(tag::PosMaintRptID) == "P1");
+    sendFill(server, seq++, close.getString(tag::ClOrdID), 4337.60, 1.0, "P1");
+
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    const LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE(s.baskets[0].outcome == "break-even");
+    REQUIRE_FALSE(s.guardLockPending);
+    REQUIRE_FALSE(s.locked);
+    // Auto-continue: the next range opens.
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    REQUIRE(next.getInt(tag::OrdType) == 3);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Margin guard: a margin level under the stop guard locks at market right away") {
+    MockFixServer server;
+    LiveConfig cfg = guardConfig(server);
+    cfg.connection.accountBalance = 8000.0;  // buy 0.01 at 1:1 = $4,337 margin: about 184 %
+    cfg.connection.recovery.guardLockMarginLevel = 0.0;
+    cfg.connection.recovery.guardStopMarginLevel = 200.0;
+    Bot bot(cfg, freshStateFile("guard_stop"));
+    int seq = handshake(server, {}, {});
+    sendQuote(server, 2, 4336.40, 4336.50);
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 3, 4336.60, 4336.70);
+
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == sellStop.getString(tag::ClOrdID));
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(hedge.getInt(tag::OrdType) == 1);
+    REQUIRE(hedge.getInt(tag::Side) == 2);
+    REQUIRE(hedge.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().locked; }));
+    REQUIRE(auditLogHas(bot.runner().snapshot(), "margin level"));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Lock: a refused lock order is sent again (new ClOrdID) until it goes through") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.lockAtLossMoney = 0.50;
+    Bot bot(cfg, freshStateFile("lock_retry"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 2, 4336.20, 4336.30);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendRejectReport(server, seq++, hedge.getString(tag::ClOrdID), "OFF_QUOTES");
+
+    REQUIRE(waitUntil([&] { return auditLogHas(bot.runner().snapshot(), "lock") ; }));
+    std::this_thread::sleep_for(600ms);
+    sendQuote(server, 3, 4336.20, 4336.30);  // ticks (and the audit) drive the retry
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::OrdType) == 1);
+    REQUIRE(again.getInt(tag::Side) == 2);
+    REQUIRE(again.getString(tag::ClOrdID) != hedge.getString(tag::ClOrdID));
+    sendFill(server, seq++, again.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 2; }));
+    REQUIRE(bot.runner().snapshot().locked);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+namespace {
+LiveConfig escapeConfig(const MockFixServer& server) {
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.lockAtLossMoney = 0.50;
+    cfg.connection.accountBalance = 1000000.0;
+    cfg.connection.leverage = 500.0;
+    cfg.connection.recovery.escapeEnabled = true;
+    cfg.connection.recovery.escapeMove = 2.0;
+    cfg.connection.recovery.escapeBuffer = 0.30;
+    cfg.connection.recovery.escapeTrailAt = 1.0;
+    cfg.connection.recovery.escapeMaxTries = 1;
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    return cfg;
+}
+
+// Buy 0.01 @ 4337, the price falls to 4336.20/30, locked with a sell 0.01 @
+// 4336.20 (P2); then the escape orders go out. Returns {buy stop, sell stop}.
+std::pair<FixMessage, FixMessage> lockThenEscapeOrders(MockFixServer& server, int& seq) {
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 2, 4336.20, 4336.30);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, hedge.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
+    std::this_thread::sleep_for(200ms);
+    sendQuote(server, 3, 4336.40, 4336.50);
+    FixMessage a = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    FixMessage b = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    if (a.getInt(tag::Side) != 1) std::swap(a, b);
+    return {a, b};
+}
+}  // namespace
+
+TEST_CASE("Escape: from a lock, stop orders outside the range; a run the escape's way closes it all") {
+    MockFixServer server;
+    Bot bot(escapeConfig(server), freshStateFile("escape_win"));
+    int seq = handshake(server, {}, {});
+    const auto [up, down] = lockThenEscapeOrders(server, seq);
+    REQUIRE(up.getInt(tag::OrdType) == 3);
+    REQUIRE(up.getDouble(tag::StopPx) == Catch::Approx(4337.30));    // range top + 0.30
+    REQUIRE(down.getDouble(tag::StopPx) == Catch::Approx(4335.70));  // range bottom - 0.30
+    REQUIRE(up.getDouble(tag::OrderQty) == Catch::Approx(1.0));      // (0.90 + costs) / $2 -> 0.01
+
+    sendFill(server, seq++, up.getString(tag::ClOrdID), 4337.30, 1.0, "P3");
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == down.getString(tag::ClOrdID));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().escapeTradeOpen; }));
+
+    sendQuote(server, 4, 4339.00, 4339.10);  // frozen -0.90 + 1.75 - 0.05 = +0.80
+    for (int i = 0; i < 3; ++i) {
+        const FixMessage c = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+        REQUIRE(c.getOptionalString(tag::PosMaintRptID).has_value());
+        sendFill(server, seq++, c.getString(tag::ClOrdID), 4339.00, 1.0, c.getString(tag::PosMaintRptID));
+    }
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    REQUIRE(bot.runner().snapshot().baskets[0].outcome == "break-even");
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Escape: a breakout that turns back into the range is locked again; tries are capped") {
+    MockFixServer server;
+    Bot bot(escapeConfig(server), freshStateFile("escape_whipsaw"));
+    int seq = handshake(server, {}, {});
+    const auto [up, down] = lockThenEscapeOrders(server, seq);
+    sendFill(server, seq++, up.getString(tag::ClOrdID), 4337.30, 1.0, "P3");
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().escapeTradeOpen; }));
+
+    sendQuote(server, 4, 4336.80, 4336.90);  // back inside the range (under 4337) before any trail
+    const FixMessage relock = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(relock.getInt(tag::OrdType) == 1);
+    REQUIRE(relock.getInt(tag::Side) == 2);
+    REQUIRE(relock.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    sendFill(server, seq++, relock.getString(tag::ClOrdID), 4336.80, 1.0, "P4");
+    REQUIRE(waitUntil([&] {
+        const LiveSnapshot s = bot.runner().snapshot();
+        return s.positions.size() == 4 && !s.escapeTradeOpen && s.escapeTries == 1;
+    }));
+    REQUIRE(bot.runner().snapshot().locked);
+    // One try allowed: no new escape orders.
+    sendQuote(server, 5, 4336.50, 4336.60);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}

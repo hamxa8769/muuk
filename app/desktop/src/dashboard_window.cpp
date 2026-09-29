@@ -165,7 +165,12 @@ CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (snap->closeFailed) return {"Close failed - needs attention", kRed};
     if (snap->closingInProgress) return {"Closing basket", kAmber};
     if (snap->cooldownRemainingSeconds > 0) return {"Cooldown", kBlue};
-    if (snap->locked) return {"LOCKED - loss frozen, waiting for you", kRed};
+    if (snap->locked) {
+        if (snap->escapeTradeOpen) return {"LOCKED - escape trade running", kAmber};
+        if (snap->escapeOrdersOut) return {"LOCKED - escape orders out", kAmber};
+        return {"LOCKED - loss frozen, waiting for you", kRed};
+    }
+    if (snap->guardLockPending) return {"MARGIN GUARD - lock stop waiting", kAmber};
     if (snap->marketKnown && !snap->market.canOpenRange &&
         (snap->status == EngineStatus::Idle || snap->status == EngineStatus::Completed)) {
         return {snap->market.label.c_str(), phaseColor(snap->market.phase)};
@@ -386,6 +391,25 @@ void settingDouble(const char* label, const char* help, double* v, double step, 
     ImGui::PopID();
 }
 
+void settingCheck(const char* label, const char* help, bool* v, bool* dirty) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    if (help) ImGui::SetItemTooltip("%s", help);
+    ImGui::TableNextColumn();
+    ImGui::PushID(label);
+    if (ImGui::Checkbox("##v", v)) *dirty = true;
+    ImGui::PopID();
+}
+
+// Margin level in % -> its colour against the two guards.
+ImVec4 marginLevelColor(double level, double lockGuard, double stopGuard) {
+    if (level < std::max(100.0, stopGuard)) return kRed;
+    if (level < std::max(150.0, lockGuard)) return kAmber;
+    return kGreen;
+}
+
 void settingInt(const char* label, const char* help, int* v, bool* dirty) {
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
@@ -415,6 +439,13 @@ void clampSettings(LiveSettings& s) {
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
     s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
     s.autoTargetPercent = std::clamp(s.autoTargetPercent, 200, 360);  // levels 20..100 (see targetLevel)
+    s.recovery.guardLockMarginLevel = std::clamp(s.recovery.guardLockMarginLevel, 0.0, 5000.0);
+    s.recovery.guardStopMarginLevel = std::clamp(s.recovery.guardStopMarginLevel, 0.0, 5000.0);
+    s.recovery.hedgedMarginPercent = std::clamp(s.recovery.hedgedMarginPercent, 0.0, 100.0);
+    s.recovery.escapeMove = std::clamp(s.recovery.escapeMove, 0.1, 100.0);
+    s.recovery.escapeBuffer = std::clamp(s.recovery.escapeBuffer, 0.0, 50.0);
+    s.recovery.escapeTrailAt = std::clamp(s.recovery.escapeTrailAt, 0.05, 100.0);
+    s.recovery.escapeMaxTries = std::clamp(s.recovery.escapeMaxTries, 0, 10);
     s.market.pauseMinutesBefore = std::clamp(s.market.pauseMinutesBefore, 0, 240);
     s.market.pauseMinutesAfter = std::clamp(s.market.pauseMinutesAfter, 0, 240);
     s.market.newsMinutesBefore = std::clamp(s.market.newsMinutesBefore, 0, 240);
@@ -654,84 +685,7 @@ void DashboardWindow::render(LiveController& controller) {
     ImGui::SameLine();
 
     glass::beginCard("right", ImVec2(0, 0));
-    // Tabs never get cut short: when they don't fit, the bar scrolls (arrows + mouse wheel).
-    if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
-        const std::string posLabel =
-            "  Positions  " + std::to_string(snap ? snap->positions.size() : 0) + "  ###positions";
-        if (ImGui::BeginTabItem(posLabel.c_str(), nullptr, tabFlags(Tab::Positions))) {
-            if (snap) {
-                renderPositionsTab(controller, *snap, connected);
-            } else {
-                ImGui::TextDisabled("Not connected.");
-            }
-            ImGui::EndTabItem();
-        }
-        const std::string ordLabel =
-            "  Pending orders  " + std::to_string(snap ? snap->pendingOrders.size() : 0) + "  ###orders";
-        if (ImGui::BeginTabItem(ordLabel.c_str(), nullptr, tabFlags(Tab::Orders))) {
-            if (snap) {
-                renderOrdersTab(controller, *snap, connected);
-            } else {
-                ImGui::TextDisabled("Not connected.");
-            }
-            ImGui::EndTabItem();
-        }
-        const std::string histLabel =
-            "  History  " + std::to_string(history_.size()) + "  ###history";
-        if (ImGui::BeginTabItem(histLabel.c_str(), nullptr, tabFlags(Tab::History))) {
-            renderHistoryTab(controller, snap);
-            ImGui::EndTabItem();
-        }
-        {
-            const MarketStatus m = currentMarket(controller, snap, connected);
-            const bool newsNow = m.phase == MarketPhase::NewsPause;
-            if (newsNow) ImGui::PushStyleColor(ImGuiCol_Text, kRed);
-            const bool open = ImGui::BeginTabItem(newsNow ? "  News - guard ON  ###news" : "  News  ###news", nullptr,
-                                                  tabFlags(Tab::News));
-            if (newsNow) ImGui::PopStyleColor();
-            if (open) {
-                renderNewsTab(controller, snap, connected);
-                ImGui::EndTabItem();
-            }
-        }
-        if (ImGui::BeginTabItem("  Volume  ###volume", nullptr, tabFlags(Tab::Volume))) {
-            ImGui::BeginChild("volume_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-            renderVolumeTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("  Performance  ###performance", nullptr, tabFlags(Tab::Performance))) {
-            ImGui::BeginChild("performance_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-            renderPerformanceTab(controller, snap);
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        const std::string settingsLabel = std::string("  Settings") + (settingsDirty_ ? " *" : "") + "  ###settings";
-        if (ImGui::BeginTabItem(settingsLabel.c_str(), nullptr, tabFlags(Tab::Settings))) {
-            renderSettingsPanel(controller, snap, connected);
-            ImGui::EndTabItem();
-        }
-        {
-            int worst = 0;
-            if (snap) {
-                for (const auto& c : snap->audit) worst = std::max(worst, c.level);
-            }
-            if (worst > 0) ImGui::PushStyleColor(ImGuiCol_Text, worst >= 2 ? kRed : kAmber);
-            const bool open = ImGui::BeginTabItem(worst >= 2 ? "  Audit !  ###audit" : "  Audit  ###audit", nullptr,
-                                                  tabFlags(Tab::Audit));
-            if (worst > 0) ImGui::PopStyleColor();
-            if (open) {
-                renderAuditTab(snap, connected);
-                ImGui::EndTabItem();
-            }
-        }
-        if (ImGui::BeginTabItem("  Log  ###log", nullptr, tabFlags(Tab::Log))) {
-            renderLogTab(controller);
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-        selectTab_ = Tab::None;
-    }
+    renderPages(controller, snap, connected);
     glass::endCard();
 
     if (openConfirmRequested_) {
@@ -878,8 +832,124 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
     glass::endCard();
 }
 
-int DashboardWindow::tabFlags(Tab tab) const {
-    return selectTab_ == tab ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+void DashboardWindow::renderPages(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                  bool connected) {
+    if (selectTab_ != Tab::None) {
+        currentTab_ = selectTab_;
+        selectTab_ = Tab::None;
+    }
+    static constexpr Tab kOrder[] = {Tab::Positions, Tab::Orders, Tab::History,     Tab::Risk,     Tab::News,
+                                     Tab::Audit,     Tab::Volume, Tab::Performance, Tab::Settings, Tab::Log};
+    constexpr int kPages = static_cast<int>(sizeof(kOrder) / sizeof(kOrder[0]));
+    // Ctrl+1..9, Ctrl+0 jump straight to a page (not while typing into a field).
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && !io.WantTextInput) {
+        for (int i = 0; i < kPages; ++i) {
+            const ImGuiKey key = static_cast<ImGuiKey>(i < 9 ? ImGuiKey_1 + i : ImGuiKey_0);
+            if (ImGui::IsKeyPressed(key, false)) currentTab_ = kOrder[i];
+        }
+    }
+
+    const MarketStatus market = currentMarket(controller, snap, connected);
+    int worst = 0;
+    if (snap) {
+        for (const auto& c : snap->audit) worst = std::max(worst, c.level);
+    }
+    struct Item {
+        Tab tab;
+        const char* label;
+        std::string badge;
+        ImVec4 color;
+    };
+    const Item items[] = {
+        {Tab::Positions, "Positions", std::to_string(snap ? snap->positions.size() : 0), kBlue},
+        {Tab::Orders, "Pending orders", std::to_string(snap ? snap->pendingOrders.size() : 0), kViolet},
+        {Tab::History, "History", std::to_string(history_.size()), kGrey},
+        {Tab::Risk, "Risk & guards",
+         !snap || snap->marginLevelNow < 0.0 ? std::string()
+         : snap->locked                      ? std::string("locked")
+         : snap->guardLockPending            ? std::string("guard")
+                                             : std::to_string(static_cast<int>(std::min(snap->marginLevelNow, 99999.0))) + "%",
+         !snap || snap->marginLevelNow < 0.0 ? kGrey
+         : snap->locked                      ? kRed
+         : snap->guardLockPending            ? kAmber
+                                             : marginLevelColor(snap->marginLevelNow,
+                                                                snap->settings.recovery.guardLockMarginLevel,
+                                                                snap->settings.recovery.guardStopMarginLevel)},
+        {Tab::News, "News", market.phase == MarketPhase::NewsPause ? "guard" : "", kRed},
+        {Tab::Audit, "Audit", !snap ? "" : worst >= 2 ? "!" : worst == 1 ? "check" : "ok",
+         worst >= 2 ? kRed : worst == 1 ? kAmber : kGreen},
+        {Tab::Volume, "Volume", "", kGrey},
+        {Tab::Performance, "Performance", "", kGrey},
+        {Tab::Settings, "Settings", settingsDirty_ ? "unsaved" : "", kAmber},
+        {Tab::Log, "Log", "", kGrey},
+    };
+
+    // The menu: always all visible, one click (or Ctrl+number) per page.
+    const float railWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.2f, 160.0f, 210.0f);
+    ImGui::BeginChild("rail", ImVec2(railWidth, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    for (int i = 0; i < kPages; ++i) {
+        const Item& it = items[i];
+        const std::string id = std::string(it.label) + "##rail";
+        if (glass::railItem(id.c_str(), it.badge.c_str(), it.color, currentTab_ == it.tab, kBlue)) currentTab_ = it.tab;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+%d", (i + 1) % 10);
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        dl->AddLine(ImVec2(p.x - 5.0f, p.y + 4.0f), ImVec2(p.x - 5.0f, p.y + ImGui::GetContentRegionAvail().y - 4.0f),
+                    ImGui::GetColorU32(glass::palette().cardBorder), 1.0f);
+    }
+
+    ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    switch (currentTab_) {
+        case Tab::None:
+        case Tab::Positions:
+            if (snap) {
+                renderPositionsTab(controller, *snap, connected);
+            } else {
+                ImGui::TextDisabled("Not connected.");
+            }
+            break;
+        case Tab::Orders:
+            if (snap) {
+                renderOrdersTab(controller, *snap, connected);
+            } else {
+                ImGui::TextDisabled("Not connected.");
+            }
+            break;
+        case Tab::History:
+            renderHistoryTab(controller, snap);
+            break;
+        case Tab::Risk:
+            renderRiskPage(controller, snap, connected);
+            break;
+        case Tab::News:
+            renderNewsTab(controller, snap, connected);
+            break;
+        case Tab::Audit:
+            renderAuditTab(snap, connected);
+            break;
+        case Tab::Volume:
+            ImGui::BeginChild("volume_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+            renderVolumeTab();
+            ImGui::EndChild();
+            break;
+        case Tab::Performance:
+            ImGui::BeginChild("performance_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+            renderPerformanceTab(controller, snap);
+            ImGui::EndChild();
+            break;
+        case Tab::Settings:
+            renderSettingsPanel(controller, snap, connected);
+            break;
+        case Tab::Log:
+            renderLogTab(controller);
+            break;
+    }
+    ImGui::EndChild();
 }
 
 void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bool connected) {
@@ -977,13 +1047,43 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::TextColored(kBlue, "%ds", snap->cooldownRemainingSeconds);
     }
 
+    if (snap && connected && snap->marginLevelNow >= 0.0) {
+        ImGui::SameLine();
+        const auto& rc = snap->settings.recovery;
+        char text[96];
+        std::snprintf(text, sizeof(text), "Margin level %.0f%%", std::min(snap->marginLevelNow, 99999.0));
+        glass::pill(text, marginLevelColor(snap->marginLevelNow, rc.guardLockMarginLevel, rc.guardStopMarginLevel));
+        ImGui::SetItemTooltip("Equity %s / margin %s (worked out from the balance in Settings -- FIX doesn't send "
+                              "them). Guards: next level held back under %.0f%%, lock at once under %.0f%%.",
+                              money(snap->equityNow).c_str(), money(snap->marginNow).c_str(),
+                              rc.guardLockMarginLevel, rc.guardStopMarginLevel);
+    }
+    if (snap && snap->guardLockPending) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        ImGui::TextWrapped("Margin guard: the next level was not placed (it would have left the margin level under "
+                           "%.0f%%). A lock stop %.2f lot waits at %.2f instead. If the price turns back first, the "
+                           "basket closes at %s.",
+                           snap->settings.recovery.guardLockMarginLevel, snap->guardLockLots, snap->guardLockPrice,
+                           money(std::max(0.01, snap->settings.escapeProfit)).c_str());
+        ImGui::PopStyleColor();
+    }
     if (snap && snap->locked) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::PushStyleColor(ImGuiCol_Text, snap->escapeTradeOpen || snap->escapeOrdersOut ? kAmber : kRed);
+        std::string how = "Press Close range when you decide -- it closes both sides.";
+        if (snap->settings.recovery.escapeEnabled) {
+            how = snap->escapeTradeOpen
+                      ? std::string("Escape trade running") +
+                            (snap->escapeTrailing ? " (it locks again if the price comes back to its entry)" : "") +
+                            ": the basket closes at break-even, or locks again if the price turns back."
+                  : snap->escapeOrdersOut ? std::string("Escape orders wait outside the range for a breakout.")
+                  : snap->escapeTries >= snap->settings.recovery.escapeMaxTries
+                      ? std::string("Escape tries used up. Press Close range when you decide.")
+                      : std::string("Escape waits for enough margin (see the Audit).");
+        }
         ImGui::TextWrapped("Locked since %s at %s: the pending orders were cancelled and a hedge froze the loss. "
-                           "It stays about the same wherever the price goes (swap is charged every night). "
-                           "Press Close range when you decide -- it closes both sides.",
+                           "It stays about the same wherever the price goes (swap is charged every night). %s",
                            snap->lockedAt.size() > 11 ? snap->lockedAt.substr(11).c_str() : snap->lockedAt.c_str(),
-                           money(snap->lockedLoss).c_str());
+                           money(snap->lockedLoss).c_str(), how.c_str());
         ImGui::PopStyleColor();
     }
     const float chartHeight = rangeChartHeight();
@@ -1238,10 +1338,26 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     ImGui::EndDisabled();
     renderLotPreview(editSettings_, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
     ImGui::BeginDisabled(!settingsLoaded_);
-    renderRiskCalculator(snap);
+    ImGui::Spacing();
+    ImGui::TextDisabled("Balance, leverage, margin guards, lock and escape: the Risk & guards page.");
     renderMarketSettings();
     ImGui::EndDisabled();
+    renderSaveBar(controller, snap, connected);
+    ImGui::EndChild();
+}
 
+void DashboardWindow::renderRiskPage(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                     bool connected) {
+    ImGui::BeginChild("risk_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::BeginDisabled(!settingsLoaded_);
+    renderRiskCalculator(snap);
+    ImGui::EndDisabled();
+    renderSaveBar(controller, snap, connected);
+    ImGui::EndChild();
+}
+
+void DashboardWindow::renderSaveBar(LiveController& controller, const std::optional<LiveSnapshot>& snap,
+                                    bool connected) {
     ImGui::Spacing();
     const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
     ImGui::BeginDisabled(!settingsDirty_ || !settingsLoaded_ || configPathBuffer_[0] == '\0');
@@ -1268,8 +1384,6 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         }
     }
     ImGui::EndDisabled();
-
-    ImGui::EndChild();
 }
 
 void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveSnapshot& snap, bool connected) {
@@ -1949,6 +2063,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
 void DashboardWindow::selectTabByName(const std::string& name) {
     const std::pair<const char*, Tab> tabs[] = {{"positions", Tab::Positions}, {"orders", Tab::Orders},
                                                 {"history", Tab::History},     {"news", Tab::News},
+                                                {"risk", Tab::Risk},
                                                 {"audit", Tab::Audit},         {"volume", Tab::Volume},
                                                 {"performance", Tab::Performance}, {"settings", Tab::Settings},
                                                 {"log", Tab::Log}};
@@ -3235,6 +3350,56 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Account type");
+        ImGui::SetItemTooltip("Cent: balance and P/L are in US cents (USC) -- 100 USC = $1. Every $ amount on this "
+                              "page is then in USC. Each account file keeps its own settings, so a cent account "
+                              "simply gets its own file.");
+        ImGui::TableNextColumn();
+        {
+            int kind = s.accountKind == "cent" ? 1 : 0;
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("##accountKind", &kind, "Standard ($)\0Cent (USC)\0")) {
+                s.accountKind = kind == 1 ? "cent" : "standard";
+                settingsDirty_ = true;
+            }
+        }
+        settingDouble("Guard: hold the next level under (%)",
+                      "Margin level (equity / margin) the next fill would leave. Under this, that level is not "
+                      "placed: a stop order for the net lots (a lock) waits at its line instead, and the basket "
+                      "closes at the escape amount if the price turns back first. Brokers call a margin call at "
+                      "100 % and stop out at 50 % or less. 0 = off. Needs the balance.",
+                      &s.recovery.guardLockMarginLevel, 50.0, "%.0f", &settingsDirty_);
+        settingDouble("Guard: lock at once under (%)",
+                      "Margin level now. Under this the basket is locked at market right away. 0 = off.",
+                      &s.recovery.guardStopMarginLevel, 50.0, "%.0f", &settingsDirty_);
+        settingDouble("Hedged margin (%)",
+                      "How the broker charges a buy + sell pair. cTrader (IC Markets): 100 = the larger side only. "
+                      "MT5 brokers say it per symbol (RoboForex ProCent gold: 50).",
+                      &s.recovery.hedgedMarginPercent, 10.0, "%.0f", &settingsDirty_);
+        settingCheck("Close at break-even when guarded",
+                     "While a lock stop waits or a lock holds: once the net is back at the escape amount, close "
+                     "everything.",
+                     &s.recovery.closeAtBreakEven, &settingsDirty_);
+        settingCheck("Escape from a lock",
+                     "Off by default. From a lock: stop orders outside the range, sized so a run of the escape move "
+                     "wins the frozen loss back. If the price turns back (into the range, or to the entry once it ran "
+                     "the trail distance) it locks again. It's a bet on a breakout -- each failed try adds its cost.",
+                     &s.recovery.escapeEnabled, &settingsDirty_);
+        if (s.recovery.escapeEnabled) {
+            settingDouble("  escape move ($)", "Price run the escape trade is sized to win the loss back over.",
+                          &s.recovery.escapeMove, 0.5, "%.2f", &settingsDirty_);
+            settingDouble("  beyond the range by ($)", "Escape stop orders go this far outside the range lines.",
+                          &s.recovery.escapeBuffer, 0.1, "%.2f", &settingsDirty_);
+            settingDouble("  trail to entry after ($)",
+                          "Once the escape ran this far, it locks again as soon as the price is back at its entry.",
+                          &s.recovery.escapeTrailAt, 0.25, "%.2f", &settingsDirty_);
+            settingInt("  tries per basket", "After this many escapes that turned back, the basket just stays locked.",
+                       &s.recovery.escapeMaxTries, &settingsDirty_);
+        }
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Lot preset");
         ImGui::SetItemTooltip("Aggressive: x2 each fill. Balanced: x1.5. Safe: +0.01 each fill. The table shows "
                               "what each can lose.");
@@ -3271,8 +3436,21 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
     in.spread = live ? std::max(0.0, *snap->ask - *snap->bid) : 0.30;
     in.leverage = s.leverage;
     in.maxLot = s.maxLot;
-    in.levels = std::clamp(s.maxOrders, 1, 14);
+    in.levels = std::clamp(s.maxOrders, 1, 16);
+    in.balance = s.accountBalance;
+    in.hedgedPercent = s.recovery.hedgedMarginPercent;
     const auto rows = muuk::core::riskTable(in);
+    const double lockGuard = s.recovery.guardLockMarginLevel;
+    const double stopGuard = s.recovery.guardStopMarginLevel;
+    int guardLevel = 0;  // the level the margin guard holds back (0 = none in the table)
+    if (s.accountBalance > 0.0 && lockGuard > 0.0) {
+        for (const auto& r : rows) {
+            if (r.marginLevel < lockGuard) {
+                guardLevel = r.level;
+                break;
+            }
+        }
+    }
 
     const double balance = s.accountBalance;
     int lastSafe = 0;
@@ -3280,12 +3458,13 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                                   ImGuiTableFlags_PadOuterX;
     ImGui::TextDisabled("At %s%.2f, spread %.2f, 1:%.0f, range $%.2f:", live ? "" : "e.g. ", in.price, in.spread,
                         in.leverage, in.rangeWidth);
-    if (ImGui::BeginTable("risk_table", 8, flags)) {
+    if (ImGui::BeginTable("risk_table", 9, flags)) {
         ImGui::TableSetupColumn("Level");
         ImGui::TableSetupColumn("Lot");
         ImGui::TableSetupColumn("Total lots");
         ImGui::TableSetupColumn("Worst loss");
         ImGui::TableSetupColumn("Margin");
+        ImGui::TableSetupColumn("Margin level");
         ImGui::TableSetupColumn("Equity left");
         ImGui::TableSetupColumn("Recovery move");
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.6f);
@@ -3313,6 +3492,13 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             ImGui::Text("$%.0f", r.margin);
             ImGui::TableNextColumn();
             if (balance > 0.0) {
+                ImGui::TextColored(marginLevelColor(r.marginLevel, lockGuard, stopGuard), "%.0f%%",
+                                   std::max(0.0, std::min(r.marginLevel, 99999.0)));
+            } else {
+                ImGui::TextUnformatted("--");
+            }
+            ImGui::TableNextColumn();
+            if (balance > 0.0) {
                 ImGui::Text("%s", money(equity).c_str());
             } else {
                 ImGui::TextUnformatted("--");
@@ -3329,6 +3515,11 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             if (stopOut) note = "stop-out";
             else if (marginCall) note = "margin call";
             if (s.escapeFromLevel > 0 && r.level >= s.escapeFromLevel) note += std::string(note.empty() ? "" : ", ") + "escape";
+            if (guardLevel > 0 && r.level == guardLevel) {
+                note = "guard: lock stop";
+            } else if (guardLevel > 0 && r.level > guardLevel) {
+                note = "not reached";
+            }
             if (s.lockAtLoss > 0.0 && !lockShown && r.worstLoss >= s.lockAtLoss) {
                 note += std::string(note.empty() ? "" : ", ") + "lock here";
                 lockShown = true;
@@ -3347,6 +3538,131 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                            "With $%.0f at 1:%.0f the account holds %d level(s) of bouncing%s.", balance,
                            in.leverage, lastSafe,
                            lastSafe >= static_cast<int>(rows.size()) ? " -- the whole table" : "; after that, margin call / stop-out");
+        if (guardLevel > 0) {
+            const auto& g = rows[static_cast<std::size_t>(guardLevel - 1)];
+            ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+            ImGui::TextWrapped("Margin guard: level %d (margin level about %.0f%%) is never placed -- the basket is "
+                               "locked there with %.2f lot instead, frozen near %s.",
+                               guardLevel, std::max(0.0, g.marginLevel), std::fabs(g.netLots - (guardLevel % 2 == 1 ? g.lot : -g.lot)),
+                               money(-g.worstLoss).c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    renderReverseCalculator(snap, rows);
+}
+
+void DashboardWindow::renderReverseCalculator(const std::optional<LiveSnapshot>& snap,
+                                              const std::vector<muuk::core::RiskRow>& rows) {
+    const LiveSettings& s = editSettings_;
+    ImGui::Spacing();
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Reverse trade calculator");
+    });
+    ImGui::PushStyleColor(ImGuiCol_Text, glass::palette().textDim);
+    ImGui::TextWrapped("The opposite trade for a basket in loss: a lock (the loss stops moving), or enough lots to "
+                       "be back at 0 after a move.");
+    ImGui::PopStyleColor();
+
+    // Which book: the live one, or the worst case at a level of the table.
+    const bool haveLive = snap && snap->bid && snap->ask && !snap->positions.empty();
+    double buys = 0.0;
+    double sells = 0.0;
+    double floating = 0.0;
+    double equity = -1.0;
+    const bool live = snap && snap->bid && snap->ask;
+    const double price = live ? (*snap->bid + *snap->ask) / 2.0 : 4270.0;
+    const double spread = live ? std::max(0.0, *snap->ask - *snap->bid) : 0.30;
+    if (ImGui::BeginTable("rev_inputs", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Basket");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        std::string preview = reverseLevel_ == 0 ? std::string(haveLive ? "the open positions now" : "the open positions (none)")
+                                                 : "worst case at level " + std::to_string(reverseLevel_);
+        if (ImGui::BeginCombo("##revbasket", preview.c_str())) {
+            if (ImGui::Selectable("the open positions now", reverseLevel_ == 0)) reverseLevel_ = 0;
+            for (const auto& r : rows) {
+                const std::string label = "worst case at level " + std::to_string(r.level);
+                if (ImGui::Selectable(label.c_str(), reverseLevel_ == r.level)) reverseLevel_ = r.level;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Back to 0 after a move of ($)");
+        ImGui::SetItemTooltip("0 = just lock (the net lots). More: that many extra lots that win the loss back if the "
+                              "price moves this far in the new trade's direction.");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputDouble("##revmove", &reverseMove_, 0.5, 2.0, "%.2f");
+        reverseMove_ = std::clamp(reverseMove_, 0.0, 100.0);
+        ImGui::EndTable();
+    }
+
+    if (reverseLevel_ > 0 && reverseLevel_ <= static_cast<int>(rows.size())) {
+        const auto& r = rows[static_cast<std::size_t>(reverseLevel_ - 1)];
+        buys = (r.totalLots + r.netLots) / 2.0;
+        sells = (r.totalLots - r.netLots) / 2.0;
+        floating = -r.worstLoss;
+        if (s.accountBalance > 0.0) equity = s.accountBalance - r.worstLoss;
+    } else if (haveLive) {
+        for (const auto& p : snap->positions) (p.side == OrderSide::BuyStop ? buys : sells) += p.lots;
+        floating = snap->live.net;
+        equity = snap->equityNow;
+    } else {
+        ImGui::TextDisabled("No open positions -- pick a level of the table above to try it.");
+        return;
+    }
+
+    muuk::core::ReverseTradeInput in;
+    in.spec = muuk::core::SymbolSpec{};
+    in.costs.commissionPerLotRoundTurn = s.commissionPerLot;
+    in.costs.commissionPerMillionPerSide = s.commissionPerMillion;
+    in.margin = muuk::core::MarginRule{std::max(1.0, s.leverage), s.recovery.hedgedMarginPercent};
+    in.buyLots = buys;
+    in.sellLots = sells;
+    in.floating = floating;
+    in.equity = equity < 0.0 ? 0.0 : equity;
+    in.price = price;
+    in.spread = spread;
+    in.move = reverseMove_;
+    in.maxLot = s.maxLot;
+    const muuk::core::ReverseTrade t = muuk::core::reverseTrade(in);
+    const double net = buys - sells;
+
+    ImGui::Text("Book: buy %.2f / sell %.2f lot (net %+.2f), floating %s", buys, sells, net, money(floating).c_str());
+    if (t.lot <= 0.0) {
+        ImGui::TextColored(kGreen, "Already balanced: buys = sells, the loss can't move.");
+        return;
+    }
+    ImGui::TextColored(t.buy ? kGreen : kRed, "%s %.2f lot at market%s", t.buy ? "BUY" : "SELL", t.lot,
+                       t.capped ? " (capped at the max lot)" : "");
+    ImGui::Text("Its cost (commission + spread): %s", money(-t.cost).c_str());
+    if (t.lockOnly) {
+        ImGui::TextWrapped("After it: the loss is frozen at about %s wherever the price goes.", money(t.lossAfter).c_str());
+    } else {
+        const double over = t.lot - std::fabs(net);
+        ImGui::TextWrapped("After it: net %s %.2f lot. A $%.2f move %s brings the basket back to about 0; each $1 "
+                           "the other way adds %s to the loss.",
+                    t.buy ? "long" : "short", over, reverseMove_, t.buy ? "up" : "down",
+                    money(-over * 100.0).c_str());
+    }
+    if (equity < 0.0) {
+        ImGui::TextColored(kAmber, "Margin after: $%.2f (enter the balance for free margin and margin level).",
+                           t.marginAfter);
+    } else {
+        ImGui::TextColored(marginLevelColor(t.marginLevelAfter, s.recovery.guardLockMarginLevel,
+                                            s.recovery.guardStopMarginLevel),
+                           "Margin after: $%.2f, free margin %s, margin level %.0f%%%s", t.marginAfter,
+                           money(t.freeMarginAfter).c_str(), std::max(0.0, std::min(t.marginLevelAfter, 99999.0)),
+                           t.marginLevelAfter < 100.0 ? " -- not affordable (margin call)" : "");
     }
 }
 

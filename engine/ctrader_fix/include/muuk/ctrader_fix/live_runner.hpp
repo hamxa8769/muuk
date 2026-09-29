@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "muuk/core/risk_table.hpp"
 #include "muuk/core/strategy_engine.hpp"
 #include "muuk/ctrader_fix/basket_history.hpp"
 #include "muuk/ctrader_fix/fix_session.hpp"
@@ -183,6 +184,19 @@ struct LiveSnapshot {
     // Break-even escape: the deepest level filled, and whether the target was lowered.
     int filledLevel = 0;
     bool escapeActive = false;
+    // Margin guards (RecoveryConfig). equity / margin: worked out from the
+    // typed-in balance on cTrader; <0 = unknown (no balance given).
+    double equityNow = -1.0;
+    double marginNow = 0.0;
+    double marginLevelNow = -1.0;  // %, <0 = unknown
+    bool guardLockPending = false; // a lock stop waits at the next line (the level wasn't placed)
+    double guardLockPrice = 0.0;
+    double guardLockLots = 0.0;
+    // Escape from a lock: stop orders out, or the escape trade running.
+    bool escapeOrdersOut = false;
+    bool escapeTradeOpen = false;
+    bool escapeTrailing = false;
+    int escapeTries = 0;
 };
 
 // The live counterpart to backtester::BacktestRunner
@@ -666,6 +680,59 @@ private:
     // cancel its pending orders and freeze the loss with one opposite market
     // order for the net lots. Called on every quote.
     void maybeLockLocked();
+    // Lock right now at market: pending orders cancelled, the cycle stopped,
+    // one opposite market order for the net lots (retried if refused).
+    void lockNowLocked(const std::string& why, double net);
+    // Margin guards, run with every quote (and by the audit): the margin
+    // level now (under guardStopMarginLevel -> lock now), back to break-even
+    // while guarded (close all), and the escape from a lock.
+    void maybeGuardLocked();
+    // Before the engine's next level goes out: true if the margin level after
+    // its fill would be under guardLockMarginLevel -- then a lock stop was
+    // placed instead (or the lock done at market) and the level is dropped.
+    bool guardNextOrderLocked(const muuk::core::PlaceOrderCommand& place);
+    // A fill of one of the runner's own orders (lock stop, escape, re-lock).
+    void onRecoveryFillLocked(muuk::core::OrderId orderId);
+    void manageEscapeLocked(double net);
+    void resetRecoveryLocked();
+    // A market order the runner itself sends (lock / re-lock): tracked so a
+    // refusal is sent again, up to 5 times, 0.5 s apart.
+    void sendManagedMarketLocked(OpenLeg leg, const std::string& what);
+    void retryManagedMarketLocked();
+    struct BookLots {
+        double buys = 0.0;
+        double sells = 0.0;
+        int64_t netSteps = 0;
+    };
+    [[nodiscard]] BookLots bookLotsLocked() const;
+    [[nodiscard]] double floatingNetLocked() const;          // open legs at the latest quote
+    [[nodiscard]] double netAtMidLocked(double mid) const;   // open legs if the mid were `mid`
+    [[nodiscard]] double equityEstimateLocked(double floating) const;  // <0 = unknown
+    [[nodiscard]] muuk::core::MarginRule marginRuleLocked() const;
+    [[nodiscard]] bool guardsOnLocked() const;
+    [[nodiscard]] double breakEvenMoneyLocked() const;
+    muuk::core::OrderId guardLockOrderId_ = 0;
+    muuk::core::Price guardRangeLow_{};
+    muuk::core::Price guardRangeHigh_{};
+    struct EscapeState {
+        muuk::core::OrderId buyStopId = 0;
+        muuk::core::OrderId sellStopId = 0;
+        muuk::core::OrderId legId = 0;  // the escape trade once filled
+        bool buy = false;
+        muuk::core::Price entry{};
+        bool trailing = false;
+        muuk::core::OrderId relockId = 0;  // the re-lock market order in flight
+    } escape_;
+    int escapeTries_ = 0;
+    bool escapeSkipLogged_ = false;
+    struct ManagedMarket {
+        OpenLeg leg;
+        std::string what;
+        int attempts = 1;
+        bool retryDue = false;
+        std::chrono::steady_clock::time_point retryAt{};
+    };
+    std::unordered_map<muuk::core::OrderId, ManagedMarket> managedMarket_;
     void auditLocked();
     void auditEventLocked(int check, int level, const std::string& text);
     void addRealizedLocked(double net);

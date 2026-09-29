@@ -325,6 +325,47 @@ bool button(const char* label, ImVec4 tint, ImVec2 size, ButtonKind kind) {
     return pressed;
 }
 
+bool railItem(const char* label, const char* badge, ImVec4 badgeColor, bool selected, ImVec4 accent, float height) {
+    const char* end = visibleEnd(label);
+    const ImVec2 textSize = ImGui::CalcTextSize(label, end);
+    const ImVec2 sz(std::max(4.0f, ImGui::GetContentRegionAvail().x),
+                    height > 0.0f ? height : ImGui::GetFrameHeight() + 10.0f);
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const ImVec2 b(a.x + sz.x, a.y + sz.y);
+    const bool pressed = ImGui::InvisibleButton(label, sz);
+    const bool hovered = ImGui::IsItemHovered();
+    const float h = animate(ImGui::GetItemID(), hovered ? 1.0f : 0.0f, 16.0f);
+    const float s = animate(ImGui::GetItemID() + 1, selected ? 1.0f : 0.0f, 12.0f);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = kButtonRounding;
+    const float fill = 0.05f * h + 0.16f * s;
+    if (fill > 0.005f) dl->AddRectFilled(a, b, col(alpha(accent, fill)), r);
+    if (s > 0.01f) {
+        dl->AddRect(a, b, col(alpha(accent, 0.35f * s)), r, 0, 1.0f);
+        // Accent bar on the left edge.
+        const float inset = sz.y * 0.22f;
+        dl->AddRectFilled(ImVec2(a.x + 3.0f, a.y + inset), ImVec2(a.x + 6.0f, b.y - inset),
+                          col(alpha(accent, s)), 2.0f);
+    }
+    const ImVec4 textColor = selected ? g_palette.text : ImVec4(g_palette.text.x * 0.5f + g_palette.textDim.x * 0.5f,
+                                                                g_palette.text.y * 0.5f + g_palette.textDim.y * 0.5f,
+                                                                g_palette.text.z * 0.5f + g_palette.textDim.z * 0.5f, 1.0f);
+    dl->AddText(ImVec2(a.x + 14.0f, a.y + (sz.y - textSize.y) * 0.5f), col(textColor), label, end);
+    if (badge && badge[0] != '\0') {
+        const ImVec2 bs = ImGui::CalcTextSize(badge);
+        const float padX = 7.0f;
+        const float bh = bs.y + 4.0f;
+        const ImVec2 ba(b.x - 8.0f - bs.x - padX * 2.0f, a.y + (sz.y - bh) * 0.5f);
+        const ImVec2 bb(b.x - 8.0f, ba.y + bh);
+        dl->AddRectFilled(ba, bb, col(alpha(badgeColor, 0.16f)), bh * 0.5f);
+        dl->AddRect(ba, bb, col(alpha(badgeColor, 0.45f)), bh * 0.5f, 0, 1.0f);
+        dl->AddText(ImVec2(ba.x + padX, ba.y + 2.0f), col(badgeColor), badge);
+    }
+    return pressed;
+}
+
 void pill(const char* text, ImVec4 color, bool pulse) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 textSize = ImGui::CalcTextSize(text);

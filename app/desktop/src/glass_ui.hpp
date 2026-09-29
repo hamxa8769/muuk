@@ -80,6 +80,13 @@ void balanceBar(const char* id, float value, float negScale, float posScale, con
 // inside: labels go around it so they're always readable.
 void pnlBar(const char* id, float value, float negScale, float posScale, float height = 0.0f);
 
+// One row of a side menu (the left rail): the label on the left, an optional
+// badge on the right (a count, or a short word) in `badgeColor`, a soft glass
+// highlight on hover and an accent bar + tint when `selected`. Fills the
+// available width. Returns true when clicked.
+bool railItem(const char* label, const char* badge, ImVec4 badgeColor, bool selected, ImVec4 accent,
+              float height = 0.0f);
+
 // Eases a displayed value towards `target` (per-id), for smooth numbers.
 [[nodiscard]] float ease(const char* id, float target, float speed = 10.0f);
 

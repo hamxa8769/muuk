@@ -143,3 +143,69 @@ TEST_CASE("Risk table: the worst case level by level, as in the discussion ($2 r
     in.maxLot = 0.30;
     REQUIRE(riskTable(in).size() == 5);  // 0.01 .. 0.16; 0.32 is above the limit
 }
+
+TEST_CASE("Margin rule: cTrader charges the larger side, MT5 the hedged part at its own rate") {
+    // 1 lot buy + 1 lot sell at 4000, 1:500 -> one side = $800.
+    REQUIRE(bookMargin(1.0, 1.0, 4000.0, 100.0, MarginRule{500.0, 100.0}) == Catch::Approx(800.0));
+    REQUIRE(bookMargin(1.0, 1.0, 4000.0, 100.0, MarginRule{500.0, 50.0}) == Catch::Approx(400.0));
+    REQUIRE(bookMargin(1.0, 1.0, 4000.0, 100.0, MarginRule{500.0, 0.0}) == Catch::Approx(0.0));
+    // 1.5 buy / 1 sell: the open 0.5 at full rate + the hedged 1 at its rate.
+    REQUIRE(bookMargin(1.5, 1.0, 4000.0, 100.0, MarginRule{500.0, 100.0}) == Catch::Approx(1200.0));
+    REQUIRE(bookMargin(1.5, 1.0, 4000.0, 100.0, MarginRule{500.0, 50.0}) == Catch::Approx(800.0));
+    REQUIRE(marginLevelPercent(1000.0, 800.0) == Catch::Approx(125.0));
+    REQUIRE(marginLevelPercent(1000.0, 0.0) > 1e8);
+}
+
+TEST_CASE("Reverse trade: the lot that brings a losing basket back to 0 after a set move") {
+    // Buys 0.85 @ 4272, sells 0.42 @ 4270, price 4271: floating -$127, net +0.43.
+    ReverseTradeInput in;
+    in.spec = xauusdSpec();
+    in.costs.commissionPerMillionPerSide = 30.0;
+    in.margin = MarginRule{500.0, 100.0};
+    in.buyLots = 0.85;
+    in.sellLots = 0.42;
+    in.floating = -127.0;
+    in.equity = 1000.0 - 127.0;
+    in.price = 4271.0;
+    in.spread = 0.30;
+
+    // A lock: just the net lots, the loss stays (plus the lock's own cost).
+    in.move = 0.0;
+    ReverseTrade lock = reverseTrade(in);
+    REQUIRE(lock.lockOnly);
+    REQUIRE_FALSE(lock.buy);  // long basket -> sell
+    REQUIRE(lock.lot == Catch::Approx(0.43));
+    REQUIRE(lock.marginAfter == Catch::Approx(0.85 * 100.0 * 4271.0 / 500.0));
+    REQUIRE(lock.lossAfter < -127.0);
+
+    // Back to 0 after a $2 move down: q = 0.43 + (127 + cost(q)) / 200.
+    in.move = 2.0;
+    ReverseTrade rev = reverseTrade(in);
+    REQUIRE(rev.lot == Catch::Approx(1.48));
+    const double net = rev.lot - 0.43;  // short after the trade
+    REQUIRE(net * 100.0 * 2.0 >= 127.0 + rev.cost - 1.0);  // the move pays the loss and the trade's cost
+    REQUIRE(rev.marginAfter == Catch::Approx(1.90 * 100.0 * 4271.0 / 500.0).margin(1.0));  // about $1,623
+    REQUIRE(rev.marginLevelAfter < 100.0);  // too much for $1000 standard
+    // The same book on a 20,000 USC cent account has room.
+    in.equity = 20000.0 - 127.0;
+    REQUIRE(reverseTrade(in).marginLevelAfter > 1000.0);
+
+    // Capped by the max lot.
+    in.maxLot = 1.0;
+    REQUIRE(reverseTrade(in).capped);
+}
+
+TEST_CASE("Risk table: margin level per row once a balance is given") {
+    RiskTableInput in;
+    in.spec = xauusdSpec();
+    in.lots = LotProgressionConfig{Volume::fromDouble(0.01, in.spec), Volume::fromDouble(0.01, in.spec), 2.0};
+    in.costs.commissionPerMillionPerSide = 30.0;
+    in.price = 4270.0;
+    in.levels = 9;
+    in.balance = 1000.0;
+    const auto rows = riskTable(in);
+    // Fill 8: equity ~688 against $1,452 margin -> under 50 %, a stop-out.
+    REQUIRE(rows[7].marginLevel == Catch::Approx((1000.0 - rows[7].worstLoss) / rows[7].margin * 100.0));
+    REQUIRE(rows[7].marginLevel < 50.0);
+    REQUIRE(rows[6].marginLevel > 100.0);
+}

@@ -62,6 +62,18 @@ struct PersistedState {
     double lockedLoss = 0.0;
     std::string lockedAt;
 
+    // Margin guards / escape (see RecoveryConfig).
+    uint64_t guardLockOrderId = 0;  // lock stop waiting at the next line
+    int64_t guardRangeLowTicks = 0;
+    int64_t guardRangeHighTicks = 0;
+    uint64_t escapeBuyStopId = 0;
+    uint64_t escapeSellStopId = 0;
+    uint64_t escapeLegId = 0;       // the escape trade, once filled
+    bool escapeBuy = false;
+    int64_t escapeEntryTicks = 0;
+    bool escapeTrailing = false;
+    int escapeTries = 0;
+
     // Lifetime statistics (since the last reset).
     std::string statsSince;
     uint64_t ticksProcessed = 0;

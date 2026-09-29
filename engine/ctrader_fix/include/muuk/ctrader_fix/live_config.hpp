@@ -15,6 +15,34 @@ struct FixEndpoint {
     std::string port;  // plain-TCP FIX port (TLS is not yet supported — see docs/ctrader-fix.md)
 };
 
+// Margin guards and what happens after a lock. The margin level is equity /
+// margin in % (brokers call a margin call at 100 % or less, a stop-out at
+// 50 % or less). On cTrader the equity is worked out from the typed-in
+// balance, as FIX sends neither -- so the guards need accountBalance.
+struct RecoveryConfig {
+    // Before each next level: if the margin level after that fill would be
+    // under this, the level isn't placed; a stop order for the net lots
+    // (a lock) waits at that line instead. 0 = off.
+    double guardLockMarginLevel = 300.0;
+    // Margin level under this now: lock at market right away. 0 = off.
+    double guardStopMarginLevel = 200.0;
+    // How the broker charges hedged (buy + sell) lots, see core MarginRule:
+    // 100 = the larger side only (cTrader), MT5 says it per symbol.
+    double hedgedMarginPercent = 100.0;
+    // While a lock waits or holds: once the net is back at the break-even
+    // escape amount (strategy.breakEvenEscape.profit), close everything.
+    bool closeAtBreakEven = true;
+    // Escape (off by default): from a lock, stop orders outside the range
+    // sized to win the frozen loss back over escapeMove. If the price turns
+    // back (into the range, or to the entry once it ran escapeTrailAt), the
+    // escape trade is locked again. At most escapeMaxTries per basket.
+    bool escapeEnabled = false;
+    double escapeMove = 2.0;
+    double escapeBuffer = 0.30;
+    double escapeTrailAt = 1.0;
+    int escapeMaxTries = 2;
+};
+
 // Connection/credential details for one cTrader FIX account. Loaded from a
 // local, gitignored JSON file — never hardcoded, never committed. See
 // docs/ctrader-fix.md for where to get these values (cTrader platform:
@@ -97,6 +125,10 @@ struct LiveConnectionConfig {
     // Not sent over FIX -- typed in, for the risk calculator and margin warnings.
     double accountBalance = 0.0;
     double leverage = 500.0;
+    // "standard" or "cent" (balance and P/L in US cents). Each account file
+    // keeps its own settings, so a cent account simply has its own file.
+    std::string accountKind = "standard";
+    RecoveryConfig recovery;
 
     // true (default): open the first range as soon as the bot connects,
     // and the next one automatically after each basket closes.
@@ -145,6 +177,8 @@ struct LiveSettings {
     double escapeProfit = 0.50;  // $ net, after every cost
     double accountBalance = 0.0; // $, for the risk calculator
     double leverage = 500.0;     // 1:leverage
+    std::string accountKind = "standard";  // or "cent"
+    RecoveryConfig recovery;
     double commissionPerLot = 0.0;  // $ per 1.0 lot, round turn (open + close) -- flat-rate brokers
     // $ per $1,000,000 traded, charged on the open and again on the close
     // (cTrader's own commission type; IC Markets Raw: 30). >0 replaces commissionPerLot.

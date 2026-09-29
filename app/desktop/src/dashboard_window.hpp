@@ -74,8 +74,16 @@ public:
 private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
     // The tabs on the right; a KPI card click selects one.
-    enum class Tab { None, Positions, Orders, History, News, Audit, Volume, Performance, Settings, Log };
-    [[nodiscard]] int tabFlags(Tab tab) const;
+    enum class Tab { None, Positions, Orders, History, Risk, News, Audit, Volume, Performance, Settings, Log };
+    // Risk & guards page: balance, guards, lock/escape, the risk table and the reverse-trade calculator.
+    void renderRiskPage(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                        bool connected);
+    // Save & apply / Revert for the edited settings (Settings and Risk pages).
+    void renderSaveBar(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                       bool connected);
+    // The left menu (one row per page) and the page it shows.
+    void renderPages(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                     bool connected);
 
     void setTheme(bool dark);
     void renderHeader(LiveController& controller, bool running, bool connected);
@@ -114,6 +122,11 @@ private:
     void renderRiskCalculator(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     // Audit: every self-check with its state, and what it found / did.
     void renderAuditTab(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap, bool connected);
+    // Reverse-trade calculator (muuk::core::reverseTrade) under the risk table.
+    void renderReverseCalculator(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
+                                 const std::vector<muuk::core::RiskRow>& rows);
+    int reverseLevel_ = 0;        // 0 = the open positions, else that level's worst case
+    double reverseMove_ = 2.0;    // $; 0 = lock only
     void renderSessionStats();
     // The net P/L bar with its target, and the gear that sets the auto target.
     void renderTargetBar(LiveController& controller, const muuk::ctrader_fix::LiveSnapshot& snap, bool connected);
@@ -160,6 +173,7 @@ private:
     double exitClosingSince_ = 0.0;
 
     Tab selectTab_ = Tab::None;  // switch to this tab on the next frame
+    Tab currentTab_ = Tab::Positions;
 
     // Market hours / news, offline view (see currentMarket).
     muuk::ctrader_fix::MarketStatus uiMarket_;

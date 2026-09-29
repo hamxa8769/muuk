@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -35,6 +36,30 @@ std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+std::string usdText(double v) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), v < 0.0 ? "-$%.2f" : "$%.2f", std::fabs(v));
+    return buf;
+}
+
+std::string lotsTextOf(int64_t steps, const muuk::core::SymbolSpec& spec) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(steps) * spec.volumeStep);
+    return buf;
+}
+
+std::string priceTextOf(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", v);
+    return buf;
+}
+
+std::string pctText(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.0f%%", v);
+    return buf;
 }
 
 std::string accountKey(const LiveConfig& config) {
@@ -173,6 +198,29 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.lockedLoss = lockedLoss_;
     snap.lockedAt = lockedAt_;
     snap.filledLevel = engine_ ? engine_->filledLevel() : 0;
+    if (haveQuote) {
+        const BookLots book = bookLotsLocked();
+        const double mid = (*latestBid_ + *latestAsk_) / 2.0;
+        snap.equityNow = equityEstimateLocked(snap.live.net);
+        snap.marginNow = bookMargin(book.buys, book.sells, mid, spec.contractSize, marginRuleLocked());
+        if (snap.equityNow >= 0.0 && snap.marginNow > 0.0) {
+            snap.marginLevelNow = marginLevelPercent(snap.equityNow, snap.marginNow);
+        }
+    }
+    if (guardLockOrderId_ != 0) {
+        const auto it = placedOrderInfo_.find(guardLockOrderId_);
+        const auto wt = waitingOrders_.find(guardLockOrderId_);
+        const OpenLeg* lk = it != placedOrderInfo_.end() ? &it->second : (wt != waitingOrders_.end() ? &wt->second : nullptr);
+        snap.guardLockPending = true;
+        if (lk) {
+            snap.guardLockPrice = lk->price.toDouble(spec);
+            snap.guardLockLots = lk->volume.toDouble(spec);
+        }
+    }
+    snap.escapeOrdersOut = escape_.buyStopId != 0 || escape_.sellStopId != 0;
+    snap.escapeTradeOpen = escape_.legId != 0;
+    snap.escapeTrailing = escape_.trailing;
+    snap.escapeTries = escapeTries_;
     snap.escapeActive = engine_ && engine_->status() == EngineStatus::Active && engine_->escapeActive();
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
@@ -638,6 +686,38 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             const auto orderId = tryParseOrderId(info.clOrdId);
             if (!orderId) return;
             std::scoped_lock lock(engineMutex_);
+            if (const auto mm = managedMarket_.find(*orderId); mm != managedMarket_.end()) {
+                // A lock / re-lock refused: send it again shortly.
+                placedOrderInfo_.erase(*orderId);
+                ManagedMarket retry = mm->second;
+                managedMarket_.erase(mm);
+                if (retry.attempts >= 5) {
+                    auditEventLocked(8, 2,
+                                     "the " + retry.what + " order was refused 5 times (" +
+                                         info.text.value_or("no reason given") + ") -- open it by hand in cTrader: " +
+                                         std::string(retry.leg.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
+                                         lotsTextOf(retry.leg.volume.steps, config_.strategy.symbol) + " lot");
+                    return;
+                }
+                retry.retryDue = true;
+                retry.retryAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                managedMarket_[*orderId] = retry;
+                log("[risk] the " + retry.what + " order was refused (try " + std::to_string(retry.attempts) +
+                    " of 5) -- sending it again in 0.5 s");
+                return;
+            }
+            if (*orderId == guardLockOrderId_ || *orderId == escape_.buyStopId || *orderId == escape_.sellStopId) {
+                placedOrderInfo_.erase(*orderId);
+                if (*orderId == guardLockOrderId_) {
+                    guardLockOrderId_ = 0;
+                    lockNowLocked("the lock stop order was refused (" + info.text.value_or("no reason given") + ")",
+                                  latestBid_ && latestAsk_ ? floatingNetLocked() : 0.0);
+                } else {
+                    (*orderId == escape_.buyStopId ? escape_.buyStopId : escape_.sellStopId) = 0;
+                    auditEventLocked(8, 1, "an escape order was refused (" + info.text.value_or("no reason given") + ")");
+                }
+                return;
+            }
             // This order is done -- no longer genuinely outstanding either
             // way (it may have already moved to cancelledOrderInfo_ if
             // LiveRunner itself requested the cancel that's now bouncing
@@ -842,6 +922,7 @@ void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::st
         recordLegOpened(surplus);
         if (tradeSession_) closeLegs({surplus});
     }
+    onRecoveryFillLocked(orderId);
     if (!engine_) return;  // shouldn't happen: fills only follow orders the engine itself placed
     const auto reactStart = std::chrono::steady_clock::now();
     for (const auto& cmd : engine_->onOrderConfirmed(OrderConfirmedEvent{orderId, fillPrice})) {
@@ -924,6 +1005,8 @@ void LiveRunner::maybeEmitTick() {
     }
     for (const auto& cmd : commands) handleCommand(cmd);
     maybeLockLocked();
+    maybeGuardLocked();
+    retryManagedMarketLocked();
     releaseWaitingOrdersLocked();
     maybeRestartAfterBasketClose();
 }
@@ -931,50 +1014,424 @@ void LiveRunner::maybeEmitTick() {
 void LiveRunner::maybeLockLocked() {
     const double lockAt = config_.connection.lockAtLossMoney;
     if (lockAt <= 0.0 || locked_ || !engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
-    if (engine_->status() != EngineStatus::Active || openLegs_.empty() || !pendingCloses_.empty()) return;
-    PnlBreakdown live;
-    int64_t netSteps = 0;
-    for (const auto& leg : openLegs_) {
-        live += legPnl(leg);
-        netSteps += leg.side == OrderSide::BuyStop ? leg.volume.steps : -leg.volume.steps;
-    }
-    if (live.net > -lockAt) return;
+    if (openLegs_.empty() || !pendingCloses_.empty()) return;
+    if (engine_->status() != EngineStatus::Active && guardLockOrderId_ == 0) return;
+    const double net = floatingNetLocked();
+    if (net > -lockAt) return;
+    lockNowLocked("the basket reached " + usdText(net) + " (lock at -" + usdText(lockAt).substr(1) + ")", net);
+}
 
+void LiveRunner::lockNowLocked(const std::string& why, double net) {
     const SymbolSpec& spec = config_.strategy.symbol;
-    locked_ = true;
-    lockedLoss_ = live.net;
-    lockedAt_ = localTimestamp();
+    const BookLots book = bookLotsLocked();
+    if (!locked_) {
+        locked_ = true;
+        lockedLoss_ = net;
+        lockedAt_ = localTimestamp();
+        setCloseReason("locked at " + usdText(net));
+    }
     markDirty();
-    setCloseReason("locked at " + std::to_string(live.net).substr(0, std::to_string(live.net).find('.') + 3));
-    cancelPendingLocked();
-    engine_->stopCycle();
+    cancelPendingLocked();  // also a lock stop / escape orders still out
+    guardLockOrderId_ = 0;
+    escape_.buyStopId = escape_.sellStopId = 0;
+    escape_.legId = 0;
+    escape_.trailing = false;
+    if (engine_->status() == EngineStatus::Active) {
+        const RangeConfig range = engine_->currentRange();  // the escape orders go outside it
+        guardRangeLow_ = range.lowerBound;
+        guardRangeHigh_ = range.upperBound;
+    }
+    if (engine_->status() != EngineStatus::Idle) engine_->stopCycle();
     cooldownActive_ = false;
     reopenAfterManualClose_ = false;
     std::string hedgeText = "already balanced -- nothing to add";
-    if (netSteps != 0) {
+    if (book.netSteps != 0) {
         // One opposite market order for the net lots: a new position on a
         // hedging account (no position id), so buys = sells and the P/L no
         // longer moves with the price.
         OpenLeg hedge;
         hedge.id = nextAdoptedId_++;
-        hedge.side = netSteps > 0 ? OrderSide::SellStop : OrderSide::BuyStop;
-        hedge.volume = Volume{netSteps > 0 ? netSteps : -netSteps};
+        hedge.side = book.netSteps > 0 ? OrderSide::SellStop : OrderSide::BuyStop;
+        hedge.volume = Volume{book.netSteps > 0 ? book.netSteps : -book.netSteps};
         hedge.price = hedge.requestedPrice =
             Price::fromDouble(hedge.side == OrderSide::BuyStop ? *latestAsk_ : *latestBid_, spec);
-        const std::string clOrdId = std::to_string(hedge.id);
-        const double lots = hedge.volume.toDouble(spec);
-        placedOrderInfo_[hedge.id] = hedge;
-        orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
-        tradeSession_->send(buildMarketOrderSingle(clOrdId, symbolId_, hedge.side == OrderSide::BuyStop ? 1 : 2,
-                                                   lots * kWireQtyPerLot));
-        hedgeText = std::string(hedge.side == OrderSide::BuyStop ? "BUY " : "SELL ") + std::to_string(lots).substr(0, 4) +
-                    " lot at market (ClOrdID=" + clOrdId + ")";
+        hedgeText = std::string(hedge.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
+                    lotsTextOf(hedge.volume.steps, spec) + " lot at market (ClOrdID=" + std::to_string(hedge.id) + ")";
+        sendManagedMarketLocked(hedge, "lock");
     }
     auditEventLocked(8, 2,
-                     "the basket reached " + std::to_string(live.net).substr(0, std::to_string(live.net).find('.') + 3) +
-                         " (lock at -" + std::to_string(lockAt).substr(0, std::to_string(lockAt).find('.') + 3) +
-                         "): pending orders cancelled, hedge " + hedgeText +
-                         " -- the loss is frozen; the bot waits for you (Close range to unwind)");
+                     why + ": pending orders cancelled, hedge " + hedgeText +
+                         " -- the loss is frozen" +
+                         (config_.connection.recovery.escapeEnabled ? "; escape orders follow if the margin allows"
+                                                                    : "; the bot waits for you (Close range to unwind)"));
+}
+
+// ---------------------------------------------------------------------------
+// Margin guards and recovery (RecoveryConfig). All: caller holds engineMutex_.
+
+LiveRunner::BookLots LiveRunner::bookLotsLocked() const {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    BookLots b;
+    for (const auto& leg : openLegs_) {
+        const double lots = leg.volume.toDouble(spec);
+        if (leg.side == OrderSide::BuyStop) {
+            b.buys += lots;
+            b.netSteps += leg.volume.steps;
+        } else {
+            b.sells += lots;
+            b.netSteps -= leg.volume.steps;
+        }
+    }
+    return b;
+}
+
+double LiveRunner::floatingNetLocked() const {
+    double net = 0.0;
+    for (const auto& leg : openLegs_) net += legPnl(leg).net;
+    return net;
+}
+
+double LiveRunner::netAtMidLocked(double mid) const {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const double halfSpread = latestBid_ && latestAsk_ ? (*latestAsk_ - *latestBid_) / 2.0 : 0.0;
+    const double perPoint = spec.tickValue / spec.tickSize;  // money per 1.0 price move per lot
+    double net = 0.0;
+    for (const auto& leg : openLegs_) {
+        const double lots = leg.volume.toDouble(spec);
+        const double entry = leg.price.toDouble(spec);
+        const double move = leg.side == OrderSide::BuyStop ? mid - entry : entry - mid;
+        net += (move - halfSpread) * perPoint * lots - roundTurnCommissionMoney(lots, entry, spec, config_.strategy.costs);
+    }
+    return net;
+}
+
+double LiveRunner::equityEstimateLocked(double floating) const {
+    const double balance = config_.connection.accountBalance;
+    if (balance <= 0.0) return -1.0;
+    return balance + dayRealized_ + floating;
+}
+
+muuk::core::MarginRule LiveRunner::marginRuleLocked() const {
+    return muuk::core::MarginRule{std::max(1.0, config_.connection.leverage),
+                                  config_.connection.recovery.hedgedMarginPercent};
+}
+
+bool LiveRunner::guardsOnLocked() const {
+    const RecoveryConfig& rc = config_.connection.recovery;
+    return config_.connection.accountBalance > 0.0 && (rc.guardLockMarginLevel > 0.0 || rc.guardStopMarginLevel > 0.0);
+}
+
+double LiveRunner::breakEvenMoneyLocked() const {
+    return std::max(0.01, config_.strategy.escapeProfitMoney);
+}
+
+void LiveRunner::resetRecoveryLocked() {
+    if (guardLockOrderId_ != 0 || escape_.buyStopId != 0 || escape_.sellStopId != 0 || escape_.legId != 0 ||
+        escapeTries_ != 0 || locked_) {
+        markDirty();
+    }
+    guardLockOrderId_ = 0;
+    escape_ = EscapeState{};
+    escapeTries_ = 0;
+    escapeSkipLogged_ = false;
+    locked_ = false;
+}
+
+bool LiveRunner::guardNextOrderLocked(const PlaceOrderCommand& place) {
+    const RecoveryConfig& rc = config_.connection.recovery;
+    if (!guardsOnLocked() || rc.guardLockMarginLevel <= 0.0 || locked_ || guardLockOrderId_ != 0) return false;
+    if (openLegs_.empty() || !latestBid_ || !latestAsk_ || !engine_ || !tradeSession_) return false;
+    if (engine_->status() != EngineStatus::Active) return false;
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const BookLots book = bookLotsLocked();
+    const bool buy = place.side == OrderSide::BuyStop;
+    const double lot = place.volume.toDouble(spec);
+    const double line = place.price.toDouble(spec);
+    const double spread = *latestAsk_ - *latestBid_;
+    const double newCost = roundTurnCommissionMoney(lot, line, spec, config_.strategy.costs) +
+                           spread / 2.0 * spec.tickValue / spec.tickSize * lot;
+    const double equity = equityEstimateLocked(netAtMidLocked(line) - newCost);
+    const double margin = bookMargin(book.buys + (buy ? lot : 0.0), book.sells + (buy ? 0.0 : lot), line,
+                                     spec.contractSize, marginRuleLocked());
+    const double level = marginLevelPercent(equity, margin);
+    if (level >= rc.guardLockMarginLevel) return false;
+
+    const RangeConfig range = engine_->currentRange();
+    guardRangeLow_ = range.lowerBound;
+    guardRangeHigh_ = range.upperBound;
+    const std::string what = "level " + std::to_string(place.sequenceIndex) + " (" + (buy ? "Buy" : "Sell") +
+                             " Stop " + lotsTextOf(place.volume.steps, spec) + " lot @ " + priceTextOf(line) +
+                             ") would leave the margin level at about " + pctText(std::max(0.0, level)) + " (guard " +
+                             pctText(rc.guardLockMarginLevel) + ")";
+    cancelPendingLocked();
+    engine_->stopCycle();
+    cooldownActive_ = false;
+    reopenAfterManualClose_ = false;
+    markDirty();
+    if (book.netSteps == 0) {
+        lockNowLocked(what, floatingNetLocked());
+        return true;
+    }
+    OpenLeg lk;
+    lk.id = nextAdoptedId_++;
+    lk.side = book.netSteps > 0 ? OrderSide::SellStop : OrderSide::BuyStop;
+    lk.volume = Volume{book.netSteps > 0 ? book.netSteps : -book.netSteps};
+    lk.price = lk.side == place.side ? place.price
+                                     : (lk.side == OrderSide::SellStop ? range.lowerBound : range.upperBound);
+    lk.requestedPrice = lk.price;
+    if (stopIsMarketable(lk.side, lk.price)) {
+        lockNowLocked(what + "; the price is already past that line", floatingNetLocked());
+        return true;
+    }
+    sendStopOrderLocked(lk, 0);
+    guardLockOrderId_ = lk.id;
+    auditEventLocked(8, 1,
+                     what + " -- not placed. A lock stop " + (lk.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
+                         lotsTextOf(lk.volume.steps, spec) + " lot waits at that line instead" +
+                         (rc.closeAtBreakEven
+                              ? "; if the price turns back first, the basket closes at " + usdText(breakEvenMoneyLocked())
+                              : std::string()));
+    return true;
+}
+
+void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const bool haveQuote = latestBid_ && latestAsk_;
+    if (guardLockOrderId_ != 0 && orderId == guardLockOrderId_) {
+        guardLockOrderId_ = 0;
+        locked_ = true;
+        lockedLoss_ = haveQuote ? floatingNetLocked() : 0.0;
+        lockedAt_ = localTimestamp();
+        setCloseReason("locked by the margin guard");
+        markDirty();
+        auditEventLocked(8, 2,
+                         "the lock stop filled: buys = sells, the loss is frozen at " + usdText(lockedLoss_) +
+                             (config_.connection.recovery.escapeEnabled ? " -- escape orders follow if the margin allows"
+                                                                        : " -- close it when you decide (Close range)"));
+        return;
+    }
+    if (const auto mm = managedMarket_.find(orderId); mm != managedMarket_.end()) {
+        managedMarket_.erase(mm);
+        if (orderId == escape_.relockId) {
+            escape_.relockId = 0;
+            if (haveQuote) lockedLoss_ = floatingNetLocked();
+            auditEventLocked(8, 1, "locked again, frozen at " + usdText(lockedLoss_));
+        }
+        markDirty();
+        return;
+    }
+    if (orderId != 0 && (orderId == escape_.buyStopId || orderId == escape_.sellStopId)) {
+        const bool buy = orderId == escape_.buyStopId;
+        const OrderId other = buy ? escape_.sellStopId : escape_.buyStopId;
+        escape_.buyStopId = escape_.sellStopId = 0;
+        if (other != 0) {
+            if (const auto it = placedOrderInfo_.find(other); it != placedOrderInfo_.end()) {
+                cancelledOrderInfo_.insert({other, it->second});
+                placedOrderInfo_.erase(it);
+                tradeSession_->send(buildOrderCancelRequest("c" + std::to_string(nextCancelReqId_++), std::to_string(other)));
+            }
+        }
+        escape_.legId = orderId;
+        escape_.buy = buy;
+        escape_.trailing = false;
+        for (const auto& leg : openLegs_) {
+            if (leg.id == orderId) escape_.entry = leg.price;
+        }
+        ++escapeTries_;
+        markDirty();
+        auditEventLocked(8, 1,
+                         std::string("escape ") + (buy ? "BUY" : "SELL") + " filled @ " +
+                             priceTextOf(escape_.entry.toDouble(spec)) + " (try " + std::to_string(escapeTries_) + " of " +
+                             std::to_string(config_.connection.recovery.escapeMaxTries) +
+                             ") -- closes at break-even, locks again if the price turns back");
+    }
+}
+
+void LiveRunner::sendManagedMarketLocked(OpenLeg leg, const std::string& what) {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const std::string clOrdId = std::to_string(leg.id);
+    const double lots = leg.volume.toDouble(spec);
+    placedOrderInfo_[leg.id] = leg;
+    orderSentAt_[clOrdId] = std::chrono::steady_clock::now();
+    ManagedMarket m;
+    m.leg = leg;
+    m.what = what;
+    managedMarket_[leg.id] = m;
+    log("[risk] " + what + ": " + (leg.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
+        lotsTextOf(leg.volume.steps, spec) + " lot at market (ClOrdID=" + clOrdId + ")");
+    tradeSession_->send(
+        buildMarketOrderSingle(clOrdId, symbolId_, leg.side == OrderSide::BuyStop ? 1 : 2, lots * kWireQtyPerLot));
+    markDirty();
+}
+
+void LiveRunner::retryManagedMarketLocked() {
+    if (managedMarket_.empty() || !tradeSession_) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<OrderId> due;
+    for (const auto& [id, m] : managedMarket_) {
+        if (m.retryDue && now >= m.retryAt) due.push_back(id);
+    }
+    for (const OrderId id : due) {
+        const ManagedMarket m = managedMarket_.at(id);
+        managedMarket_.erase(id);
+        OpenLeg leg = m.leg;
+        leg.id = nextAdoptedId_++;
+        if (latestBid_ && latestAsk_) {
+            leg.price = leg.requestedPrice =
+                Price::fromDouble(leg.side == OrderSide::BuyStop ? *latestAsk_ : *latestBid_, config_.strategy.symbol);
+        }
+        if (escape_.relockId == id) escape_.relockId = leg.id;
+        sendManagedMarketLocked(leg, m.what);
+        managedMarket_[leg.id].attempts = m.attempts + 1;
+    }
+}
+
+void LiveRunner::maybeGuardLocked() {
+    if (!engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
+    if (openLegs_.empty() || !pendingCloses_.empty()) return;
+    const RecoveryConfig& rc = config_.connection.recovery;
+    const double net = floatingNetLocked();
+    const bool guarded = guardLockOrderId_ != 0 || locked_;
+
+    // Back at break-even while guarded or locked: close it all.
+    if (guarded && rc.closeAtBreakEven && managedMarket_.empty() && net >= breakEvenMoneyLocked()) {
+        auditEventLocked(8, 1,
+                         std::string(locked_ ? "the locked basket" : "the guarded basket") + " is back at " +
+                             usdText(net) + " -- closing everything");
+        // The real end of this basket, whatever was noted on the way.
+        closeReason_ = std::string("break-even: back to ") + usdText(net) +
+                       (locked_ ? " after a lock" : " while the margin guard held the next level");
+        closeRangeLocked(true, closeReason_);
+        return;
+    }
+
+    // Margin level now under the stop guard: lock at market.
+    if (guardsOnLocked() && rc.guardStopMarginLevel > 0.0 && managedMarket_.empty()) {
+        const BookLots book = bookLotsLocked();
+        if (book.netSteps != 0) {
+            const SymbolSpec& spec = config_.strategy.symbol;
+            const double mid = (*latestBid_ + *latestAsk_) / 2.0;
+            const double margin = bookMargin(book.buys, book.sells, mid, spec.contractSize, marginRuleLocked());
+            const double level = marginLevelPercent(equityEstimateLocked(net), margin);
+            if (level < rc.guardStopMarginLevel) {
+                lockNowLocked("the margin level is about " + pctText(std::max(0.0, level)) + " (guard " +
+                                  pctText(rc.guardStopMarginLevel) + ")",
+                              net);
+                return;
+            }
+        }
+    }
+
+    if (locked_ && rc.escapeEnabled) manageEscapeLocked(net);
+}
+
+void LiveRunner::manageEscapeLocked(double net) {
+    const RecoveryConfig& rc = config_.connection.recovery;
+    const SymbolSpec& spec = config_.strategy.symbol;
+    if (escape_.relockId != 0 || !managedMarket_.empty()) return;  // a lock / re-lock is still on its way
+
+    if (escape_.legId != 0) {
+        const OpenLeg* leg = nullptr;
+        for (const auto& l : openLegs_) {
+            if (l.id == escape_.legId) leg = &l;
+        }
+        if (!leg) {  // closed outside the bot
+            escape_.legId = 0;
+            markDirty();
+            return;
+        }
+        const double entry = escape_.entry.toDouble(spec);
+        const double favorable = escape_.buy ? *latestBid_ - entry : entry - *latestAsk_;
+        if (!escape_.trailing && favorable >= rc.escapeTrailAt) {
+            escape_.trailing = true;
+            markDirty();
+            log("[risk] the escape ran " + priceTextOf(favorable) +
+                " -- it now locks again if the price comes back to its entry");
+        }
+        const bool back = escape_.trailing ? favorable <= 0.0
+                                           : (escape_.buy ? *latestBid_ < guardRangeHigh_.toDouble(spec)
+                                                          : *latestAsk_ > guardRangeLow_.toDouble(spec));
+        if (!back) return;
+        OpenLeg relock;
+        relock.id = nextAdoptedId_++;
+        relock.side = escape_.buy ? OrderSide::SellStop : OrderSide::BuyStop;
+        relock.volume = leg->volume;
+        relock.price = relock.requestedPrice =
+            Price::fromDouble(relock.side == OrderSide::BuyStop ? *latestAsk_ : *latestBid_, spec);
+        auditEventLocked(8, 1,
+                         std::string("the escape turned back ") + (escape_.trailing ? "to its entry" : "into the range") +
+                             " -- locking again (" + std::to_string(escapeTries_) + " of " +
+                             std::to_string(rc.escapeMaxTries) + " tries used)");
+        escape_.legId = 0;
+        escape_.trailing = false;
+        escape_.relockId = relock.id;
+        sendManagedMarketLocked(relock, "re-lock");
+        return;
+    }
+    if (escape_.buyStopId != 0 || escape_.sellStopId != 0) return;  // waiting for a breakout
+    if (escapeTries_ >= rc.escapeMaxTries) return;
+    const BookLots book = bookLotsLocked();
+    if (book.netSteps != 0) return;  // not balanced (yet)
+    const double mid = (*latestBid_ + *latestAsk_) / 2.0;
+    if (guardRangeHigh_.ticks <= guardRangeLow_.ticks) {
+        const RangeConfig range = config_.strategy.range;
+        const int64_t half = (range.upperBound.ticks - range.lowerBound.ticks) / 2;
+        const int64_t center = Price::fromDouble(mid, spec).ticks;
+        guardRangeLow_ = Price{center - half};
+        guardRangeHigh_ = Price{center + half};
+        markDirty();
+    }
+    const double equity = equityEstimateLocked(net);
+    muuk::core::ReverseTradeInput in;
+    in.spec = spec;
+    in.costs = config_.strategy.costs;
+    in.margin = marginRuleLocked();
+    in.buyLots = book.buys;
+    in.sellLots = book.sells;
+    in.floating = net;
+    in.equity = equity;
+    in.price = mid;
+    in.spread = *latestAsk_ - *latestBid_;
+    in.move = rc.escapeMove;
+    in.maxLot = config_.strategy.riskLimits.maxLot.toDouble(spec);
+    const muuk::core::ReverseTrade r = muuk::core::reverseTrade(in);
+    const double need = rc.guardLockMarginLevel > 0.0 ? rc.guardLockMarginLevel : 100.0;
+    if (equity < 0.0 || r.capped || r.marginLevelAfter < need) {
+        if (!escapeSkipLogged_) {
+            escapeSkipLogged_ = true;
+            auditEventLocked(8, 1,
+                             "escape needs " + priceTextOf(r.lot) + " lot" +
+                                 (equity < 0.0 ? std::string(" but the balance isn't set (Settings)")
+                                               : (r.capped ? std::string(", above the max lot")
+                                                           : ", margin level would be about " +
+                                                                 pctText(std::max(0.0, r.marginLevelAfter)))) +
+                                 " -- no escape, the basket stays locked");
+        }
+        return;
+    }
+    const Volume volume = Volume::fromDouble(r.lot, spec);
+    const Price buffer = Price::fromDouble(std::max(0.0, rc.escapeBuffer), spec);
+    OpenLeg up;
+    up.id = nextAdoptedId_++;
+    up.side = OrderSide::BuyStop;
+    up.volume = volume;
+    up.price = up.requestedPrice = Price{guardRangeHigh_.ticks + buffer.ticks};
+    OpenLeg down;
+    down.id = nextAdoptedId_++;
+    down.side = OrderSide::SellStop;
+    down.volume = volume;
+    down.price = down.requestedPrice = Price{guardRangeLow_.ticks - buffer.ticks};
+    if (stopIsMarketable(up.side, up.price) || stopIsMarketable(down.side, down.price)) return;  // outside the range now
+    sendStopOrderLocked(up, 0);
+    sendStopOrderLocked(down, 0);
+    escape_.buyStopId = up.id;
+    escape_.sellStopId = down.id;
+    markDirty();
+    auditEventLocked(8, 1,
+                     "escape orders out: Buy Stop @ " + priceTextOf(up.price.toDouble(spec)) + " and Sell Stop @ " +
+                         priceTextOf(down.price.toDouble(spec)) + ", " + lotsTextOf(volume.steps, spec) +
+                         " lot each (a " + priceTextOf(rc.escapeMove) + " run wins the " + usdText(net) +
+                         " back); margin level after about " + pctText(r.marginLevelAfter));
 }
 
 bool LiveRunner::accountFlat() const {
@@ -1294,6 +1751,7 @@ void LiveRunner::centerRangeOnLatestQuote() {
 void LiveRunner::handleCommand(const Command& cmd) {
     markDirty();
     if (const auto* place = std::get_if<PlaceOrderCommand>(&cmd)) {
+        if (guardNextOrderLocked(*place)) return;
         const OpenLeg leg{place->id, place->side, place->volume, place->price, place->price};
         if (stopIsMarketable(place->side, place->price)) {
             // The broker would refuse a Stop the market has already passed:
@@ -1629,6 +2087,7 @@ void LiveRunner::closeRange(bool reopen) {
 }
 
 void LiveRunner::closeRangeLocked(bool reopen, const std::string& reason) {
+    resetRecoveryLocked();
     setCloseReason(reason);
     cancelPendingLocked();
     closePositionsLocked();
@@ -1649,6 +2108,7 @@ void LiveRunner::closeAllPositions() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
     setCloseReason("manual: close all positions");
+    resetRecoveryLocked();
     closePositionsLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
@@ -1660,6 +2120,8 @@ void LiveRunner::cancelAllPendingOrders() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return;
     setCloseReason("manual: cancel all pending");
+    guardLockOrderId_ = 0;
+    escape_.buyStopId = escape_.sellStopId = 0;
     cancelPendingLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
@@ -1788,6 +2250,7 @@ void LiveRunner::maybeFinalizeBasket() {
                 : startsWith("manual")            ? "manual"
                 : startsWith("interrupted")       ? "interrupted"
                 : startsWith("guard")             ? "guard"
+                : startsWith("break-even")        ? "break-even"
                 : startsWith("market")            ? "market pause"
                 : startsWith("risk")              ? "daily limit"
                 : startsWith("locked")            ? "locked"
@@ -2043,6 +2506,18 @@ void LiveRunner::reconcileOnConnectLocked() {
         locked_ = saved->locked && !saved->openLegs.empty();
         lockedLoss_ = saved->lockedLoss;
         lockedAt_ = saved->lockedAt;
+        if (!saved->openLegs.empty()) {
+            guardLockOrderId_ = saved->guardLockOrderId;
+            guardRangeLow_ = Price{saved->guardRangeLowTicks};
+            guardRangeHigh_ = Price{saved->guardRangeHighTicks};
+            escape_.buyStopId = saved->escapeBuyStopId;
+            escape_.sellStopId = saved->escapeSellStopId;
+            escape_.legId = saved->escapeLegId;
+            escape_.buy = saved->escapeBuy;
+            escape_.entry = Price{saved->escapeEntryTicks};
+            escape_.trailing = saved->escapeTrailing;
+            escapeTries_ = saved->escapeTries;
+        }
         ticksProcessed_ += saved->ticksProcessed;
         tickDecisionUs_.carryOver(saved->tickDecisionUs);
         fillReactionUs_.carryOver(saved->fillReactionUs);
@@ -2540,6 +3015,16 @@ PersistedState LiveRunner::buildStateLocked() const {
     s.locked = locked_;
     s.lockedLoss = lockedLoss_;
     s.lockedAt = lockedAt_;
+    s.guardLockOrderId = guardLockOrderId_;
+    s.guardRangeLowTicks = guardRangeLow_.ticks;
+    s.guardRangeHighTicks = guardRangeHigh_.ticks;
+    s.escapeBuyStopId = escape_.buyStopId;
+    s.escapeSellStopId = escape_.sellStopId;
+    s.escapeLegId = escape_.legId;
+    s.escapeBuy = escape_.buy;
+    s.escapeEntryTicks = escape_.entry.ticks;
+    s.escapeTrailing = escape_.trailing;
+    s.escapeTries = escapeTries_;
     s.ticksProcessed = ticksProcessed_;
     s.tickDecisionUs = tickDecisionUs_.totals();
     s.fillReactionUs = fillReactionUs_.totals();
@@ -2901,21 +3386,76 @@ void LiveRunner::auditLocked() {
 
     // 9. Lock & pause.
     {
-        if (locked_ && openLegs_.empty() && pendingCloses_.empty() && placedOrderInfo_.empty()) {
-            locked_ = false;
-            markDirty();
-            log("[risk] the locked basket is closed -- the bot can go on");
+        if ((locked_ || guardLockOrderId_ != 0 || escapeTries_ > 0) && openLegs_.empty() && pendingCloses_.empty() &&
+            placedOrderInfo_.empty() && managedMarket_.empty()) {
+            if (locked_) log("[risk] the locked basket is closed -- the bot can go on");
+            resetRecoveryLocked();
         }
+        // Orders of the guard / escape that the bot no longer has (filled or
+        // cancelled while it was away): settle them.
+        auto known = [&](OrderId id) {
+            return placedOrderInfo_.count(id) > 0 || waitingOrders_.count(id) > 0;
+        };
+        auto isOpenLeg = [&](OrderId id) {
+            return std::any_of(openLegs_.begin(), openLegs_.end(), [&](const OpenLeg& l) { return l.id == id; });
+        };
+        if (guardLockOrderId_ != 0 && !known(guardLockOrderId_) && pendingCloses_.empty()) {
+            if (isOpenLeg(guardLockOrderId_)) {
+                onRecoveryFillLocked(guardLockOrderId_);
+            } else if (!openLegs_.empty() && haveQuote) {
+                guardLockOrderId_ = 0;
+                lockNowLocked("the lock stop order is gone from the broker", live.net);
+            } else {
+                guardLockOrderId_ = 0;
+                markDirty();
+            }
+        }
+        for (OrderId* id : {&escape_.buyStopId, &escape_.sellStopId}) {
+            if (*id != 0 && !known(*id)) {
+                if (isOpenLeg(*id)) {
+                    onRecoveryFillLocked(*id);
+                } else {
+                    *id = 0;
+                    markDirty();
+                }
+            }
+        }
+        retryManagedMarketLocked();
+        maybeGuardLocked();  // also when no quote arrives (e.g. right after a lock filled)
         const double lockAt = config_.connection.lockAtLossMoney;
+        const RecoveryConfig& rc = config_.connection.recovery;
         if (locked_) {
+            std::string how = " (swap is charged every night) -- close it when you decide (Close range)";
+            if (rc.escapeEnabled) {
+                how = escape_.legId != 0 ? " -- escape trade running" + std::string(escape_.trailing ? ", stop at its entry" : "")
+                      : (escape_.buyStopId != 0 || escape_.sellStopId != 0) ? " -- escape orders out"
+                      : escapeTries_ >= rc.escapeMaxTries ? " -- escape tries used up; close it when you decide"
+                                                          : " -- escape waits for margin / a balanced book";
+            }
             set(kAuditLock, 2,
-                "locked since " + lockedAt_.substr(11) + " at " + usd(lockedLoss_) + ", now " + usd(live.net) +
-                    " (swap is charged every night) -- close it when you decide (Close range)",
+                "locked since " + (lockedAt_.size() > 11 ? lockedAt_.substr(11) : lockedAt_) + " at " + usd(lockedLoss_) +
+                    ", now " + usd(live.net) + how,
                 false);
-        } else if (lockAt <= 0.0) {
-            set(kAuditLock, 0, "off", false);
+        } else if (guardLockOrderId_ != 0) {
+            set(kAuditLock, 1,
+                "margin guard: the next level was held back, a lock stop waits at the line; closes at " +
+                    usd(breakEvenMoneyLocked()) + " if the price turns back",
+                false);
+        } else if (lockAt <= 0.0 && !guardsOnLocked()) {
+            set(kAuditLock, 0, "off -- set the balance in Settings for the margin guards", false);
         } else {
-            set(kAuditLock, 0, "locks the basket at -" + usd(lockAt).substr(1), false);
+            std::string text;
+            if (guardsOnLocked()) {
+                text = "margin guards " + pctText(rc.guardLockMarginLevel) + " / " + pctText(rc.guardStopMarginLevel);
+                if (haveQuote && !openLegs_.empty()) {
+                    const BookLots book = bookLotsLocked();
+                    const double mid = (*latestBid_ + *latestAsk_) / 2.0;
+                    const double margin = bookMargin(book.buys, book.sells, mid, spec.contractSize, marginRuleLocked());
+                    if (margin > 0.0) text += ", margin level now " + pctText(marginLevelPercent(equityEstimateLocked(live.net), margin));
+                }
+            }
+            if (lockAt > 0.0) text += std::string(text.empty() ? "" : "; ") + "locks at -" + usd(lockAt).substr(1);
+            set(kAuditLock, 0, text, false);
         }
     }
 }

@@ -27,6 +27,32 @@ FixEndpoint parseEndpoint(const nlohmann::json& j, const std::string& fieldPath)
     return endpoint;
 }
 
+RecoveryConfig recoveryFromJson(const nlohmann::json& j) {
+    RecoveryConfig r;
+    r.guardLockMarginLevel = j.value("guardLockMarginLevel", r.guardLockMarginLevel);
+    r.guardStopMarginLevel = j.value("guardStopMarginLevel", r.guardStopMarginLevel);
+    r.hedgedMarginPercent = std::clamp(j.value("hedgedMarginPercent", r.hedgedMarginPercent), 0.0, 100.0);
+    r.closeAtBreakEven = j.value("closeAtBreakEven", r.closeAtBreakEven);
+    r.escapeEnabled = j.value("escapeEnabled", r.escapeEnabled);
+    r.escapeMove = j.value("escapeMove", r.escapeMove);
+    r.escapeBuffer = j.value("escapeBuffer", r.escapeBuffer);
+    r.escapeTrailAt = j.value("escapeTrailAt", r.escapeTrailAt);
+    r.escapeMaxTries = std::clamp(j.value("escapeMaxTries", r.escapeMaxTries), 0, 10);
+    return r;
+}
+
+nlohmann::json recoveryToJson(const RecoveryConfig& r) {
+    return {{"guardLockMarginLevel", r.guardLockMarginLevel},
+            {"guardStopMarginLevel", r.guardStopMarginLevel},
+            {"hedgedMarginPercent", r.hedgedMarginPercent},
+            {"closeAtBreakEven", r.closeAtBreakEven},
+            {"escapeEnabled", r.escapeEnabled},
+            {"escapeMove", r.escapeMove},
+            {"escapeBuffer", r.escapeBuffer},
+            {"escapeTrailAt", r.escapeTrailAt},
+            {"escapeMaxTries", r.escapeMaxTries}};
+}
+
 }  // namespace
 
 LiveConfig loadLiveConfig(const std::filesystem::path& path) {
@@ -61,6 +87,8 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.lockAtLossMoney = conn.value("lockAtLossMoney", 0.0);
     cfg.connection.accountBalance = conn.value("accountBalance", 0.0);
     cfg.connection.leverage = conn.value("leverage", 500.0);
+    cfg.connection.accountKind = conn.value("accountKind", std::string("standard"));
+    if (conn.contains("recovery")) cfg.connection.recovery = recoveryFromJson(conn.at("recovery"));
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -103,6 +131,8 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.escapeProfit = config.strategy.escapeProfitMoney;
     s.accountBalance = config.connection.accountBalance;
     s.leverage = config.connection.leverage;
+    s.accountKind = config.connection.accountKind;
+    s.recovery = config.connection.recovery;
     s.commissionPerLot = config.strategy.costs.commissionPerLotRoundTurn;
     s.commissionPerMillion = config.strategy.costs.commissionPerMillionPerSide;
     s.autoContinue = config.connection.autoContinue;
@@ -134,6 +164,8 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     config.connection.lockAtLossMoney = s.lockAtLoss;
     config.connection.accountBalance = s.accountBalance;
     config.connection.leverage = s.leverage;
+    config.connection.accountKind = s.accountKind;
+    config.connection.recovery = s.recovery;
     st.escapeFromLevel = s.escapeFromLevel;
     st.escapeProfitMoney = s.escapeProfit;
     st.costs.commissionPerLotRoundTurn = s.commissionPerLot;
@@ -272,6 +304,8 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["lockAtLossMoney"] = s.lockAtLoss;
     conn["accountBalance"] = s.accountBalance;
     conn["leverage"] = s.leverage;
+    conn["accountKind"] = s.accountKind;
+    conn["recovery"] = recoveryToJson(s.recovery);
     j["strategy"]["breakEvenEscape"] = {{"fromLevel", s.escapeFromLevel}, {"profit", s.escapeProfit}};
 
     auto& st = j["strategy"];

@@ -294,6 +294,15 @@ LiveSnapshot LiveController::demoSnapshot() const {
     o.confirmed = true;
     s.pendingOrders.push_back(o);
     s.targetNow = muuk::core::autoTargetMoney(s.live.commission + 2.0 * s.live.spread, 200.0);
+    {
+        double buys = 0.0;
+        double sells = 0.0;
+        for (const auto& p : s.positions) (p.side == OrderSide::BuyStop ? buys : sells) += p.lots;
+        s.equityNow = s.settings.accountBalance + s.live.net;
+        s.marginNow = muuk::core::bookMargin(buys, sells, mid, spec.contractSize,
+                                             muuk::core::MarginRule{s.settings.leverage, 100.0});
+        s.marginLevelNow = muuk::core::marginLevelPercent(s.equityNow, s.marginNow);
+    }
     muuk::ctrader_fix::BasketRecord basket;
     basket.number = 1;
     s.currentBasket = basket;

@@ -469,3 +469,57 @@ What it found and did is listed in the Audit tab and written to the log as
   becomes constant, and hedging at any moment has the same expected result
   as the loss at that moment (price has no memory) -- plus spread,
   commission and nightly swap. It only stops the loss from growing.
+
+## Margin guards, break-even close and escape (`connection.recovery`)
+
+The goal is never to reach a margin call. Margin level = equity / margin in %
+(brokers: margin call at 100 %, stop-out at 50 % or less). FIX sends neither,
+so on cTrader the equity is `accountBalance` + today's booked + floating, and
+the margin uses `leverage` and `hedgedMarginPercent` (100 = larger side only,
+as cTrader charges; MT5 brokers give it per symbol, e.g. RoboForex ProCent
+gold 50). The guards need the balance; without it they are off.
+
+```json
+"recovery": {
+  "guardLockMarginLevel": 300, "guardStopMarginLevel": 200,
+  "hedgedMarginPercent": 100, "closeAtBreakEven": true,
+  "escapeEnabled": false, "escapeMove": 2.0, "escapeBuffer": 0.30,
+  "escapeTrailAt": 1.0, "escapeMaxTries": 2
+}
+```
+
+- **Hold the next level** (`guardLockMarginLevel`): before each next level
+  goes out, the margin level after its fill is worked out (at that line's
+  price). Under the guard, the level is not placed: pending orders are
+  cancelled, the cycle stops, and a **stop order for the net lots** waits at
+  that line -- if the price gets there, buys = sells and the loss is frozen.
+  $1000 at 1:500, $2 range, x2: level 6 would leave about 255 %, so the
+  basket is locked there with 0.11 lot instead.
+- **Break-even close** (`closeAtBreakEven`): while that lock stop waits (or a
+  lock holds), once the net is back at the escape amount
+  (`strategy.breakEvenEscape.profit`, $0.50) everything is closed and the
+  next range opens after `manualCloseCooldownSeconds`. Outcome "break-even".
+- **Lock at once** (`guardStopMarginLevel`): margin level now under it -- lock
+  at market right away.
+- **Retries**: a refused lock / re-lock market order is sent again with a new
+  ClOrdID, 0.5 s apart, up to 5 times; then the Audit says what to open by hand.
+- **Escape** (off by default): from a balanced lock, a Buy Stop above the
+  range and a Sell Stop below it (`escapeBuffer` outside the lines), sized by
+  `muuk::core::reverseTrade` so a run of `escapeMove` wins the frozen loss and
+  the trade's own cost back: q = (|loss| + cost(q)) / (move x 100). Only if the
+  margin level after it stays at or above the hold guard. When one fills the
+  other is cancelled. The basket closes at break-even; if the price comes back
+  into the range -- or to the entry once it ran `escapeTrailAt` -- it is
+  locked again at market. After `escapeMaxTries` it just stays locked. Each
+  failed try costs about (reversal + spread) x lots + commission: it is a
+  bet on a breakout, not a guaranteed recovery.
+- **Why no "micro-harvesting"**: in a lock, closing any equal buy/sell lots
+  books q x (sell entry - buy entry) -- a fixed number -- and the total stays
+  the same; closing unequal lots un-locks the book. So it frees margin only by
+  booking part of the loss.
+- **Reverse trade calculator** (Risk & guards page): for the open positions or
+  any level's worst case -- the side and lots for a lock or for "back to 0 after
+  a move", its cost, and margin / free margin / margin level after it.
+- The state (lock stop, escape orders and trade, tries) is saved with the
+  basket and picked up after a restart; a guard order that vanished is settled
+  by the audit (filled -> locked; gone -> locked at market).
