@@ -46,6 +46,12 @@ struct Mt5StartResult {
 [[nodiscard]] Mt5StartResult startMt5WithBridge(const Mt5StartOptions& options,
                                                 const std::function<void(const std::string&)>& log);
 
+// Closes a running MetaTrader 5 the way its own X button does (it saves its
+// charts), waits for it to exit, then startMt5WithBridge. Never kills it: if
+// it doesn't close within 20 s (e.g. a dialog is open), says so.
+[[nodiscard]] Mt5StartResult restartMt5WithBridge(const Mt5StartOptions& options,
+                                                  const std::function<void(const std::string&)>& log);
+
 // The MuukBridge.mq5 source built into this program.
 [[nodiscard]] std::string bridgeEaSource();
 

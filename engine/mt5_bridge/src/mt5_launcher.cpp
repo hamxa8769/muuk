@@ -289,4 +289,48 @@ Mt5StartResult startMt5WithBridge(const Mt5StartOptions& o, const std::function<
     return r;
 }
 
+Mt5StartResult restartMt5WithBridge(const Mt5StartOptions& o, const std::function<void(const std::string&)>& log) {
+    fs::path terminal = o.terminal;
+    if (terminal.empty()) {
+        const auto installs = findMt5Installs();
+        if (!installs.empty()) terminal = installs.front().terminal;
+    }
+#ifdef _WIN32
+    if (!terminal.empty() && isMt5Running(terminal)) {
+        if (log) log("[mt5] closing MetaTrader 5 to start it again with the bridge");
+        const std::wstring want = normalized(terminal);
+        struct Ctx {
+            std::wstring want;
+        } ctx{want};
+        EnumWindows(
+            [](HWND hwnd, LPARAM lp) -> BOOL {
+                const auto* c = reinterpret_cast<const Ctx*>(lp);
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
+                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if (!h) return TRUE;
+                wchar_t path[MAX_PATH * 2];
+                DWORD size = static_cast<DWORD>(std::size(path));
+                const bool match = QueryFullProcessImageNameW(h, 0, path, &size) && normalized(fs::path(path)) == c->want;
+                CloseHandle(h);
+                if (match) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&ctx));
+        for (int i = 0; i < 100 && isMt5Running(terminal); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (isMt5Running(terminal)) {
+            Mt5StartResult r;
+            r.alreadyRunning = true;
+            r.message = "MetaTrader 5 didn't close (a dialog open?) -- close it yourself, then press Connect.";
+            if (log) log("[mt5] " + r.message);
+            return r;
+        }
+    }
+#endif
+    Mt5StartOptions again = o;
+    again.terminal = terminal;
+    return startMt5WithBridge(again, log);
+}
+
 }  // namespace muuk::mt5_bridge

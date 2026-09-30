@@ -67,8 +67,12 @@ public:
     // What starting MetaTrader 5 did ("" = nothing yet), and whether it's still busy (compiling / launching).
     [[nodiscard]] std::string mt5StartMessage() const;
     [[nodiscard]] bool mt5Starting() const { return mt5Starting_.load(); }
-    // Starts MT5 with the bridge now (the Connect button does it by itself).
-    void startMt5(const std::string& configPath);
+    // Starts MT5 with the bridge now, without trading yet (the app does it by
+    // itself when an MT5 config is opened, and Connect does it too), so the
+    // logged-in account shows up. restart: close a running MT5 first.
+    void startMt5(const std::string& configPath, bool restart = false);
+    // MT5 was open already but its bridge never connected.
+    [[nodiscard]] bool mt5OpenWithoutBridge() const;
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
@@ -179,7 +183,9 @@ private:
     int bridgeFixPort_ = 0;
     // Starts (or keeps) the bridge for an MT5 config; false (with the error set) if it can't listen.
     bool ensureBridge(const muuk::ctrader_fix::LiveConfig& config);
-    void launchMt5(const muuk::ctrader_fix::LiveConfig& config);
+    void launchMt5(const muuk::ctrader_fix::LiveConfig& config, bool restart = false);
+    std::atomic<bool> mt5WasAlreadyRunning_{false};
+    std::chrono::steady_clock::time_point mt5LaunchAt_{};
     std::thread mt5Thread_;
     std::atomic<bool> mt5Starting_{false};
     bool mt5LaunchedThisStart_ = false;

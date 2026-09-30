@@ -40,8 +40,9 @@ LiveController::~LiveController() {
     if (bridge_) bridge_->stop();
 }
 
-void LiveController::launchMt5(const LiveConfig& config) {
+void LiveController::launchMt5(const LiveConfig& config, bool restart) {
     if (mt5Starting_.exchange(true)) return;
+    mt5LaunchAt_ = std::chrono::steady_clock::now();
     if (mt5Thread_.joinable()) mt5Thread_.join();
     muuk::mt5_bridge::Mt5StartOptions o;
     o.terminal = config.connection.mt5Terminal;
@@ -54,8 +55,11 @@ void LiveController::launchMt5(const LiveConfig& config) {
         std::scoped_lock lock(mt5Mutex_);
         mt5Message_ = "Starting MetaTrader 5...";
     }
-    mt5Thread_ = std::thread([this, o] {
-        const auto r = muuk::mt5_bridge::startMt5WithBridge(o, [this](const std::string& line) { appendLog(line); });
+    mt5Thread_ = std::thread([this, o, restart] {
+        auto logLine = [this](const std::string& line) { appendLog(line); };
+        const auto r = restart ? muuk::mt5_bridge::restartMt5WithBridge(o, logLine)
+                               : muuk::mt5_bridge::startMt5WithBridge(o, logLine);
+        mt5WasAlreadyRunning_ = r.alreadyRunning;
         {
             std::scoped_lock lock(mt5Mutex_);
             mt5Message_ = r.message;
@@ -65,12 +69,18 @@ void LiveController::launchMt5(const LiveConfig& config) {
     });
 }
 
-void LiveController::startMt5(const std::string& configPath) {
+bool LiveController::mt5OpenWithoutBridge() const {
+    return mt5WasAlreadyRunning_.load() && !mt5Starting_.load() && bridge_ && !bridge_->status().connected &&
+           std::chrono::steady_clock::now() - mt5LaunchAt_ > std::chrono::seconds(4);
+}
+
+void LiveController::startMt5(const std::string& configPath, bool restart) {
     try {
         const LiveConfig config = muuk::ctrader_fix::loadLiveConfig(configPath);
         if (!config.connection.isMt5()) return;
         if (!ensureBridge(config)) return;
-        launchMt5(config);
+        if (bridge_->status().connected && !restart) return;  // already there
+        launchMt5(config, restart);
     } catch (const std::exception& ex) {
         setError(ex.what());
     }

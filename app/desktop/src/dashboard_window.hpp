@@ -243,6 +243,10 @@ private:
     };
     std::vector<muuk::mt5_bridge::Mt5Install> mt5Installs_;
     bool mt5InstallsScanned_ = false;
+    std::string mt5PreparedFor_;           // config MT5 was started for (once per file)
+    LiveController* controller_ = nullptr;  // this frame's controller (set in render)
+    // Writes the account form to the config file right away (MT5 needs no login to fill in).
+    void saveAccountNow();
     int bridgeEaPortHint_ = 5200;
     void renderMt5AccountFields();
     AccountForm account_;
