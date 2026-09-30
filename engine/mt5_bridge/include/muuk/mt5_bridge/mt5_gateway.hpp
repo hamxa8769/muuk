@@ -20,7 +20,7 @@ namespace muuk::mt5_bridge {
 // Where the gateway listens. Both on this PC only (127.0.0.1).
 struct GatewayConfig {
     std::string bindAddress = "127.0.0.1";
-    uint16_t eaPort = 5200;   // MuukBridge.mq5 (inside MetaTrader 5) connects here
+    std::string pipeName = "MuukBridge_5200";  // MuukBridge.mq5 (inside MetaTrader 5) connects to \.\pipe\<this>
     uint16_t fixPort = 5201;  // LiveRunner connects here, both sessions (0 = any free port, for tests)
 };
 
@@ -57,8 +57,10 @@ struct EaStatus {
 };
 
 // The MT5 bridge. MuukBridge.mq5 runs inside MetaTrader 5 and talks to this
-// gateway over a local socket in JSON lines (MQL5 sockets can only connect
-// out, so the gateway listens). The gateway in turn speaks the same small
+// gateway over a Windows named pipe in JSON lines: every ~25 ms it sends a
+// frame with what happened and reads back the commands waiting for it (a
+// pipe needs no MT5 permission; a socket would need 127.0.0.1 in its
+// WebRequest list). The gateway in turn speaks the same small
 // part of FIX that cTrader does -- Logon, security list, quotes, stop and
 // market orders, cancels, execution reports, position and order lists -- so
 // LiveRunner connects to 127.0.0.1:fixPort exactly as it would to cTrader,
@@ -93,7 +95,7 @@ public:
     void start();
     void stop();
 
-    [[nodiscard]] uint16_t eaPort() const { return eaPort_; }
+    [[nodiscard]] const std::string& pipeName() const { return config_.pipeName; }
     [[nodiscard]] uint16_t fixPort() const { return fixPort_; }
     [[nodiscard]] EaStatus status() const;
 
@@ -119,8 +121,11 @@ private:
         double stopPx = 0.0;
     };
 
-    void eaAcceptLoop();
-    void eaReadLoop(std::shared_ptr<asio::ip::tcp::socket> socket);
+    void eaPipeLoop();
+#ifdef _WIN32
+    [[nodiscard]] std::wstring pipePath() const;
+    [[nodiscard]] void* createPipe() const;  // a HANDLE, nullptr on failure
+#endif
     void onEaLine(const std::string& line);
     bool sendEa(const nlohmann::json& cmd);
 
@@ -146,19 +151,17 @@ private:
     GatewayConfig config_;
     LogHandler log_;
     asio::io_context io_;
-    std::unique_ptr<asio::ip::tcp::acceptor> eaAcceptor_;
     std::unique_ptr<asio::ip::tcp::acceptor> fixAcceptor_;
-    uint16_t eaPort_ = 0;
     uint16_t fixPort_ = 0;
-    std::thread eaAcceptThread_;
+    void* firstPipe_ = nullptr;  // created in start(), handed to the pipe thread
+    std::thread eaThread_;
+    std::atomic<bool> eaThreadDone_{false};
     std::thread fixAcceptThread_;
     std::atomic<bool> running_{false};
 
     mutable std::mutex mutex_;  // everything below
     EaStatus status_;
-    std::shared_ptr<asio::ip::tcp::socket> eaSocket_;
-    std::vector<std::thread> eaReaders_;
-    std::mutex eaWriteMutex_;
+    std::vector<std::string> outbox_;  // commands for the EA's next poll
     std::vector<FixConnPtr> fixConns_;
     FixConnPtr tradeConn_;
     FixConnPtr quoteConn_;

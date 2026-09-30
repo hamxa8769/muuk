@@ -234,7 +234,15 @@ private:
         int platform = 0;  // 0 cTrader FIX, 1 MetaTrader 5 bridge
         int mt5EaPort = 5200;
         int mt5FixPort = 5201;
+        bool mt5AutoStart = true;
+        std::array<char, 260> mt5Terminal{};
+        std::array<char, 32> mt5Login{};
+        std::array<char, 128> mt5Password{};  // write-only
+        std::array<char, 96> mt5Server{};
+        std::array<char, 32> mt5ChartSymbol{};
     };
+    std::vector<muuk::mt5_bridge::Mt5Install> mt5Installs_;
+    bool mt5InstallsScanned_ = false;
     int bridgeEaPortHint_ = 5200;
     void renderMt5AccountFields();
     AccountForm account_;

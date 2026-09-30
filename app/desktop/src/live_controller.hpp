@@ -18,6 +18,7 @@
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/news_feed.hpp"
 #include "muuk/mt5_bridge/mt5_gateway.hpp"
+#include "muuk/mt5_bridge/mt5_launcher.hpp"
 
 namespace muuk::desktop {
 
@@ -63,6 +64,11 @@ public:
     // with the first connect and kept up across reconnects, so the EA in MT5
     // stays connected. nullopt when no bridge is running.
     [[nodiscard]] std::optional<muuk::mt5_bridge::EaStatus> bridgeStatus() const;
+    // What starting MetaTrader 5 did ("" = nothing yet), and whether it's still busy (compiling / launching).
+    [[nodiscard]] std::string mt5StartMessage() const;
+    [[nodiscard]] bool mt5Starting() const { return mt5Starting_.load(); }
+    // Starts MT5 with the bridge now (the Connect button does it by itself).
+    void startMt5(const std::string& configPath);
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
@@ -173,6 +179,12 @@ private:
     int bridgeFixPort_ = 0;
     // Starts (or keeps) the bridge for an MT5 config; false (with the error set) if it can't listen.
     bool ensureBridge(const muuk::ctrader_fix::LiveConfig& config);
+    void launchMt5(const muuk::ctrader_fix::LiveConfig& config);
+    std::thread mt5Thread_;
+    std::atomic<bool> mt5Starting_{false};
+    bool mt5LaunchedThisStart_ = false;
+    mutable std::mutex mt5Mutex_;
+    std::string mt5Message_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     // One bot per config (see InstanceLock): held from start() to stop(),

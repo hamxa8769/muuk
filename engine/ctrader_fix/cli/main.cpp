@@ -19,6 +19,7 @@
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/live_state.hpp"
 #include "muuk/mt5_bridge/mt5_gateway.hpp"
+#include "muuk/mt5_bridge/mt5_launcher.hpp"
 
 namespace {
 muuk::ctrader_fix::LiveRunner* g_runner = nullptr;
@@ -122,11 +123,22 @@ int main(int argc, char** argv) {
         if (config.connection.isMt5()) {
             // MetaTrader 5: the bridge stays up for the whole run, across reconnects.
             muuk::mt5_bridge::GatewayConfig gc;
-            gc.eaPort = static_cast<uint16_t>(config.connection.mt5EaPort);
+            gc.pipeName = "MuukBridge_" + std::to_string(config.connection.mt5EaPort);
             gc.fixPort = static_cast<uint16_t>(config.connection.mt5FixPort);
             bridge = std::make_unique<muuk::mt5_bridge::Mt5Gateway>(
                 gc, [](const std::string& line) { std::cerr << line << "\n"; });
             bridge->start();
+            if (config.connection.mt5AutoStart) {
+                muuk::mt5_bridge::Mt5StartOptions o;
+                o.terminal = config.connection.mt5Terminal;
+                o.login = config.connection.mt5Login;
+                o.password = config.connection.mt5Password;
+                o.server = config.connection.mt5Server;
+                o.chartSymbol = config.connection.mt5ChartSymbol;
+                o.pipeName = gc.pipeName;
+                const auto r = muuk::mt5_bridge::startMt5WithBridge(o, [](const std::string& l) { std::cerr << l << "\n"; });
+                if (!r.started && !r.alreadyRunning) std::cerr << "[mt5] " << r.message << "\n";
+            }
         }
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << "\n";

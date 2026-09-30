@@ -27,6 +27,12 @@ FixEndpoint parseEndpoint(const nlohmann::json& j, const std::string& fieldPath)
     return endpoint;
 }
 
+std::string jsonStr(const nlohmann::json& j, const char* key) {
+    if (!j.contains(key)) return {};
+    const auto& v = j.at(key);
+    return v.is_string() ? v.get<std::string>() : v.dump();  // an account number may be written as a number
+}
+
 RecoveryConfig recoveryFromJson(const nlohmann::json& j) {
     RecoveryConfig r;
     r.guardLockMarginLevel = j.value("guardLockMarginLevel", r.guardLockMarginLevel);
@@ -68,8 +74,15 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     const auto& conn = j.at("connection");
     cfg.connection.platform = conn.value("platform", std::string("ctrader"));
     if (conn.contains("mt5")) {
-        cfg.connection.mt5EaPort = conn.at("mt5").value("eaPort", 5200);
-        cfg.connection.mt5FixPort = conn.at("mt5").value("fixPort", 5201);
+        const auto& m = conn.at("mt5");
+        cfg.connection.mt5EaPort = m.value("eaPort", 5200);
+        cfg.connection.mt5FixPort = m.value("fixPort", 5201);
+        cfg.connection.mt5AutoStart = m.value("autoStart", true);
+        cfg.connection.mt5Terminal = m.value("terminal", std::string());
+        cfg.connection.mt5Login = jsonStr(m, "login");
+        cfg.connection.mt5Password = m.value("password", std::string());
+        cfg.connection.mt5Server = m.value("server", std::string());
+        cfg.connection.mt5ChartSymbol = m.value("chartSymbol", std::string("XAUUSD"));
     }
     const bool mt5 = cfg.connection.isMt5();
     if (mt5) {
@@ -257,8 +270,14 @@ AccountSettings accountFromConfigFile(const std::filesystem::path& path) {
     a.symbolId = jsonString(c, "symbolId");
     a.platform = c.value("platform", std::string("ctrader"));
     if (c.contains("mt5")) {
-        a.mt5EaPort = c.at("mt5").value("eaPort", 5200);
-        a.mt5FixPort = c.at("mt5").value("fixPort", 5201);
+        const auto& m = c.at("mt5");
+        a.mt5EaPort = m.value("eaPort", 5200);
+        a.mt5FixPort = m.value("fixPort", 5201);
+        a.mt5AutoStart = m.value("autoStart", true);
+        a.mt5Terminal = m.value("terminal", std::string());
+        a.mt5Login = jsonString(m, "login");
+        a.mt5Server = m.value("server", std::string());
+        a.mt5ChartSymbol = m.value("chartSymbol", std::string("XAUUSD"));
     }
     return a;  // password deliberately left empty
 }
@@ -282,7 +301,15 @@ void saveAccountSettings(const std::filesystem::path& path, const AccountSetting
         nlohmann::json j = readJsonFile(copyFrom ? *copyFrom : path);
         auto& c = j["connection"];
         c["platform"] = "mt5";
-        c["mt5"] = {{"eaPort", a.mt5EaPort}, {"fixPort", a.mt5FixPort}};
+        const std::string oldPassword =
+            !copyFrom && c.contains("mt5") && c.at("mt5").contains("password") && c.at("mt5").at("password").is_string()
+                ? c.at("mt5").at("password").get<std::string>()
+                : std::string();
+        c["mt5"] = {{"eaPort", a.mt5EaPort},       {"fixPort", a.mt5FixPort}, {"autoStart", a.mt5AutoStart},
+                    {"terminal", a.mt5Terminal},   {"login", a.mt5Login},     {"server", a.mt5Server},
+                    {"chartSymbol", a.mt5ChartSymbol.empty() ? std::string("XAUUSD") : a.mt5ChartSymbol}};
+        const std::string password = !a.mt5Password.empty() ? a.mt5Password : oldPassword;
+        if (!password.empty()) c["mt5"]["password"] = password;
         c["environment"] = a.environment;
         c["traderLogin"] = a.traderLogin;  // the MT5 account number (only a label here)
         c["symbolName"] = a.symbolName;

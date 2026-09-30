@@ -786,10 +786,16 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
                                   bridge->currency.c_str(), bridge->leverage, bridge->hedging ? ", hedging" : ", NETTING (not usable)",
                                   bridge->symbol.c_str(), bridge->volumeMin, bridge->balance, bridge->equity, bridge->margin);
         } else {
-            glass::pill("MT5: EA not connected", kRed, true);
-            ImGui::SetItemTooltip("Open MetaTrader 5, attach MuukBridge to the gold chart and allow algo trading "
-                                  "(see docs/mt5.md). The bridge waits on port %d.",
-                                  bridgeEaPortHint_);
+            const std::string msg = controller.mt5StartMessage();
+            glass::pill(controller.mt5Starting() ? "MT5: starting..." : "MT5: not connected",
+                        controller.mt5Starting() ? kAmber : kRed, true);
+            ImGui::SetItemTooltip("%s", msg.empty() ? "Press Connect: Muuk starts MetaTrader 5 with its bridge."
+                                                    : msg.c_str());
+            if (!controller.mt5Starting() && running) {
+                ImGui::SameLine(0.0f, 6.0f);
+                if (glass::button("Start MT5", kBlue)) controller.startMt5(configPathBuffer_.data());
+                ImGui::SetItemTooltip("Starts MetaTrader 5 (minimized) with the bridge on a chart.");
+            }
         }
         ImGui::SameLine(0.0f, 10.0f);
     }
@@ -2618,6 +2624,11 @@ void DashboardWindow::loadAccountForm(const std::string& configPath) {
         f.platform = a.platform == "mt5" ? 1 : 0;
         f.mt5EaPort = a.mt5EaPort;
         f.mt5FixPort = a.mt5FixPort;
+        f.mt5AutoStart = a.mt5AutoStart;
+        copyTo(f.mt5Terminal, a.mt5Terminal);
+        copyTo(f.mt5Login, a.mt5Login);
+        copyTo(f.mt5Server, a.mt5Server);
+        copyTo(f.mt5ChartSymbol, a.mt5ChartSymbol.empty() ? std::string("XAUUSD") : a.mt5ChartSymbol);
         bridgeEaPortHint_ = a.mt5EaPort;
         f.loaded = true;
     } catch (const std::exception&) {
@@ -2642,15 +2653,25 @@ muuk::ctrader_fix::AccountSettings DashboardWindow::accountFromForm() const {
     a.platform = account_.platform == 1 ? "mt5" : "ctrader";
     a.mt5EaPort = account_.mt5EaPort;
     a.mt5FixPort = account_.mt5FixPort;
+    a.mt5AutoStart = account_.mt5AutoStart;
+    a.mt5Terminal = account_.mt5Terminal.data();
+    a.mt5Login = account_.mt5Login.data();
+    a.mt5Password = account_.mt5Password.data();
+    a.mt5Server = account_.mt5Server.data();
+    a.mt5ChartSymbol = account_.mt5ChartSymbol.data();
     return a;
 }
 
 void DashboardWindow::renderMt5AccountFields() {
     ImGui::PushStyleColor(ImGuiCol_Text, glass::palette().textDim);
-    ImGui::TextWrapped("MetaTrader 5 through the Muuk bridge: MuukBridge (tools/mt5) runs in MT5 on this PC and "
-                       "connects to the app -- no FIX login. Use a HEDGING account. Cent accounts work: amounts are "
-                       "then in US cents. Setup: docs/mt5.md.");
+    ImGui::TextWrapped("MetaTrader 5: Muuk starts MT5 itself (minimized), logs in, and runs its bridge there -- "
+                       "nothing to set up in MT5. Everything is controlled from here, like cTrader. Use a HEDGING "
+                       "account; cent accounts work (amounts in US cents).");
     ImGui::PopStyleColor();
+    if (!mt5InstallsScanned_) {
+        mt5Installs_ = muuk::mt5_bridge::findMt5Installs();
+        mt5InstallsScanned_ = true;
+    }
     if (ImGui::BeginTable("account_mt5", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -2669,14 +2690,50 @@ void DashboardWindow::renderMt5AccountFields() {
             account_.live = env == 1;
             accountDirty_ = true;
         }
-        row("MT5 account number", "Only a label here (the EA reports the real one).");
-        if (ImGui::InputText("##login5", account_.traderLogin.data(), account_.traderLogin.size(),
+        row("MetaTrader 5", "Which MT5 on this PC (each broker installs its own). Muuk starts it.");
+        {
+            std::string current = account_.mt5Terminal.data();
+            std::string preview = current.empty() ? (mt5Installs_.empty() ? std::string("none found -- install your broker's MT5")
+                                                                          : "auto: " + mt5Installs_.front().label)
+                                                  : current;
+            if (ImGui::BeginCombo("##mt5term", preview.c_str())) {
+                if (ImGui::Selectable("auto (the first one found)", current.empty())) {
+                    account_.mt5Terminal[0] = '\0';
+                    accountDirty_ = true;
+                }
+                for (const auto& i : mt5Installs_) {
+                    const std::string label = i.label + (i.dataDir.empty() ? "  (never opened)" : "") + "##" + i.terminal.string();
+                    if (ImGui::Selectable(label.c_str(), current == i.terminal.string())) {
+                        copyTo(account_.mt5Terminal, i.terminal.string());
+                        accountDirty_ = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        row("Login (account number)", "The MT5 account to log in to. Empty = the account MT5 used last.");
+        if (ImGui::InputText("##mt5login", account_.mt5Login.data(), account_.mt5Login.size(),
                              ImGuiInputTextFlags_CharsDecimal)) {
+            copyTo(account_.traderLogin, std::string(account_.mt5Login.data()));
             accountDirty_ = true;
         }
-        row("Symbol", "Keep XAUUSD -- the bridge maps it to the chart's symbol (XAUUSDc, XAUUSD.m, ...).");
-        if (ImGui::InputText("##sym5", account_.symbolName.data(), account_.symbolName.size())) accountDirty_ = true;
-        row("EA port", "MuukBridge's BridgePort input must be the same (default 5200).");
+        row("Password", "The MT5 trading password. Never shown; leave empty to keep the saved one. Handed to MT5 "
+                        "only in its startup file, which is deleted again.");
+        if (ImGui::InputTextWithHint("##mt5pass", "unchanged (leave empty to keep)", account_.mt5Password.data(),
+                                     account_.mt5Password.size(), ImGuiInputTextFlags_Password)) {
+            accountDirty_ = true;
+        }
+        row("Server", "As in MT5's login window, e.g. JustMarkets-Demo or RoboForex-ProCent.");
+        if (ImGui::InputText("##mt5server", account_.mt5Server.data(), account_.mt5Server.size())) accountDirty_ = true;
+        row("Chart for the bridge", "The chart MT5 opens with the bridge on it. The bridge trades the account's gold "
+                                   "symbol whatever it's called (XAUUSD, XAUUSDc, GOLD).");
+        if (ImGui::InputText("##mt5chart", account_.mt5ChartSymbol.data(), account_.mt5ChartSymbol.size())) {
+            accountDirty_ = true;
+        }
+        row("Start MT5 automatically", "On Connect, Muuk starts MT5 (minimized) with the bridge if it isn't running.");
+        if (ImGui::Checkbox("##mt5auto", &account_.mt5AutoStart)) accountDirty_ = true;
+        row("Bridge number", "Names the local pipe between Muuk and MT5 (MuukBridge_<number>); only change it to "
+                             "run two MT5 bots on one PC (default 5200).");
         if (ImGui::InputInt("##eaport", &account_.mt5EaPort, 0)) accountDirty_ = true;
         row("Bot port", "Local port between the bot and the bridge (default 5201).");
         if (ImGui::InputInt("##fixport", &account_.mt5FixPort, 0)) accountDirty_ = true;

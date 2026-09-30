@@ -60,8 +60,17 @@ struct LiveConnectionConfig {
     // to the bridge on 127.0.0.1:mt5FixPort (quote/trade are set to that).
     // No FIX login is needed; traderLogin may hold the MT5 account number.
     std::string platform = "ctrader";
-    int mt5EaPort = 5200;
+    int mt5EaPort = 5200;   // the bridge's pipe is \\.\pipe\MuukBridge_<this>
     int mt5FixPort = 5201;
+    // MT5 is started by Muuk with the bridge on a chart (mt5AutoStart): which
+    // terminal (empty = the first installed), and optionally the account to
+    // log in to -- empty login = the account MT5 last used.
+    bool mt5AutoStart = true;
+    std::string mt5Terminal;
+    std::string mt5Login;
+    std::string mt5Password;
+    std::string mt5Server;
+    std::string mt5ChartSymbol = "XAUUSD";
     [[nodiscard]] bool isMt5() const { return platform == "mt5"; }
 
     FixEndpoint quote;  // "Price connection" in cTrader's settings screen
@@ -218,6 +227,12 @@ struct AccountSettings {
     std::string platform = "ctrader";  // or "mt5" (see LiveConnectionConfig::platform)
     int mt5EaPort = 5200;
     int mt5FixPort = 5201;
+    bool mt5AutoStart = true;
+    std::string mt5Terminal;
+    std::string mt5Login;
+    std::string mt5Password;  // write-only like `password`: empty keeps the saved one
+    std::string mt5Server;
+    std::string mt5ChartSymbol = "XAUUSD";
 
     // cTrader shows the SenderCompID as "<environment>.<brokerUid>.<login>".
     [[nodiscard]] std::string senderCompId() const { return environment + "." + brokerUid + "." + traderLogin; }

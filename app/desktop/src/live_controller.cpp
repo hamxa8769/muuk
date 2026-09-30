@@ -36,7 +36,49 @@ std::string timestampPrefix() {
 LiveController::~LiveController() {
     stop();
     if (news_) news_->stop();
+    if (mt5Thread_.joinable()) mt5Thread_.join();
     if (bridge_) bridge_->stop();
+}
+
+void LiveController::launchMt5(const LiveConfig& config) {
+    if (mt5Starting_.exchange(true)) return;
+    if (mt5Thread_.joinable()) mt5Thread_.join();
+    muuk::mt5_bridge::Mt5StartOptions o;
+    o.terminal = config.connection.mt5Terminal;
+    o.login = config.connection.mt5Login;
+    o.password = config.connection.mt5Password;
+    o.server = config.connection.mt5Server;
+    o.chartSymbol = config.connection.mt5ChartSymbol;
+    o.pipeName = "MuukBridge_" + std::to_string(config.connection.mt5EaPort);
+    {
+        std::scoped_lock lock(mt5Mutex_);
+        mt5Message_ = "Starting MetaTrader 5...";
+    }
+    mt5Thread_ = std::thread([this, o] {
+        const auto r = muuk::mt5_bridge::startMt5WithBridge(o, [this](const std::string& line) { appendLog(line); });
+        {
+            std::scoped_lock lock(mt5Mutex_);
+            mt5Message_ = r.message;
+        }
+        if (!r.started && !r.alreadyRunning) appendLog("[mt5] " + r.message);
+        mt5Starting_ = false;
+    });
+}
+
+void LiveController::startMt5(const std::string& configPath) {
+    try {
+        const LiveConfig config = muuk::ctrader_fix::loadLiveConfig(configPath);
+        if (!config.connection.isMt5()) return;
+        if (!ensureBridge(config)) return;
+        launchMt5(config);
+    } catch (const std::exception& ex) {
+        setError(ex.what());
+    }
+}
+
+std::string LiveController::mt5StartMessage() const {
+    std::scoped_lock lock(mt5Mutex_);
+    return mt5Message_;
 }
 
 bool LiveController::ensureBridge(const LiveConfig& config) {
@@ -46,7 +88,7 @@ bool LiveController::ensureBridge(const LiveConfig& config) {
     }
     if (bridge_) bridge_->stop();
     muuk::mt5_bridge::GatewayConfig gc;
-    gc.eaPort = static_cast<uint16_t>(config.connection.mt5EaPort);
+    gc.pipeName = "MuukBridge_" + std::to_string(config.connection.mt5EaPort);
     gc.fixPort = static_cast<uint16_t>(config.connection.mt5FixPort);
     bridge_ = std::make_unique<muuk::mt5_bridge::Mt5Gateway>(gc, [this](const std::string& line) { appendLog(line); });
     try {
@@ -82,6 +124,7 @@ void LiveController::start(const std::string& configPath) {
     wantConnected_ = true;
     consecutiveFailures_ = 0;
     reconnectScheduled_ = false;
+    mt5LaunchedThisStart_ = false;
     if (!startRunner(configPath)) {
         wantConnected_ = false;  // bad config: nothing to retry
         instanceLock_.release();
@@ -106,6 +149,12 @@ bool LiveController::startRunner(const std::string& configPath) {
     }
 
     if (!ensureBridge(config)) return false;
+    // MetaTrader 5 isn't connected: start it with the bridge (once per Connect).
+    if (config.connection.isMt5() && config.connection.mt5AutoStart && !mt5LaunchedThisStart_ && bridge_ &&
+        !bridge_->status().connected) {
+        mt5LaunchedThisStart_ = true;
+        launchMt5(config);
+    }
     attachData(configPath);
     appendLog("---- connecting (" + configPath + ") ----");
     configPath_ = configPath;
@@ -156,6 +205,11 @@ void LiveController::tick() {
         }
     }
     if (reconnectScheduled_ && (!wantConnected_ || !autoReconnect_)) reconnectScheduled_ = false;
+    // MetaTrader 5 has just come up: connect now rather than after the back-off.
+    if (reconnectScheduled_ && bridge_ && bridge_->status().ready && now + std::chrono::seconds(1) < reconnectAt_) {
+        reconnectAt_ = now;
+        consecutiveFailures_ = 0;
+    }
     if (reconnectScheduled_ && !running_ && now >= reconnectAt_) {
         reconnectScheduled_ = false;
         ++reconnects_;

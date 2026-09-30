@@ -1,9 +1,18 @@
 {
   "connection": {
     "platform": "mt5",
-    "mt5": { "eaPort": 5200, "fixPort": 5201 },
+    "mt5": {
+      "eaPort": 5200,
+      "fixPort": 5201,
+      "autoStart": true,
+      "terminal": "",
+      "login": "YOUR_MT5_ACCOUNT_NUMBER",
+      "server": "YOUR_BROKER-Demo",
+      "chartSymbol": "XAUUSD",
+      "password": "YOUR_MT5_PASSWORD_OR_LEAVE_EMPTY_TO_USE_THE_ACCOUNT_MT5_LAST_USED"
+    },
     "environment": "demo",
-    "traderLogin": "YOUR_MT5_ACCOUNT_NUMBER_JUST_A_LABEL",
+    "traderLogin": "YOUR_MT5_ACCOUNT_NUMBER",
     "symbolName": "XAUUSD",
     "autoRangeWidthPoints": 2.0,
     "accountKind": "cent",
@@ -14,7 +23,7 @@
       "closeAtBreakEven": true,
       "escapeEnabled": false,
       "escapeMove": 2.0,
-      "escapeBuffer": 0.30,
+      "escapeBuffer": 0.3,
       "escapeTrailAt": 1.0,
       "escapeMaxTries": 2
     }
@@ -30,8 +39,15 @@
       "volumeMin": 0.01,
       "volumeMax": 1000.0
     },
-    "range": { "lower": 4336.00, "upper": 4338.00 },
-    "lotProgression": { "initialLot": 0.01, "lotIncrement": 0.01, "lotMultiplier": 2.0 },
+    "range": {
+      "lower": 4336.0,
+      "upper": 4338.0
+    },
+    "lotProgression": {
+      "initialLot": 0.01,
+      "lotIncrement": 0.01,
+      "lotMultiplier": 2.0
+    },
     "riskLimits": {
       "maxOrders": 20,
       "maxLot": 50.0,
@@ -41,10 +57,19 @@
       "maxSpreadTicks": 60,
       "maxSlippageTicks": 0
     },
-    "costs": { "commissionPerLotRoundTurn": 0.0, "commissionPerMillionPerSide": 0.0 },
+    "costs": {
+      "commissionPerLotRoundTurn": 0.0,
+      "commissionPerMillionPerSide": 0.0
+    },
     "basketProfitTargetMoney": 20.0,
-    "autoProfitTarget": { "enabled": true, "percent": 200 },
-    "breakEvenEscape": { "fromLevel": 5, "profit": 0.5 },
+    "autoProfitTarget": {
+      "enabled": true,
+      "percent": 200
+    },
+    "breakEvenEscape": {
+      "fromLevel": 5,
+      "profit": 0.5
+    },
     "reArmOnFill": true,
     "startSide": "both"
   }

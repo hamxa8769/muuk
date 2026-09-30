@@ -1,8 +1,19 @@
 #include "muuk/mt5_bridge/mt5_gateway.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "muuk/ctrader_fix/messages.hpp"
 #include "muuk/ctrader_fix/tags.hpp"
@@ -43,67 +54,73 @@ void Mt5Gateway::log(const std::string& line) const {
 
 void Mt5Gateway::start() {
     if (running_.exchange(true)) return;
+#ifdef _WIN32
+    // The pipe first: FILE_FLAG_FIRST_PIPE_INSTANCE makes a second copy of
+    // the bridge fail here instead of sharing the name.
+    firstPipe_ = createPipe();
+    if (firstPipe_ == nullptr) {
+        running_ = false;
+        throw std::runtime_error("MT5 bridge: can't open the pipe \\\\.\\pipe\\" + config_.pipeName +
+                                 " -- is another copy of Muuk already running the bridge?");
+    }
+#endif
     try {
         const auto address = asio::ip::make_address(config_.bindAddress);
-        eaAcceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_);
         fixAcceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_);
-        auto listen = [&](asio::ip::tcp::acceptor& acceptor, uint16_t port) {
-            const asio::ip::tcp::endpoint ep(address, port);
-            acceptor.open(ep.protocol());
-            // No SO_REUSEADDR: a second copy of the gateway must fail here, not share the port.
-            acceptor.bind(ep);
-            acceptor.listen();
-        };
-        listen(*eaAcceptor_, config_.eaPort);
-        listen(*fixAcceptor_, config_.fixPort);
-        eaPort_ = eaAcceptor_->local_endpoint().port();
+        const asio::ip::tcp::endpoint ep(address, config_.fixPort);
+        fixAcceptor_->open(ep.protocol());
+        // No SO_REUSEADDR: a second copy of the gateway must fail here, not share the port.
+        fixAcceptor_->bind(ep);
+        fixAcceptor_->listen();
         fixPort_ = fixAcceptor_->local_endpoint().port();
     } catch (const std::exception& ex) {
         running_ = false;
-        eaAcceptor_.reset();
         fixAcceptor_.reset();
-        throw std::runtime_error("MT5 bridge: can't listen on " + config_.bindAddress + " ports " +
-                                 std::to_string(config_.eaPort) + " / " + std::to_string(config_.fixPort) + " (" +
-                                 ex.what() + ") -- is another copy of Muuk already running the bridge?");
+#ifdef _WIN32
+        CloseHandle(static_cast<HANDLE>(firstPipe_));
+        firstPipe_ = nullptr;
+#endif
+        throw std::runtime_error("MT5 bridge: can't listen on " + config_.bindAddress + " port " +
+                                 std::to_string(config_.fixPort) + " (" + ex.what() +
+                                 ") -- is another copy of Muuk already running the bridge?");
     }
-    log("bridge listening: MetaTrader 5 EA on port " + std::to_string(eaPort_) + ", Muuk on port " +
-        std::to_string(fixPort_));
-    eaAcceptThread_ = std::thread([this] { eaAcceptLoop(); });
+    log("bridge ready: MetaTrader 5 on pipe " + config_.pipeName + ", Muuk on port " + std::to_string(fixPort_));
+    eaThread_ = std::thread([this] { eaPipeLoop(); });
     fixAcceptThread_ = std::thread([this] { fixAcceptLoop(); });
 }
 
 void Mt5Gateway::stop() {
     if (!running_.exchange(false)) return;
     asio::error_code ec;
-    if (eaAcceptor_) eaAcceptor_->close(ec);
     if (fixAcceptor_) fixAcceptor_->close(ec);
     std::vector<FixConnPtr> conns;
-    std::shared_ptr<asio::ip::tcp::socket> ea;
     {
         std::scoped_lock lock(mutex_);
         conns = fixConns_;
-        ea = eaSocket_;
     }
     for (const auto& c : conns) {
         c->open = false;
         c->socket.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
         c->socket.close(ec);
     }
-    if (ea) {
-        ea->shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-        ea->close(ec);
+#ifdef _WIN32
+    if (eaThread_.joinable()) {
+        // Wake the pipe thread: a blocked read is cancelled; a wait for a
+        // client ends when we connect to our own pipe for a moment.
+        const std::wstring name = pipePath();
+        while (!eaThreadDone_.load()) {
+            CancelSynchronousIo(static_cast<HANDLE>(eaThread_.native_handle()));
+            HANDLE self = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (self != INVALID_HANDLE_VALUE) CloseHandle(self);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        eaThread_.join();
     }
-    if (eaAcceptThread_.joinable()) eaAcceptThread_.join();
+#endif
     if (fixAcceptThread_.joinable()) fixAcceptThread_.join();
-    std::vector<std::thread> readers;
     {
         std::scoped_lock lock(mutex_);
-        readers = std::move(eaReaders_);
-        eaReaders_.clear();
         conns = fixConns_;
-    }
-    for (auto& t : readers) {
-        if (t.joinable()) t.join();
     }
     for (const auto& c : conns) {
         if (c->reader.joinable()) c->reader.join();
@@ -112,7 +129,7 @@ void Mt5Gateway::stop() {
     fixConns_.clear();
     tradeConn_.reset();
     quoteConn_.reset();
-    eaSocket_.reset();
+    outbox_.clear();
     status_.connected = false;
     status_.ready = false;
 }
@@ -123,80 +140,132 @@ EaStatus Mt5Gateway::status() const {
 }
 
 // ---------------------------------------------------------------------------
-// EA side
+// EA side: a named pipe. The EA polls: every ~25 ms it sends one frame with
+// what happened (hello, prices, account, fills...) and gets one frame back
+// with the commands waiting for it. A frame = 4-byte little-endian length +
+// that many bytes of JSON lines. No MT5 setting is needed for a pipe (a TCP
+// socket needs 127.0.0.1 in MT5's WebRequest list).
 
-void Mt5Gateway::eaAcceptLoop() {
-    while (running_.load()) {
-        auto socket = std::make_shared<asio::ip::tcp::socket>(io_);
-        asio::error_code ec;
-        eaAcceptor_->accept(*socket, ec);
-        if (ec) return;
-        socket->set_option(asio::ip::tcp::no_delay(true), ec);
-        std::shared_ptr<asio::ip::tcp::socket> previous;
-        {
-            std::scoped_lock lock(mutex_);
-            previous = std::exchange(eaSocket_, socket);
-            status_ = EaStatus{};
-            status_.connected = true;
-            eaReaders_.emplace_back([this, socket] { eaReadLoop(socket); });
-        }
-        if (previous) {
-            log("a new MetaTrader 5 connection replaces the old one");
-            previous->close(ec);
-        }
-        log("MetaTrader 5 EA connected -- waiting for its hello");
-    }
+#ifdef _WIN32
+std::wstring Mt5Gateway::pipePath() const {
+    const std::string full = "\\\\.\\pipe\\" + config_.pipeName;
+    return std::wstring(full.begin(), full.end());
 }
 
-void Mt5Gateway::eaReadLoop(std::shared_ptr<asio::ip::tcp::socket> socket) {
-    std::string buffer;
-    char chunk[8192];
+void* Mt5Gateway::createPipe() const {
+    const std::wstring name = pipePath();
+    HANDLE h = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1,
+                                1 << 16, 1 << 16, 0, nullptr);
+    return h == INVALID_HANDLE_VALUE ? nullptr : h;
+}
+
+namespace {
+bool readExact(HANDLE h, void* buf, DWORD size) {
+    auto* p = static_cast<char*>(buf);
+    while (size > 0) {
+        DWORD got = 0;
+        if (!ReadFile(h, p, size, &got, nullptr) || got == 0) return false;
+        p += got;
+        size -= got;
+    }
+    return true;
+}
+
+bool writeExact(HANDLE h, const void* buf, DWORD size) {
+    const auto* p = static_cast<const char*>(buf);
+    while (size > 0) {
+        DWORD put = 0;
+        if (!WriteFile(h, p, size, &put, nullptr) || put == 0) return false;
+        p += put;
+        size -= put;
+    }
+    return true;
+}
+}  // namespace
+
+void Mt5Gateway::eaPipeLoop() {
+    HANDLE pipe = static_cast<HANDLE>(std::exchange(firstPipe_, nullptr));
     while (running_.load()) {
-        asio::error_code ec;
-        const std::size_t n = socket->read_some(asio::buffer(chunk), ec);
-        if (ec) break;
-        buffer.append(chunk, n);
-        std::size_t at;
-        while ((at = buffer.find('\n')) != std::string::npos) {
-            std::string line = buffer.substr(0, at);
-            buffer.erase(0, at + 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
-            try {
-                onEaLine(line);
-            } catch (const std::exception& ex) {
-                log(std::string("couldn't handle a line from the EA (") + ex.what() + "): " + line.substr(0, 200));
+        if (pipe == nullptr) {
+            pipe = static_cast<HANDLE>(createPipe());
+            if (pipe == nullptr) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
             }
         }
-    }
-    bool wasCurrent = false;
-    {
-        std::scoped_lock lock(mutex_);
-        if (eaSocket_ == socket) {
-            eaSocket_.reset();
+        const bool connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
+        if (!running_.load()) break;
+        if (!connected) {
+            CloseHandle(pipe);
+            pipe = nullptr;
+            continue;
+        }
+        {
+            std::scoped_lock lock(mutex_);
+            status_ = EaStatus{};
+            status_.connected = true;
+            outbox_.clear();
+        }
+        log("MetaTrader 5 connected -- waiting for its hello");
+        std::string frame;
+        while (running_.load()) {
+            uint32_t len = 0;
+            if (!readExact(pipe, &len, sizeof(len)) || len > (16u << 20)) break;
+            frame.assign(len, '\0');
+            if (len > 0 && !readExact(pipe, frame.data(), len)) break;
+            std::size_t start = 0;
+            while (start < frame.size()) {
+                std::size_t end = frame.find('\n', start);
+                if (end == std::string::npos) end = frame.size();
+                std::string line = frame.substr(start, end - start);
+                start = end + 1;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                try {
+                    onEaLine(line);
+                } catch (const std::exception& ex) {
+                    log(std::string("couldn't handle a line from MT5 (") + ex.what() + "): " + line.substr(0, 200));
+                }
+            }
+            std::string reply;
+            {
+                std::scoped_lock lock(mutex_);
+                for (const auto& c : outbox_) reply += c + "\n";
+                outbox_.clear();
+            }
+            const auto replyLen = static_cast<uint32_t>(reply.size());
+            if (!writeExact(pipe, &replyLen, sizeof(replyLen)) ||
+                (replyLen > 0 && !writeExact(pipe, reply.data(), replyLen))) {
+                break;
+            }
+        }
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+        pipe = nullptr;
+        {
+            std::scoped_lock lock(mutex_);
             status_.connected = false;
             status_.ready = false;
-            wasCurrent = true;
+            outbox_.clear();
+        }
+        if (running_.load()) {
+            log("MetaTrader 5 disconnected -- Muuk's session ends until it is back");
+            closeAllFix("MT5 bridge: MetaTrader 5 disconnected (closed, or MuukBridge removed from the chart)");
         }
     }
-    if (wasCurrent && running_.load()) {
-        log("MetaTrader 5 EA disconnected -- Muuk's session ends until it is back");
-        closeAllFix("MT5 bridge: the MuukBridge EA disconnected (MetaTrader 5 closed or the EA was removed)");
-    }
+    if (pipe != nullptr) CloseHandle(pipe);
+    eaThreadDone_ = true;
 }
+#else
+void Mt5Gateway::eaPipeLoop() { eaThreadDone_ = true; }
+#endif
 
 bool Mt5Gateway::sendEa(const nlohmann::json& cmd) {
-    std::shared_ptr<asio::ip::tcp::socket> socket;
-    {
-        std::scoped_lock lock(mutex_);
-        socket = eaSocket_;
-    }
-    if (!socket) return false;
-    const std::string line = cmd.dump() + "\n";
-    std::scoped_lock writeLock(eaWriteMutex_);
-    asio::error_code ec;
-    asio::write(*socket, asio::buffer(line), ec);
-    return !ec;
+    std::scoped_lock lock(mutex_);
+    if (!status_.connected) return false;
+    outbox_.push_back(cmd.dump());
+    return true;
 }
 
 void Mt5Gateway::onEaLine(const std::string& line) {

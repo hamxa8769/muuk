@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -9,7 +10,9 @@
 #include <mutex>
 #include <thread>
 
-#include <asio.hpp>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <nlohmann/json.hpp>
 
 #include "muuk/ctrader_fix/live_runner.hpp"
@@ -29,22 +32,29 @@ using muuk::mt5_bridge::Mt5Gateway;
 
 namespace {
 
-// Stands in for MuukBridge.mq5: connects to the gateway and speaks its JSON lines.
+// Stands in for MuukBridge.mq5: opens the gateway's named pipe and, like the
+// EA, polls every few ms -- one frame out (its queued lines), one frame back
+// (the commands waiting for it).
 class FakeEa {
 public:
-    explicit FakeEa(uint16_t port) : socket_(io_) {
-        socket_.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
-        reader_ = std::thread([this] { readLoop(); });
+    explicit FakeEa(const std::string& pipeName) {
+        const std::string full = "\\\\.\\pipe\\" + pipeName;
+        const std::wstring name(full.begin(), full.end());
+        for (int i = 0; i < 200 && pipe_ == INVALID_HANDLE_VALUE; ++i) {
+            pipe_ = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (pipe_ == INVALID_HANDLE_VALUE) std::this_thread::sleep_for(10ms);
+        }
+        if (pipe_ == INVALID_HANDLE_VALUE) throw std::runtime_error("FakeEa: can't open the pipe");
+        poller_ = std::thread([this] { pollLoop(); });
     }
     ~FakeEa() {
-        asio::error_code ec;
-        socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-        socket_.close(ec);
-        if (reader_.joinable()) reader_.join();
+        stop_ = true;
+        if (poller_.joinable()) poller_.join();
+        CloseHandle(pipe_);
     }
     void send(const nlohmann::json& j) {
-        const std::string line = j.dump() + "\n";
-        asio::write(socket_, asio::buffer(line));
+        std::scoped_lock lock(mutex_);
+        outgoing_.push_back(j.dump());
     }
     // The next command of this kind ("stop", "market", "cancel", "positions", "orders").
     nlohmann::json waitFor(const std::string& c, std::chrono::milliseconds timeout = 4s) {
@@ -70,44 +80,65 @@ public:
               {"currency", "USC"}, {"leverage", 1000},  {"hedging", hedging},         {"symbol", "XAUUSDc"},
               {"digits", 2},       {"contract", 100},   {"volMin", 0.01},             {"volStep", 0.01},
               {"volMax", 1000},    {"hedgedMargin", 0}, {"magic", 770077},            {"tickSize", 0.01},
-              {"tickValue", tickValue}, {"marginPerLot", 433.65 * tickValue}});
+              {"tickValue", tickValue}, {"marginPerLot", 433.65 * tickValue}, {"tradeMode", "demo"}});
         send({{"t", "account"}, {"balance", 20000.0}, {"equity", 20000.0}, {"margin", 0.0}, {"free", 20000.0},
               {"costs", nlohmann::json::array()}});
     }
 
 private:
-    void readLoop() {
-        std::string buffer;
-        char chunk[4096];
-        while (true) {
-            asio::error_code ec;
-            const std::size_t n = socket_.read_some(asio::buffer(chunk), ec);
-            if (ec) return;
-            buffer.append(chunk, n);
-            std::size_t at;
-            while ((at = buffer.find('\n')) != std::string::npos) {
-                const std::string line = buffer.substr(0, at);
-                buffer.erase(0, at + 1);
-                nlohmann::json j;
-                try {
-                    j = nlohmann::json::parse(line);
-                } catch (const std::exception& ex) {
-                    std::fprintf(stderr, "FakeEa: bad line (%s): %s\n", ex.what(), line.c_str());
-                    continue;
-                }
+    static bool readExact(HANDLE h, void* buf, DWORD size) {
+        auto* p = static_cast<char*>(buf);
+        while (size > 0) {
+            DWORD got = 0;
+            if (!ReadFile(h, p, size, &got, nullptr) || got == 0) return false;
+            p += got;
+            size -= got;
+        }
+        return true;
+    }
+    void pollLoop() {
+        while (!stop_) {
+            std::string out;
+            {
                 std::scoped_lock lock(mutex_);
-                received_.push_back(std::move(j));
+                for (const auto& l : outgoing_) out += l + "\n";
+                outgoing_.clear();
+            }
+            const auto len = static_cast<uint32_t>(out.size());
+            DWORD put = 0;
+            if (!WriteFile(pipe_, &len, sizeof(len), &put, nullptr)) return;
+            if (len > 0 && !WriteFile(pipe_, out.data(), len, &put, nullptr)) return;
+            uint32_t replyLen = 0;
+            if (!readExact(pipe_, &replyLen, sizeof(replyLen))) return;
+            std::string reply(replyLen, '\0');
+            if (replyLen > 0 && !readExact(pipe_, reply.data(), replyLen)) return;
+            std::size_t start = 0;
+            while (start < reply.size()) {
+                std::size_t end = reply.find('\n', start);
+                if (end == std::string::npos) end = reply.size();
+                const std::string line = reply.substr(start, end - start);
+                start = end + 1;
+                if (line.empty()) continue;
+                std::scoped_lock lock(mutex_);
+                received_.push_back(nlohmann::json::parse(line));
                 cv_.notify_all();
             }
+            std::this_thread::sleep_for(5ms);
         }
     }
-    asio::io_context io_;
-    asio::ip::tcp::socket socket_;
-    std::thread reader_;
+    HANDLE pipe_ = INVALID_HANDLE_VALUE;
+    std::thread poller_;
+    std::atomic<bool> stop_{false};
     std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<nlohmann::json> received_;
+    std::vector<std::string> outgoing_;
 };
+
+std::string uniquePipe() {
+    static std::atomic<int> n{0};
+    return "MuukBridgeTest_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(++n);
+}
 
 template <typename Pred>
 bool waitUntil(Pred pred, std::chrono::milliseconds timeout = 4s) {
@@ -168,11 +199,11 @@ struct RunnerThread {
 
 TEST_CASE("MT5 bridge: orders, fills, positions and the account go through the gateway to MT5 and back") {
     GatewayConfig gc;
-    gc.eaPort = 0;
+    gc.pipeName = uniquePipe();
     gc.fixPort = 0;
     Mt5Gateway gateway(gc, [](const std::string&) {});
     gateway.start();
-    FakeEa ea(gateway.eaPort());
+    FakeEa ea(gateway.pipeName());
     ea.hello();
     REQUIRE(waitUntil([&] { return gateway.status().ready; }));
     REQUIRE(gateway.status().currency == "USC");
@@ -247,11 +278,11 @@ TEST_CASE("MT5 bridge: orders, fills, positions and the account go through the g
 
 TEST_CASE("MT5 bridge: on a cent account with standard lots the P/L is counted in cents") {
     GatewayConfig gc;
-    gc.eaPort = 0;
+    gc.pipeName = uniquePipe();
     gc.fixPort = 0;
     Mt5Gateway gateway(gc, [](const std::string&) {});
     gateway.start();
-    FakeEa ea(gateway.eaPort());
+    FakeEa ea(gateway.pipeName());
     ea.hello(true, 100.0);  // RoboForex ProCent style: 1 lot = 100 oz, money in US cents
     REQUIRE(waitUntil([&] { return gateway.status().accountKnown; }));
 
@@ -278,7 +309,7 @@ TEST_CASE("MT5 bridge: on a cent account with standard lots the P/L is counted i
 
 TEST_CASE("MT5 bridge: a netting account or a missing EA is refused at logon") {
     GatewayConfig gc;
-    gc.eaPort = 0;
+    gc.pipeName = uniquePipe();
     gc.fixPort = 0;
     Mt5Gateway gateway(gc, [](const std::string&) {});
     gateway.start();
@@ -290,7 +321,7 @@ TEST_CASE("MT5 bridge: a netting account or a missing EA is refused at logon") {
         REQUIRE_THROWS_WITH(runner.run(), Catch::Matchers::ContainsSubstring("isn't connected"));
     }
     SECTION("a REAL account while the config says demo") {
-        FakeEa ea(gateway.eaPort());
+        FakeEa ea(gateway.pipeName());
         ea.send({{"t", "hello"}, {"login", "49616"}, {"server", "Broker-Real"}, {"currency", "USD"}, {"hedging", true},
                  {"symbol", "XAUUSD"}, {"digits", 2}, {"volMin", 0.01}, {"volStep", 0.01}, {"tickSize", 0.01},
                  {"tickValue", 1.0}, {"marginPerLot", 867.0}, {"tradeMode", "real"}});
@@ -303,7 +334,7 @@ TEST_CASE("MT5 bridge: a netting account or a missing EA is refused at logon") {
         REQUIRE_THROWS_AS(ea.waitFor("stop", 500ms), std::runtime_error);  // not a single order
     }
     SECTION("netting account") {
-        FakeEa ea(gateway.eaPort());
+        FakeEa ea(gateway.pipeName());
         ea.hello(false);
         REQUIRE(waitUntil([&] { return gateway.status().ready; }));
         REQUIRE_FALSE(gateway.status().hedging);
@@ -328,11 +359,11 @@ TEST_CASE("MT5 config: the example loads, needs no FIX login and points the bot 
 
 TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order limit are taken from MT5") {
     GatewayConfig gc;
-    gc.eaPort = 0;
+    gc.pipeName = uniquePipe();
     gc.fixPort = 0;
     Mt5Gateway gateway(gc, [](const std::string&) {});
     gateway.start();
-    FakeEa ea(gateway.eaPort());
+    FakeEa ea(gateway.pipeName());
     // Gold in 3 digits, lots from 0.10, at most 10 pending orders, money in US cents.
     ea.send({{"t", "hello"},       {"login", "777"},      {"server", "AnyBroker-Demo"}, {"company", "Any"},
              {"currency", "USC"},  {"leverage", 500},     {"hedging", true},            {"symbol", "GOLD"},
@@ -360,4 +391,18 @@ TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order li
     REQUIRE(s.settings.initialLot == Catch::Approx(0.10));
     REQUIRE(s.settings.maxOrders == 8);                         // 10 pending allowed, 2 kept spare
     REQUIRE(s.moneyPerPointPerLot == Catch::Approx(10000.0));  // 10 per 0.001 -> 10,000 per 1.00
+}
+
+#include "muuk/mt5_bridge/mt5_launcher.hpp"
+
+TEST_CASE("MT5 launcher: the bridge EA is built into Muuk, and installed MT5s are found with their data folders") {
+    const std::string ea = muuk::mt5_bridge::bridgeEaSource();
+    REQUIRE(ea.find("MuukBridge.mq5") != std::string::npos);
+    REQUIRE(ea.find("OnTradeTransaction") != std::string::npos);
+    // Whatever is installed on this machine: every entry points at a real terminal64.exe.
+    for (const auto& i : muuk::mt5_bridge::findMt5Installs()) {
+        INFO(i.terminal.string());
+        REQUIRE(std::filesystem::is_regular_file(i.terminal));
+        if (!i.dataDir.empty()) REQUIRE(std::filesystem::is_directory(i.dataDir / "MQL5"));
+    }
 }
