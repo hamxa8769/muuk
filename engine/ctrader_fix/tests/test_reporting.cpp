@@ -209,7 +209,20 @@ TEST_CASE("Volume statistics: lots, value traded, won/lost lots and P/L per day,
     // SELL 0.02 ordered and filled at 4280.00 -> none.
     REQUIRE(legSlippage(baskets[0].legs[0], 100.0) == Catch::Approx(0.05));
     REQUIRE(legSlippage(baskets[0].legs[1], 100.0) == Catch::Approx(0.0));
+    REQUIRE(total.entrySlippage == Catch::Approx(4 * 0.05));
+    REQUIRE(total.exitSlippage == Catch::Approx(0.0));  // no trigger recorded
     REQUIRE(total.slippage == Catch::Approx(4 * 0.05));
+
+    // Exit: the target fired at +0.63 net, the closing fills booked +0.55 -> 0.08 worse.
+    BasketRecord closedAtTarget = basket("2026-09-08 10:00:00", 0.55);
+    closedAtTarget.outcome = "target";
+    closedAtTarget.netAtTrigger = 0.63;
+    BasketRecord manual = basket("2026-09-08 11:00:00", 0.40);
+    manual.outcome = "manual";
+    manual.netAtTrigger = 0.90;  // not a target / stop loss close: not counted
+    const VolumeBucket exits = volumeTotal({closedAtTarget, manual});
+    REQUIRE(exits.exitSlippage == Catch::Approx(0.08));
+    REQUIRE(exits.slippage == Catch::Approx(2 * 0.05 + 0.08));
 }
 
 TEST_CASE("InstanceLock: only one holder per config file at a time") {

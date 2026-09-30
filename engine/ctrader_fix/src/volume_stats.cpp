@@ -24,8 +24,12 @@ void VolumeBucket::add(const BasketRecord& basket) {
         ++positions;
         basketLots += leg.lots;
         notional += leg.lots * basket.contractSize * leg.entryPrice;
-        slippage += legSlippage(leg, basket.contractSize);
+        entrySlippage += legSlippage(leg, basket.contractSize);
     }
+    if ((basket.outcome == "target" || basket.outcome == "stop loss") && basket.netAtTrigger != 0.0) {
+        exitSlippage += basket.netAtTrigger - basket.net;
+    }
+    slippage = entrySlippage + exitSlippage;
     lots += basketLots;
     if (basket.net > 0.005) {
         ++won;

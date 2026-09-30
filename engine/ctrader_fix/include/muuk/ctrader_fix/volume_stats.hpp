@@ -24,9 +24,13 @@ struct VolumeBucket {
     double gross = 0.0;
     double commission = 0.0;
     double net = 0.0;
-    // Fills vs the Stop prices the orders were placed at, in money: >0 = filled
-    // worse. Already inside gross/net (those come from the real fills).
-    double slippage = 0.0;
+    // Slippage in money, >0 = filled worse. Already inside gross/net (those
+    // come from the real fills). Entry: fills vs the Stop prices the orders
+    // were placed at. Exit: what the closing market orders booked vs the net
+    // the bot saw when the target / stop loss fired.
+    double entrySlippage = 0.0;
+    double exitSlippage = 0.0;
+    double slippage = 0.0;  // entry + exit
 
     // Brokers usually count volume per side: opening and closing each count.
     [[nodiscard]] double sideLots() const { return lots * 2.0; }

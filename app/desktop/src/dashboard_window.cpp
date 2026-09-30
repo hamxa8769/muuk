@@ -1238,10 +1238,12 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
             breakdownRow("Slippage", "Fills worse (+) or better (-) than the requested Stop price.", b.slippage, true);
             breakdownRow("Spread", "Cost of closing at bid/ask instead of mid, right now.", b.spread, true);
             breakdownRow("Commission",
-                         "Open + close, worked out per position exactly as the broker does (Settings > Commission). "
-                         "Same figure as cTrader's Commission column.",
+                         "Open + close. MT5: what the broker really charged on opening, plus closing at this "
+                         "account's own rate (learned from its deals). cTrader: Settings > Commission, worked out "
+                         "per position exactly as the broker does.",
                          b.commission, true);
-            breakdownRow("Swap", "Overnight financing - not tracked yet.", b.swap, true);
+            breakdownRow("Swap", "Overnight financing. MT5 reports it per position; cTrader FIX doesn't (0 there).",
+                         b.swap, true);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::Separator();
@@ -2411,8 +2413,10 @@ void DashboardWindow::renderVolumeTab() {
             ImGui::TextDisabled("$0.00");
         } else {
             ImGui::TextColored(b.slippage > 0 ? kAmber : kGreen, "%s", money(-b.slippage).c_str());
-            ImGui::SetItemTooltip("Fills vs order prices. Already included in Net (it comes from the real fills).");
         }
+        ImGui::SetItemTooltip("Entry %s: Stop fills vs their order prices\nExit %s: closing fills vs the net when the "
+                              "target / stop loss fired\nAlready included in Net (it comes from the real fills).",
+                              money(-b.entrySlippage).c_str(), money(-b.exitSlippage).c_str());
         ImGui::TableNextColumn();
         withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });
         ImGui::TableNextColumn();
