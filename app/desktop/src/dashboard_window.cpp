@@ -154,6 +154,22 @@ std::string dollarsWhole(double v) {
     return (v < -0.5 ? "-$" : "$") + out;
 }
 
+// An amount of account money, no + sign: "$1,928.40", or "19,284.00¢" on a cent account.
+std::string amount(double v) {
+    char digits[40];
+    std::snprintf(digits, sizeof(digits), "%.2f", std::fabs(v));
+    const std::string d(digits);
+    const std::size_t dot = d.find('.');
+    std::string out;
+    for (std::size_t i = 0; i < dot; ++i) {
+        if (i > 0 && (dot - i) % 3 == 0) out += ',';
+        out += d[i];
+    }
+    out += d.substr(dot);
+    const std::string sign = v < -0.005 ? "-" : "";
+    return g_centUnits ? sign + out + "\xC2\xA2" : sign + "$" + out;
+}
+
 const char* sideName(OrderSide side) { return side == OrderSide::BuyStop ? "BUY" : "SELL"; }
 const char* orderTypeName(OrderSide side) { return side == OrderSide::BuyStop ? "Buy Stop" : "Sell Stop"; }
 
@@ -923,7 +939,7 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
         {Tab::Positions, "Positions", std::to_string(snap ? snap->positions.size() : 0), kBlue},
         {Tab::Orders, "Pending orders", std::to_string(snap ? snap->pendingOrders.size() : 0), kViolet},
         {Tab::History, "History", std::to_string(history_.size()), kGrey},
-        {Tab::Risk, "Risk & guards",
+        {Tab::Risk, "Risk & capital",
          !snap || snap->marginLevelNow < 0.0 ? std::string()
          : snap->locked                      ? std::string("locked")
          : snap->guardLockPending            ? std::string("guard")
@@ -1348,8 +1364,8 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::SameLine();
         glass::pill("edited", kAmber);
     }
-    ImGui::TextDisabled("Saved to your config file, so the app always opens with them. Range and lots apply from "
-                        "the next range; profit target, stop loss and market hours at once.");
+    ImGui::TextDisabled("Saved to your config file, so the app always opens with them. The range applies from the "
+                        "next range; profit target and market hours at once.");
 
     ImGui::BeginDisabled(!settingsLoaded_);
     if (ImGui::BeginTable("settings", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -1397,34 +1413,6 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
             settingsDirty_ = true;
         }
         ImGui::EndDisabled();
-        settingDouble("Stop loss ($)",
-                      "Hard loss cap: when the basket's net P/L falls to minus this, every position is closed and "
-                      "every pending order cancelled -- the loss is taken instead of growing. 0 = off.",
-                      &s.stopLoss, 5.0, "%.2f", &settingsDirty_);
-        settingDouble("First lot", "Lot size of the first order in each range.", &s.initialLot, 0.01, "%.2f",
-                      &settingsDirty_);
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Lot mode");
-        ImGui::SetItemTooltip("How each next order's lot grows. Add: first lot + increment each time "
-                              "(0.01, 0.02, 0.03...). Multiply: previous lot x multiplier (x2: 0.01, 0.02, 0.04, "
-                              "0.08...).");
-        ImGui::TableNextColumn();
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        const char* modes[] = {"Add increment (0.01, 0.02, 0.03...)", "Multiply (0.01, 0.02, 0.04, 0.08...)"};
-        int mode = s.lotMultiplier > 1.0 ? 1 : 0;
-        if (ImGui::Combo("##lotmode", &mode, modes, 2)) {
-            s.lotMultiplier = mode == 1 ? 2.0 : 1.0;
-            settingsDirty_ = true;
-        }
-        if (s.lotMultiplier > 1.0) {
-            settingDouble("Lot multiplier", "Each next order's lot = the previous one x this (2 = double).",
-                          &s.lotMultiplier, 0.1, "%.2f", &settingsDirty_);
-        } else {
-            settingDouble("Lot increment", "Added to the lot size on every following order (0.01 -> 0.02 -> 0.03...).",
-                          &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
-        }
         settingDouble("Entry offset ($)",
                       "How far beyond the current price the first order sits. Its fill sets the range. "
                       "0 = place the first order at the range boundary instead.",
@@ -1435,16 +1423,28 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                    "After you press Close range: once everything is closed, wait this long, then open a new range "
                    "around the live price (only with Auto-open on). 0 = wait for Open range instead.",
                    &s.manualCloseCooldownSeconds, &settingsDirty_);
-        settingInt("Max orders", "Safety limit: no more orders are placed in a range beyond this many.", &s.maxOrders,
-                   &settingsDirty_);
-        settingDouble("Max lot", "Safety limit on any single order's lot size.", &s.maxLot, 0.10, "%.2f",
-                      &settingsDirty_);
-        settingDouble("Max basket loss ($)", "Safety limit: stop placing new orders past this floating loss. 0 = off.",
-                      &s.maxBasketLoss, 10.0, "%.2f", &settingsDirty_);
-        settingDouble("Daily loss limit ($)",
-                      "Once today's booked + floating net reaches minus this, the running range is closed and no new "
-                      "range opens until tomorrow (your computer's date). 0 = off.",
-                      &s.dailyLossLimit, 10.0, "%.2f", &settingsDirty_);
+        if (account_.platform == 1) {
+            // MT5 says what it charges: learned from the account's own deals, and every fill reports its own.
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Commission");
+            ImGui::TableNextColumn();
+            if (snap && snap->brokerAccountFresh && (snap->brokerAccount.commissionInPerLot >= 0.0 ||
+                                                     snap->brokerAccount.commissionOutPerLot >= 0.0)) {
+                const auto& a = snap->brokerAccount;
+                ImGui::TextColored(kGreen, "From MT5: %s per lot (open %s + close %s)",
+                                   amount(std::max(0.0, a.commissionInPerLot) + std::max(0.0, a.commissionOutPerLot)).c_str(),
+                                   amount(std::max(0.0, a.commissionInPerLot)).c_str(),
+                                   amount(std::max(0.0, a.commissionOutPerLot)).c_str());
+            } else {
+                ImGui::TextDisabled("From MT5 (each fill reports what it cost)");
+            }
+            ImGui::SetItemTooltip("The rate is learned from this account's gold deals of the last 90 days, and every "
+                                  "fill reports the commission + fee MT5 really charged -- the basket books exactly "
+                                  "that. Nothing to type in. (Standard / cent accounts usually charge 0: their cost is "
+                                  "the spread.)");
+        } else {
         settingDouble("Commission ($ per $1M)",
                       "How cTrader brokers charge: $ per 1,000,000 USD traded, once when a position opens and again "
                       "when it closes. IC Markets Raw = 30 ($3 per $100k). One side = lots x 100 oz x entry price x "
@@ -1457,14 +1457,14 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       "the $ per $1M rate is set.",
                       &s.commissionPerLot, 0.50, "%.2f", &settingsDirty_);
         ImGui::EndDisabled();
+        }
         clampSettings(s);
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
-    renderLotPreview(editSettings_, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
     ImGui::BeginDisabled(!settingsLoaded_);
     ImGui::Spacing();
-    ImGui::TextDisabled("Balance, leverage, margin guards, lock and escape: the Risk & guards page.");
+    ImGui::TextDisabled("Lot sizes, loss limits, balance, margin guards, lock and escape: the Risk & capital page.");
     renderMarketSettings();
     ImGui::EndDisabled();
     renderSaveBar(controller, snap, connected);
@@ -1931,7 +1931,9 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) 
             if (lot > s.maxLot + 1e-9) break;
             all += muuk::core::roundTurnCommissionMoney(lot, at, spec, costs);
         }
-        if (s.commissionPerMillion <= 0.0 && s.commissionPerLot <= 0.0) {
+        if (account_.platform == 1) {
+            ImGui::TextDisabled("Commission: what MT5 charges (learned from the account; each fill reports its own).");
+        } else if (s.commissionPerMillion <= 0.0 && s.commissionPerLot <= 0.0) {
             ImGui::TextColored(kAmber, "Commission is 0 - net P/L will look better than your broker's.");
         } else {
             ImGui::TextDisabled("Commission at %s%.2f: %.2f lot = $%.2f round trip (open + close), all of the above = "
@@ -3606,53 +3608,152 @@ void DashboardWindow::renderAuditTab(const std::optional<LiveSnapshot>& snap, bo
     ImGui::EndChild();
 }
 
+void DashboardWindow::renderAccountCards(const std::optional<LiveSnapshot>& snap) {
+    const LiveSettings& s = editSettings_;
+    const bool fromMt5 = snap && snap->brokerAccountFresh;
+    const bool mt5 = account_.platform == 1;
+
+    // What the cards show: MT5's own figures, else the typed-in balance and the bot's estimate.
+    double balance = -1.0;
+    double equity = -1.0;
+    double margin = -1.0;
+    double freeMargin = -1.0;
+    double level = -1.0;
+    std::string balanceSub;
+    std::string equitySub;
+    std::string marginSub;
+    std::string freeSub;
+    if (fromMt5) {
+        const auto& a = snap->brokerAccount;
+        balance = a.balance;
+        equity = a.equity;
+        margin = a.margin;
+        freeMargin = a.freeMargin;
+        level = a.margin > 0.0 ? a.equity / a.margin * 100.0 : -1.0;
+        balanceSub = "MT5 #" + a.login + (a.cent() ? " | cent (USC)" : " | " + a.currency) +
+                     (a.real() ? " | REAL" : " | demo");
+        equitySub = "floating " + money(a.equity - a.balance);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "1:%.0f | hedged pair %.0f%%", a.leverage,
+                      a.hedgedMarginPercent >= 0.0 ? a.hedgedMarginPercent : s.recovery.hedgedMarginPercent);
+        marginSub = buf;
+        if (a.marginPerLot > 0.0) {
+            std::snprintf(buf, sizeof(buf), "about %.2f lot more (%s / lot)", std::max(0.0, a.freeMargin) / a.marginPerLot,
+                          amount(a.marginPerLot).c_str());
+            freeSub = buf;
+        }
+    } else if (!mt5 && s.accountBalance > 0.0) {
+        balance = s.accountBalance;
+        balanceSub = "typed in (cTrader FIX sends no balance)";
+        if (snap && snap->equityNow >= 0.0) {
+            equity = snap->equityNow;
+            margin = snap->marginNow;
+            freeMargin = equity - margin;
+            level = snap->marginLevelNow;
+            equitySub = "balance + open net (estimate)";
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "1:%.0f (Settings)", s.leverage);
+            marginSub = buf;
+        }
+    } else {
+        balanceSub = mt5 ? "connect: MT5 reports it" : "type it in below";
+    }
+
+    constexpr int kCount = 5;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float width = (ImGui::GetContentRegionAvail().x - spacing * (kCount - 1)) / kCount;
+    const float numberH = numberFont_ ? numberFont_->FontSize : ImGui::GetTextLineHeight();
+    const float height = ImGui::GetTextLineHeight() * 2.0f + numberH + ImGui::GetStyle().WindowPadding.y * 2 + 10.0f;
+    auto card = [&](const char* id, const char* caption, double value, ImVec4 color, const std::string& sub,
+                    const char* help, bool last) {
+        glass::beginCard(id, ImVec2(width, height), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::TextDisabled("%s", caption);
+        withFont(numberFont_, [&] { ImGui::TextColored(color, "%s", value < -0.5e9 ? "--" : amount(value).c_str()); });
+        if (!sub.empty()) ImGui::TextDisabled("%s", sub.c_str());
+        glass::endCard();
+        ImGui::SetItemTooltip("%s", help);
+        if (!last) ImGui::SameLine();
+    };
+    const ImVec4 text = glass::palette().text;
+    const double none = -1e9;
+    card("a_balance", "BALANCE", balance >= 0.0 ? balance : none, text, balanceSub,
+         "Money in the account without the open positions.", false);
+    card("a_equity", "EQUITY", equity >= 0.0 ? equity : none, equity >= 0.0 && balance >= 0.0 ? pnlColor(equity - balance) : text,
+         equitySub, "Balance + the open positions' P/L: what the account is worth if everything closed now.", false);
+    card("a_margin", "MARGIN USED", margin >= 0.0 ? margin : none, text, marginSub,
+         "What the broker holds for the open positions.", false);
+    card("a_free", "FREE MARGIN", freeMargin > -0.5e9 && margin >= 0.0 ? freeMargin : none,
+         freeMargin < 0.0 && margin >= 0.0 ? kRed : text, freeSub, "Equity - margin: room for new positions.", false);
+
+    // Margin level: a percentage, not money.
+    glass::beginCard("a_level", ImVec2(width, height), false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextDisabled("MARGIN LEVEL");
+    withFont(numberFont_, [&] {
+        if (level < 0.0) {
+            ImGui::TextColored(text, "%s", margin == 0.0 && equity >= 0.0 ? "no positions" : "--");
+        } else {
+            ImGui::TextColored(marginLevelColor(level, s.recovery.guardLockMarginLevel, s.recovery.guardStopMarginLevel),
+                               "%.0f%%", std::min(level, 99999.0));
+        }
+    });
+    ImGui::TextDisabled("guards %.0f%% / %.0f%%", s.recovery.guardLockMarginLevel, s.recovery.guardStopMarginLevel);
+    glass::endCard();
+    ImGui::SetItemTooltip("Equity / margin. Guards: under %.0f%% the next level becomes a lock stop, under %.0f%% the "
+                          "basket locks at once. Brokers call margin at about 100%% and stop out at 20-50%%.",
+                          s.recovery.guardLockMarginLevel, s.recovery.guardStopMarginLevel);
+}
+
 void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& snap) {
     LiveSettings& s = editSettings_;
+    const bool mt5 = account_.platform == 1;
+    const bool fromMt5 = snap && snap->brokerAccountFresh;
+    // MT5 says whether it's a cent account: keep the file in step (saved with the next Save & apply).
+    if (fromMt5) s.accountKind = snap->brokerAccount.cent() ? "cent" : "standard";
+
+    ImGui::Spacing();
+    renderAccountCards(snap);
     ImGui::Spacing();
     withFont(boldFont_, [] {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Risk & capital");
     });
-    ImGui::TextDisabled("The worst case: the price bounces between the two lines, so every fill adds the next lot "
-                        "on the other side.");
+    ImGui::SameLine();
+    ImGui::TextDisabled("-- every amount in the account's money%s", g_centUnits ? " (US cents)" : "");
 
-    const bool fromMt5 = snap && snap->brokerAccountFresh;
-    if (fromMt5) {
-        const auto& a = snap->brokerAccount;
-        ImGui::TextColored(kGreen, "From MT5 (%s): balance %s, equity %s, margin %s, free %s, 1:%.0f%s", a.login.c_str(),
-                           money(a.balance).c_str(), money(a.equity).c_str(), money(a.margin).c_str(),
-                           money(a.freeMargin).c_str(), a.leverage, a.cent() ? " -- cent account, amounts in US cents" : "");
-        ImGui::TextDisabled("The table and the guards use these; the balance and leverage below are only for cTrader.");
-    }
+    auto section = [&](const char* title, const char* note) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        withFont(boldFont_, [&] { ImGui::TextColored(kBlue, "%s", title); });
+        ImGui::TableNextColumn();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (note) ImGui::TextDisabled("%s", note);
+    };
+
     if (ImGui::BeginTable("risk_settings", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        settingDouble("Account balance ($)",
-                      "Your balance -- FIX doesn't send it. Used for this table and the margin warning in the Audit.",
-                      &s.accountBalance, 100.0, "%.2f", &settingsDirty_);
-        settingDouble("Leverage (1:x)", "Your account's leverage, e.g. 500 for 1:500. Sets the margin per lot.",
-                      &s.leverage, 50.0, "%.0f", &settingsDirty_);
-        settingInt("Break-even escape from level",
-                   "From this fill on, the target drops to the escape amount below: a deep basket closes at the "
-                   "first bounce back instead of waiting for the full target. 0 = off.",
-                   &s.escapeFromLevel, &settingsDirty_);
-        settingDouble("  escape at net ($)", "Net after every cost at which an escaping basket closes.",
-                      &s.escapeProfit, 0.25, "%.2f", &settingsDirty_);
-        settingDouble("Lock & pause at loss ($)",
-                      "When the basket's net reaches minus this: pending orders are cancelled and one opposite order "
-                      "freezes the loss (a hedge). The bot then waits for you -- the loss doesn't go away, and swap "
-                      "is charged every night. 0 = off.",
-                      &s.lockAtLoss, 10.0, "%.2f", &settingsDirty_);
 
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Account type");
-        ImGui::SetItemTooltip("Cent: balance and P/L are in US cents (USC) -- 100 USC = $1. Every $ amount on this "
-                              "page is then in USC. Each account file keeps its own settings, so a cent account "
-                              "simply gets its own file.");
-        ImGui::TableNextColumn();
-        {
+        // --- Account (cTrader only: MT5 reports all of this itself).
+        if (!mt5) {
+            section("Account", "cTrader FIX sends no balance or margin");
+            settingDouble("Account balance ($)",
+                          "Your balance -- FIX doesn't send it. The cards above, the table, the margin guards and the "
+                          "Audit use it.",
+                          &s.accountBalance, 100.0, "%.2f", &settingsDirty_);
+            settingDouble("Leverage (1:x)", "Your account's leverage, e.g. 500 for 1:500. Sets the margin per lot.",
+                          &s.leverage, 50.0, "%.0f", &settingsDirty_);
+            settingDouble("Hedged margin (%)",
+                          "How the broker charges a buy + sell pair. 100 = both sides count in full (IC Markets "
+                          "cTrader charges the larger side only: 100 is on the safe side).",
+                          &s.recovery.hedgedMarginPercent, 10.0, "%.0f", &settingsDirty_);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Account type");
+            ImGui::SetItemTooltip("Cent: balance and P/L are in US cents (USC) -- 100 USC = $1. Every amount on this "
+                                  "page is then in USC.");
+            ImGui::TableNextColumn();
             int kind = s.accountKind == "cent" ? 1 : 0;
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::Combo("##accountKind", &kind, "Standard ($)\0Cent (USC)\0")) {
@@ -3660,27 +3761,96 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                 settingsDirty_ = true;
             }
         }
-        settingDouble("Guard: hold the next level under (%)",
-                      "Margin level (equity / margin) the next fill would leave. Under this, that level is not "
-                      "placed: a stop order for the net lots (a lock) waits at its line instead, and the basket "
-                      "closes at the escape amount if the price turns back first. Brokers call a margin call at "
-                      "100 % and stop out at 50 % or less. 0 = off. Needs the balance.",
-                      &s.recovery.guardLockMarginLevel, 50.0, "%.0f", &settingsDirty_);
-        settingDouble("Guard: lock at once under (%)",
-                      "Margin level now. Under this the basket is locked at market right away. 0 = off.",
-                      &s.recovery.guardStopMarginLevel, 50.0, "%.0f", &settingsDirty_);
-        settingDouble("Hedged margin (%)",
-                      "How the broker charges a buy + sell pair. cTrader (IC Markets): 100 = the larger side only. "
-                      "MT5 brokers say it per symbol (RoboForex ProCent gold: 50).",
-                      &s.recovery.hedgedMarginPercent, 10.0, "%.0f", &settingsDirty_);
-        settingCheck("Close at break-even when guarded",
-                     "While a lock stop waits or a lock holds: once the net is back at the escape amount, close "
+
+        // --- Lot sizing.
+        section("Lot sizing", "from the next range");
+        settingDouble("First lot", "Lot size of the first order in each range. Every amount below grows with it.",
+                      &s.initialLot, 0.01, "%.2f", &settingsDirty_);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Lot growth");
+        ImGui::SetItemTooltip("How each next order's lot grows. Safe: first lot + increment (0.01, 0.02, 0.03...). "
+                              "Balanced: x1.5. Aggressive: x2 (0.01, 0.02, 0.04, 0.08...). The table shows what each "
+                              "can lose.");
+        ImGui::TableNextColumn();
+        {
+            const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+            auto preset = [&](const char* label, double mult, ImVec4 color) {
+                const bool on = mult > 1.0 ? std::fabs(s.lotMultiplier - mult) < 0.01 : s.lotMultiplier <= 1.0;
+                if (glass::button(label, on ? color : glass::palette().neutral, ImVec2(third, 0))) {
+                    s.lotMultiplier = mult;
+                    if (mult <= 1.0 && s.lotIncrement <= 0.0) s.lotIncrement = 0.01;
+                    settingsDirty_ = true;
+                }
+            };
+            preset("Safe +", 1.0, kGreen);
+            ImGui::SameLine();
+            preset("Balanced x1.5", 1.5, kAmber);
+            ImGui::SameLine();
+            preset("Aggressive x2", 2.0, kRed);
+        }
+        if (s.lotMultiplier > 1.0) {
+            settingDouble("  multiplier", "Each next order's lot = the previous one x this (2 = double).",
+                          &s.lotMultiplier, 0.1, "%.2f", &settingsDirty_);
+        } else {
+            settingDouble("  increment", "Added to the lot on every following order (0.01 -> 0.02 -> 0.03...).",
+                          &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
+        }
+        settingInt("Max orders", "No more orders are placed in a range beyond this many (the deepest level).",
+                   &s.maxOrders, &settingsDirty_);
+        settingDouble("Max lot", "No single order bigger than this; the level that would need more is not placed.",
+                      &s.maxLot, 0.10, "%.2f", &settingsDirty_);
+
+        // --- Loss limits.
+        section("Loss limits", "0 = off; they apply at once");
+        settingDouble("Stop loss",
+                      "When the basket's net falls to minus this: every position is closed and every pending order "
+                      "cancelled -- the loss is taken instead of growing.",
+                      &s.stopLoss, 5.0, "%.2f", &settingsDirty_);
+        settingDouble("Lock & pause at loss",
+                      "When the basket's net reaches minus this: pending orders are cancelled and one opposite order "
+                      "freezes the loss (a hedge). The bot then waits for you -- the loss doesn't go away, and swap "
+                      "is charged every night.",
+                      &s.lockAtLoss, 10.0, "%.2f", &settingsDirty_);
+        settingDouble("Max basket loss",
+                      "Past this floating loss no new level is placed; the open positions stay and still close at "
+                      "the target (or the stop loss).",
+                      &s.maxBasketLoss, 10.0, "%.2f", &settingsDirty_);
+        settingDouble("Daily loss limit",
+                      "Once today's booked + floating net reaches minus this, the running range is closed and no new "
+                      "range opens until tomorrow (your computer's date).",
+                      &s.dailyLossLimit, 10.0, "%.2f", &settingsDirty_);
+
+        // --- Break-even.
+        section("Break-even", "a deep basket closes at the first bounce");
+        settingInt("Break-even from level",
+                   "From this fill on, the target drops to the amount below: a deep basket closes at the first "
+                   "bounce back instead of waiting for the full target. 0 = off.",
+                   &s.escapeFromLevel, &settingsDirty_);
+        settingDouble("  close at net", "Net after every cost at which such a basket (or a guarded one) closes.",
+                      &s.escapeProfit, 0.25, "%.2f", &settingsDirty_);
+        settingCheck("  also when guarded",
+                     "While a lock stop waits or a lock holds: once the net is back at the amount above, close "
                      "everything.",
                      &s.recovery.closeAtBreakEven, &settingsDirty_);
-        settingCheck("Escape from a lock",
-                     "Off by default. From a lock: stop orders outside the range, sized so a run of the escape move "
-                     "wins the frozen loss back. If the price turns back (into the range, or to the entry once it ran "
-                     "the trail distance) it locks again. It's a bet on a breakout -- each failed try adds its cost.",
+
+        // --- Margin guards.
+        section("Margin guards", "margin level = equity / margin");
+        settingDouble("Hold the next level under (%)",
+                      "Margin level the next fill would leave. Under this, that level is not placed: a stop order for "
+                      "the net lots (a lock) waits at its line instead. 0 = off.",
+                      &s.recovery.guardLockMarginLevel, 50.0, "%.0f", &settingsDirty_);
+        settingDouble("Lock at once under (%)",
+                      "Margin level now. Under this the basket is locked at market right away. 0 = off.",
+                      &s.recovery.guardStopMarginLevel, 50.0, "%.0f", &settingsDirty_);
+
+        // --- Escape.
+        section("Escape from a lock", "off by default -- a bet on a breakout");
+        settingCheck("Escape",
+                     "From a lock: stop orders outside the range, sized so a run of the escape move wins the frozen "
+                     "loss back. If the price turns back (into the range, or to the entry once it ran the trail "
+                     "distance) it locks again. Each failed try adds its cost.",
                      &s.recovery.escapeEnabled, &settingsDirty_);
         if (s.recovery.escapeEnabled) {
             settingDouble("  escape move ($)", "Price run the escape trade is sized to win the loss back over.",
@@ -3693,31 +3863,13 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             settingInt("  tries per basket", "After this many escapes that turned back, the basket just stays locked.",
                        &s.recovery.escapeMaxTries, &settingsDirty_);
         }
-
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Lot preset");
-        ImGui::SetItemTooltip("Aggressive: x2 each fill. Balanced: x1.5. Safe: +0.01 each fill. The table shows "
-                              "what each can lose.");
-        ImGui::TableNextColumn();
-        const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
-        auto preset = [&](const char* label, double mult, ImVec4 color) {
-            const bool on = std::fabs(s.lotMultiplier - mult) < 0.01 && (mult > 1.0 || std::fabs(s.lotIncrement - 0.01) < 0.001);
-            if (glass::button(label, on ? color : glass::palette().neutral, ImVec2(third, 0))) {
-                s.lotMultiplier = mult;
-                if (mult <= 1.0) s.lotIncrement = 0.01;
-                settingsDirty_ = true;
-            }
-        };
-        preset("Aggressive x2", 2.0, kRed);
-        ImGui::SameLine();
-        preset("Balanced x1.5", 1.5, kAmber);
-        ImGui::SameLine();
-        preset("Safe +0.01", 1.0, kGreen);
         ImGui::EndTable();
     }
     clampSettings(s);
+    renderLotPreview(s, snap && snap->bid && snap->ask ? (*snap->bid + *snap->ask) / 2.0 : 0.0);
+    ImGui::Spacing();
+    withFont(boldFont_, [] { ImGui::TextUnformatted("Worst case, level by level"); });
+    ImGui::TextDisabled("The price bounces between the two lines, so every fill adds the next lot on the other side.");
 
     // The table.
     muuk::core::RiskTableInput in;
@@ -3743,12 +3895,17 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
         if (snap->marginLeverage > 0.0) in.leverage = snap->marginLeverage;
         in.balance = snap->brokerAccount.balance;
         if (snap->brokerAccount.hedgedMarginPercent >= 0.0) in.hedgedPercent = snap->brokerAccount.hedgedMarginPercent;
+        const auto& a = snap->brokerAccount;
+        if (a.commissionInPerLot >= 0.0 || a.commissionOutPerLot >= 0.0) {
+            in.costs.commissionPerLotRoundTurn = std::max(0.0, a.commissionInPerLot) + std::max(0.0, a.commissionOutPerLot);
+            in.costs.commissionPerMillionPerSide = 0.0;
+        }
     }
     const auto rows = muuk::core::riskTable(in);
     const double lockGuard = s.recovery.guardLockMarginLevel;
     const double stopGuard = s.recovery.guardStopMarginLevel;
     int guardLevel = 0;  // the level the margin guard holds back (0 = none in the table)
-    if (s.accountBalance > 0.0 && lockGuard > 0.0) {
+    if (in.balance > 0.0 && lockGuard > 0.0) {
         for (const auto& r : rows) {
             if (r.marginLevel < lockGuard) {
                 guardLevel = r.level;
@@ -3794,7 +3951,7 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             ImGui::TableNextColumn();
             ImGui::Text("%s", money(-r.worstLoss).c_str());
             ImGui::TableNextColumn();
-            ImGui::Text("$%.0f", r.margin);
+            ImGui::Text("%s", amount(r.margin).c_str());
             ImGui::TableNextColumn();
             if (balance > 0.0) {
                 ImGui::TextColored(marginLevelColor(r.marginLevel, lockGuard, stopGuard), "%.0f%%",
@@ -3804,7 +3961,7 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             }
             ImGui::TableNextColumn();
             if (balance > 0.0) {
-                ImGui::Text("%s", money(equity).c_str());
+                ImGui::Text("%s", amount(equity).c_str());
             } else {
                 ImGui::TextUnformatted("--");
             }
@@ -3837,10 +3994,11 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                           "price must then run past the last fill, without coming back to the other line, for the "
                           "basket to be back at 0.");
     if (balance <= 0.0) {
-        ImGui::TextColored(kAmber, "Enter your balance above to see where margin and balance run out.");
+        ImGui::TextColored(kAmber, mt5 ? "Connect to MT5 to see where margin and balance run out."
+                                       : "Enter your balance above to see where margin and balance run out.");
     } else if (!rows.empty()) {
         ImGui::TextColored(lastSafe >= static_cast<int>(rows.size()) ? kGreen : kAmber,
-                           "With $%.0f at 1:%.0f the account holds %d level(s) of bouncing%s.", balance,
+                           "With %s at 1:%.0f the account holds %d level(s) of bouncing%s.", amount(balance).c_str(),
                            in.leverage, lastSafe,
                            lastSafe >= static_cast<int>(rows.size()) ? " -- the whole table" : "; after that, margin call / stop-out");
         if (guardLevel > 0) {
@@ -3937,6 +4095,11 @@ void DashboardWindow::renderReverseCalculator(const std::optional<LiveSnapshot>&
         in.spec.tickValue = snap->moneyPerPointPerLot * in.spec.tickSize;
         if (snap->marginLeverage > 0.0) in.margin.leverage = snap->marginLeverage;
         if (snap->brokerAccount.hedgedMarginPercent >= 0.0) in.margin.hedgedPercent = snap->brokerAccount.hedgedMarginPercent;
+        const auto& a = snap->brokerAccount;
+        if (a.commissionInPerLot >= 0.0 || a.commissionOutPerLot >= 0.0) {
+            in.costs.commissionPerLotRoundTurn = std::max(0.0, a.commissionInPerLot) + std::max(0.0, a.commissionOutPerLot);
+            in.costs.commissionPerMillionPerSide = 0.0;
+        }
     }
     in.buyLots = buys;
     in.sellLots = sells;
@@ -3964,15 +4127,15 @@ void DashboardWindow::renderReverseCalculator(const std::optional<LiveSnapshot>&
         ImGui::TextWrapped("After it: net %s %.2f lot. A $%.2f move %s brings the basket back to about 0; each $1 "
                            "the other way adds %s to the loss.",
                     t.buy ? "long" : "short", over, reverseMove_, t.buy ? "up" : "down",
-                    money(-over * 100.0).c_str());
+                    money(-over * in.spec.contractSize).c_str());
     }
     if (equity < 0.0) {
-        ImGui::TextColored(kAmber, "Margin after: $%.2f (enter the balance for free margin and margin level).",
-                           t.marginAfter);
+        ImGui::TextColored(kAmber, "Margin after: %s (the balance gives free margin and margin level).",
+                           amount(t.marginAfter).c_str());
     } else {
         ImGui::TextColored(marginLevelColor(t.marginLevelAfter, s.recovery.guardLockMarginLevel,
                                             s.recovery.guardStopMarginLevel),
-                           "Margin after: $%.2f, free margin %s, margin level %.0f%%%s", t.marginAfter,
+                           "Margin after: %s, free margin %s, margin level %.0f%%%s", amount(t.marginAfter).c_str(),
                            money(t.freeMarginAfter).c_str(), std::max(0.0, std::min(t.marginLevelAfter, 99999.0)),
                            t.marginLevelAfter < 100.0 ? " -- not affordable (margin call)" : "");
     }

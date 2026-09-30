@@ -75,7 +75,8 @@ private:
     enum class Confirm { None, CloseRange, CloseAllPositions, CancelAllPending, ResetData, PlaceNow };
     // The tabs on the right; a KPI card click selects one.
     enum class Tab { None, Positions, Orders, History, Risk, News, Audit, Volume, Performance, Settings, Log };
-    // Risk & guards page: balance, guards, lock/escape, the risk table and the reverse-trade calculator.
+    // Risk & capital page: account cards, lots, loss limits, guards, lock/escape, the risk table and the
+    // reverse-trade calculator.
     void renderRiskPage(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
                         bool connected);
     // Save & apply / Revert for the edited settings (Settings and Risk pages).
@@ -117,9 +118,12 @@ private:
     void renderNewsTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap,
                        bool connected);
     void renderMarketSettings();
-    // Risk & capital: balance, leverage, lot presets, break-even escape, lock,
-    // and the level-by-level worst case (muuk::core::riskTable).
+    // Risk & capital: the account cards, lot sizing, loss limits, break-even,
+    // margin guards, escape, and the level-by-level worst case (muuk::core::riskTable).
     void renderRiskCalculator(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
+    // Balance, equity, margin, free margin and margin level: from MT5 when it
+    // reports them, else the typed-in balance and the bot's estimate (cTrader).
+    void renderAccountCards(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
     // Audit: every self-check with its state, and what it found / did.
     void renderAuditTab(const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap, bool connected);
     // Reverse-trade calculator (muuk::core::reverseTrade) under the risk table.
