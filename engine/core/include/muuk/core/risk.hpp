@@ -10,7 +10,7 @@ namespace muuk::core {
 // must not be allowed. Any one of these being exceeded halts new order
 // creation and raises an alert.
 struct RiskLimits {
-    int maxOrders = 10;
+    int maxOrders = 10;             // orders per range cycle: the deepest level it may reach
     Volume maxLot;                  // largest single order allowed
     double maxBasketLossMoney = 0.0;  // hard stop on floating/realized loss
     double maxDrawdownMoney = 0.0;
@@ -34,6 +34,9 @@ enum class RiskLimitKind {
 // Built by the caller (StrategyEngine) from its current state each time a
 // risk check is needed — no I/O, no allocation.
 struct RiskCheckInput {
+    // Orders this cycle before the one being checked (its level - 1). The
+    // strategy keeps a single order pending at a time, so counting pending
+    // orders would never stop a deep basket.
     int activeOrderCount = 0;
     Volume nextOrderVolume;
     double basketLossMoney = 0.0;   // positive == currently losing this much

@@ -29,7 +29,9 @@ void StrategyEngine::tryArmOrder(CommandBatch& out, OrderSide side, int seqIndex
     const Volume lot = computeSequenceLot(config_.lotProgression, seqIndex, config_.symbol);
 
     RiskCheckInput riskInput;
-    riskInput.activeOrderCount = static_cast<int>(pendingOrders_.size());
+    // Max orders caps the levels of a cycle: this order is level seqIndex
+    // (both seed orders share the first level's index).
+    riskInput.activeOrderCount = std::max(static_cast<int>(pendingOrders_.size()), seqIndex - 1);
     riskInput.nextOrderVolume = lot;
     // Current floating loss doubles as a Phase-1 drawdown proxy. A true
     // peak-to-trough drawdown series is a backtest-level statistic (see
@@ -279,7 +281,10 @@ CommandBatch StrategyEngine::onTick(const TickEvent& tick) {
     lastTick_ = tick;
     CommandBatch out;
 
-    if (status_ != EngineStatus::Active) {
+    // A basket halted by a risk limit (max orders / max lot / max basket
+    // loss) adds nothing more, but its open positions still close at the
+    // target or the stop loss -- a halt must never leave them unmanaged.
+    if (status_ != EngineStatus::Active && status_ != EngineStatus::HaltedByRisk) {
         return out;
     }
 

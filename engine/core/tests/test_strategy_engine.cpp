@@ -234,6 +234,44 @@ TEST_CASE("risk engine halts new order creation once max orders is reached") {
     REQUIRE(engine.activeOrderCount() == 1);
 }
 
+TEST_CASE("a basket halted by a risk limit still closes at its target and its stop loss") {
+    // Max orders 2: both boundary orders go out, then the next level is
+    // refused. The positions already open must not be left unmanaged.
+    const SymbolSpec spec = xauusdSpec();
+    for (const bool hitTarget : {true, false}) {
+        StrategyConfig cfg = baseConfig(spec);
+        cfg.riskLimits.maxOrders = 2;
+        cfg.basketProfitTargetMoney = 1.0;
+        cfg.basketStopLossMoney = 5.0;
+        StrategyEngine engine(cfg);
+        const CommandBatch initial = engine.start();
+        const OrderId buyId = placeCmd(initial, 0).id;   // Buy Stop 0.01 @ 4337
+        const OrderId sellId = placeCmd(initial, 1).id;  // Sell Stop 0.02 @ 4336
+        (void)engine.onOrderConfirmed(OrderConfirmedEvent{buyId, Price::fromDouble(4337.00, spec)});
+        const CommandBatch afterSell = engine.onOrderConfirmed(OrderConfirmedEvent{sellId, Price::fromDouble(4336.00, spec)});
+        bool alert = false;
+        for (const auto& cmd : afterSell) alert = alert || std::holds_alternative<RiskAlertCommand>(cmd);
+        REQUIRE(alert);  // the third order would break max orders
+        REQUIRE(engine.status() == EngineStatus::HaltedByRisk);
+
+        // Net short 0.01: a drop wins (target), a rally loses (stop loss).
+        TickEvent tick;
+        tick.bid = Price::fromDouble(hitTarget ? 4330.00 : 4342.00, spec);
+        tick.ask = Price::fromDouble(hitTarget ? 4330.02 : 4342.02, spec);
+        const CommandBatch out = engine.onTick(tick);
+        bool closed = false;
+        for (const auto& cmd : out) {
+            if (const auto* c = std::get_if<CloseBasketCommand>(&cmd)) {
+                closed = true;
+                REQUIRE(c->stopLoss == !hitTarget);
+            }
+        }
+        INFO((hitTarget ? "target" : "stop loss"));
+        REQUIRE(closed);
+        REQUIRE(engine.status() == EngineStatus::Completed);
+    }
+}
+
 TEST_CASE("rejected orders retry up to the configured limit, then give up") {
     const SymbolSpec spec = xauusdSpec();
     StrategyConfig cfg = baseConfig(spec);

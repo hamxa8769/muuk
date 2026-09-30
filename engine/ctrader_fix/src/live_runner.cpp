@@ -232,7 +232,7 @@ LiveSnapshot LiveRunner::snapshot() const {
         snap.marginLevelNow = brokerAccount_.margin > 0.0 ? marginLevelPercent(brokerAccount_.equity, brokerAccount_.margin)
                                                           : (openLegs_.empty() ? -1.0 : 1e9);
     }
-    snap.escapeActive = engine_ && engine_->status() == EngineStatus::Active && engine_->escapeActive();
+    snap.escapeActive = basketRunningLocked() && engine_->escapeActive();
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
     // the first new quote (e.g. during the daily break).
@@ -1075,7 +1075,7 @@ void LiveRunner::maybeEmitTick() {
         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - decideStart).count());
     ++ticksProcessed_;
     // Deepest drawdown / best point of the running basket.
-    if (currentBasket_ && engine_->status() == EngineStatus::Active && !openLegs_.empty()) {
+    if (currentBasket_ && basketRunningLocked() && !openLegs_.empty()) {
         const double net = engine_->lastBasketPnl().netPnlMoney;
         currentBasket_->worstNet = std::min(currentBasket_->worstNet, net);
         currentBasket_->bestNet = std::max(currentBasket_->bestNet, net);
@@ -1088,11 +1088,17 @@ void LiveRunner::maybeEmitTick() {
     maybeRestartAfterBasketClose();
 }
 
+bool LiveRunner::basketRunningLocked() const {
+    if (!engine_) return false;
+    const EngineStatus st = engine_->status();
+    return st == EngineStatus::Active || (st == EngineStatus::HaltedByRisk && !openLegs_.empty());
+}
+
 void LiveRunner::maybeLockLocked() {
     const double lockAt = config_.connection.lockAtLossMoney;
     if (lockAt <= 0.0 || locked_ || !engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
     if (openLegs_.empty() || !pendingCloses_.empty()) return;
-    if (engine_->status() != EngineStatus::Active && guardLockOrderId_ == 0) return;
+    if (!basketRunningLocked() && guardLockOrderId_ == 0) return;
     const double net = floatingNetLocked();
     if (net > -lockAt) return;
     lockNowLocked("the basket reached " + usdText(net) + " (lock at -" + usdText(lockAt).substr(1) + ")", net);
@@ -1113,7 +1119,7 @@ void LiveRunner::lockNowLocked(const std::string& why, double net) {
     escape_.buyStopId = escape_.sellStopId = 0;
     escape_.legId = 0;
     escape_.trailing = false;
-    if (engine_->status() == EngineStatus::Active) {
+    if (basketRunningLocked()) {
         const RangeConfig range = engine_->currentRange();  // the escape orders go outside it
         guardRangeLow_ = range.lowerBound;
         guardRangeHigh_ = range.upperBound;
@@ -2005,7 +2011,8 @@ void LiveRunner::handleCommand(const Command& cmd) {
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +
-            ") — no further orders will be armed this cycle");
+            ") -- no further orders will be armed this cycle; the open positions still close at the target / "
+            "stop loss");
     }
 }
 
@@ -2119,7 +2126,7 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
     // safely any more (its P/L and next order assume that position): stop
     // it -- pending orders cancelled, the rest of the positions listed, and
     // nothing new opens until the operator decides.
-    if (basketLegGone && engine_ && engine_->status() == EngineStatus::Active) {
+    if (basketLegGone && basketRunningLocked()) {
         noteBrokerIssueLocked("the running basket lost a position -- stopped it and cancelled its pending orders; "
                               "close the rest or press Open range");
         setCloseReason("interrupted: a position was closed outside the bot");
@@ -2259,7 +2266,7 @@ bool LiveRunner::openRange() {
     std::scoped_lock lock(engineMutex_);
     if (!engine_ || !tradeSession_) return false;
 
-    if (engine_->status() == EngineStatus::Active) {
+    if (basketRunningLocked()) {
         log("[manual] a range is already running -- close it before opening another");
         return false;
     }
@@ -2611,7 +2618,7 @@ void LiveRunner::closePosition(OrderId id) {
     log("[manual] operator requested: close position id=" + std::to_string(id));
     // Only names the basket's ending if no range is running -- otherwise the
     // basket carries on and ends however it ends.
-    if (!engine_ || engine_->status() != EngineStatus::Active) setCloseReason("manual: close position");
+    if (!basketRunningLocked()) setCloseReason("manual: close position");
     const OpenLeg leg = *it;
     openLegs_.erase(it);
     closeLegs({leg});
@@ -3374,7 +3381,7 @@ void LiveRunner::auditLocked() {
     if (haveQuote) {
         for (const auto& leg : openLegs_) live += legPnl(leg);
     }
-    const bool active = engine_->status() == EngineStatus::Active;
+    const bool active = basketRunningLocked();
 
     // 1. Prices: a feed that stopped while the market is open is reconnected.
     {
@@ -3435,6 +3442,11 @@ void LiveRunner::auditLocked() {
         const std::size_t pending = placedOrderInfo_.size() + waitingOrders_.size();
         if (!active) {
             set(kAuditPending, 0, "no range running", false);
+        } else if (engine_->status() == EngineStatus::HaltedByRisk) {
+            set(kAuditPending, 1,
+                "a limit (max orders / max lot / max basket loss) stops new levels -- the open positions close at "
+                "the target or the stop loss",
+                false);
         } else if (engine_->seeding()) {
             set(kAuditPending, 0, "entry orders out", false);
         } else if (pending == 0 && config_.strategy.reArmOnFill && pendingCloses_.empty()) {
@@ -3499,7 +3511,7 @@ void LiveRunner::auditLocked() {
             // The engine closes on the tick that reaches it; if that didn't
             // happen, give it the live price again, then close by hand.
             for (const auto& cmd : engine_->onTick(latestTick())) handleCommand(cmd);
-            if (engine_->status() == EngineStatus::Active) {
+            if (basketRunningLocked()) {
                 closeRangeLocked(true, "audit: target / stop loss reached but the basket didn't close");
             }
             set(kAuditTarget, 1, "net " + usd(pnl.netPnlMoney) + " reached the target / stop loss but was still open -- closed it", true);

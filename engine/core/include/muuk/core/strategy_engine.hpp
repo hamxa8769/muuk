@@ -15,7 +15,8 @@ namespace muuk::core {
 enum class EngineStatus {
     Idle,          // constructed, start() not called yet
     Active,        // one or more pending orders armed / legs open
-    HaltedByRisk,  // a hard risk limit was hit; no new orders will be placed
+    HaltedByRisk,  // a hard risk limit was hit; no new orders will be placed, but the open
+                   // positions still close at the target / stop loss (onTick)
     Completed,     // basket profit target reached and closed this cycle
 };
 
