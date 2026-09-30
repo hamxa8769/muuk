@@ -266,6 +266,13 @@ PnlBreakdown LiveRunner::legPnl(const OpenLeg& leg) const {
     p.spread = (buy ? mid - static_cast<double>(bid.ticks) : static_cast<double>(ask.ticks) - mid) * moneyPerTick;
     p.commission = muuk::core::roundTurnCommissionMoney(lotsHeld, leg.price.toDouble(spec), spec,
                                                         config_.strategy.costs);
+    if (leg.brokerEntryCommission >= 0.0) {
+        // MT5: what the opening really cost, plus the closing at this account's own rate.
+        const double outRate = brokerAccount_.commissionOutPerLot >= 0.0  ? brokerAccount_.commissionOutPerLot
+                               : brokerAccount_.commissionInPerLot >= 0.0 ? brokerAccount_.commissionInPerLot
+                                                                          : -1.0;
+        p.commission = leg.brokerEntryCommission + (outRate >= 0.0 ? outRate * lotsHeld : leg.brokerEntryCommission);
+    }
     // Swap is only known on MT5 (the bridge reports it per position); a cost here, so charged swap is positive.
     if (const auto sw = positionSwap_.find(leg.positionId); sw != positionSwap_.end()) p.swap = -sw->second;
     p.net = p.gross - p.slippage - p.spread - p.commission - p.swap;
@@ -687,8 +694,13 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
                         const int64_t moveTicks = (leg.side == OrderSide::BuyStop) ? exitPrice.ticks - leg.price.ticks
                                                                                     : leg.price.ticks - exitPrice.ticks;
                         const double gross = static_cast<double>(moveTicks) * spec.tickValue * lotsClosed;
-                        const double commission = muuk::core::roundTurnCommissionMoney(
-                            lotsClosed, leg.price.toDouble(spec), spec, config_.strategy.costs);
+                        // MT5 reports what each deal really cost: book exactly that
+                        // (opening + closing); otherwise the configured rate.
+                        const bool actual = config_.connection.isMt5() && info.commission && leg.brokerEntryCommission >= 0.0;
+                        const double commission =
+                            actual ? leg.brokerEntryCommission + std::fabs(*info.commission)
+                                   : muuk::core::roundTurnCommissionMoney(lotsClosed, leg.price.toDouble(spec), spec,
+                                                                           config_.strategy.costs);
                         bookedGross_ += gross;
                         bookedCommission_ += commission;
                         addRealizedLocked(gross - commission);
@@ -717,7 +729,7 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
             }
             const Price fillPrice = Price::fromDouble(*info.avgPx, config_.strategy.symbol);
             std::scoped_lock lock(engineMutex_);
-            applyFillLocked(*orderId, fillPrice, info.positionId.value_or(""));
+            applyFillLocked(*orderId, fillPrice, info.positionId.value_or(""), info.commission);
             return;
         }
 
@@ -930,7 +942,8 @@ void LiveRunner::onTradeMessage(const FixMessage& msg) {
     log("[trade] unhandled message type: " + type);
 }
 
-void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::string& positionId) {
+void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::string& positionId,
+                                 std::optional<double> brokerCommission) {
     markDirty();
     // Every real (non-close) fill becomes its own tracked open leg
     // -- see openLegs_'s comment for why this can't just be a net
@@ -945,6 +958,7 @@ void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::st
                 "close it in cTrader if needed");
         }
         filled.confirmed = true;  // a fill is the broker's own report
+        if (brokerCommission && config_.connection.isMt5()) filled.brokerEntryCommission = std::fabs(*brokerCommission);
         openLegs_.push_back(filled);
         placedOrderInfo_.erase(it);
         recordLegOpened(filled);
@@ -1204,6 +1218,8 @@ void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
     a.volumeMax = num(tag::MuukVolumeMax);
     a.limitOrders = static_cast<int>(num(tag::MuukLimitOrders));
     a.tradeMode = str(tag::MuukTradeMode);
+    a.commissionInPerLot = num(tag::MuukCommissionInPerLot, -1.0);
+    a.commissionOutPerLot = num(tag::MuukCommissionOutPerLot, -1.0);
     // Per-position swap: a repeating group, one id then its swap and commission.
     positionSwap_.clear();
     const auto ids = msg.getAll(tag::MuukCostPositionId);
@@ -1256,6 +1272,19 @@ void LiveRunner::adoptBrokerSymbolLocked(const BrokerAccountInfo& a) {
     st.riskLimits.maxSlippageTicks = ticks(st.riskLimits.maxSlippageTicks);
     st.symbol = spec;
     std::string notes;
+    // Commission: what this account really pays, learned from its own deals.
+    if (a.commissionInPerLot >= 0.0 || a.commissionOutPerLot >= 0.0) {
+        const double in = a.commissionInPerLot >= 0.0 ? a.commissionInPerLot : a.commissionOutPerLot;
+        const double out = a.commissionOutPerLot >= 0.0 ? a.commissionOutPerLot : a.commissionInPerLot;
+        st.costs.commissionPerLotRoundTurn = in + out;
+        st.costs.commissionPerMillionPerSide = 0.0;
+        notes += "; commission " + priceTextOf(in + out) + " " + a.currency + " per lot round turn (" + priceTextOf(in) +
+                 " in + " + priceTextOf(out) + " out, from this account's deals)";
+    } else {
+        notes += "; no gold deals on this account yet -- commission from Settings (" +
+                 priceTextOf(st.costs.commissionPerLotRoundTurn) + " per lot, " +
+                 priceTextOf(st.costs.commissionPerMillionPerSide) + " per million); the first fills report the real one";
+    }
     if (firstLot + 1e-9 < spec.volumeMin) {
         st.lotProgression.initialLot = Volume::fromDouble(spec.volumeMin, spec);
         notes += "; first lot raised to the broker's minimum " + priceTextOf(spec.volumeMin);
@@ -2676,6 +2705,7 @@ void LiveRunner::reconcileOnConnectLocked() {
         l.requestedPrice = Price{p.requestedPriceTicks};
         l.positionId = p.positionId;
         l.adopted = p.adopted;
+        l.brokerEntryCommission = p.brokerEntryCommission;
         return l;
     };
 
@@ -3164,6 +3194,7 @@ PersistedState LiveRunner::buildStateLocked() const {
         p.positionId = l.positionId;
         p.adopted = l.adopted;
         p.closeClOrdId = closeClOrdId;
+        p.brokerEntryCommission = l.brokerEntryCommission;
         return p;
     };
     auto sortedIds = [](const std::unordered_map<OrderId, OpenLeg>& m) {

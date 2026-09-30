@@ -54,6 +54,8 @@ struct EaStatus {
     int magic = 0;
     int limitOrders = 0;  // the broker's cap on pending orders (0 = none given)
     std::string tradeMode;  // "demo", "contest" or "real"
+    double commissionInPerLot = -1.0;   // from the account's own deals; <0 = no history
+    double commissionOutPerLot = -1.0;
 };
 
 // The MT5 bridge. MuukBridge.mq5 runs inside MetaTrader 5 and talks to this

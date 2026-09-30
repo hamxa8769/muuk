@@ -24,6 +24,7 @@ struct PersistedLeg {
     std::string positionId;           // broker position id (positions only)
     bool adopted = false;
     std::string closeClOrdId;         // closing order in flight (pendingCloses only)
+    double brokerEntryCommission = -1.0;  // MT5: charged on opening; <0 = not reported
 };
 
 // Everything LiveRunner needs to pick a basket back up in a new process --

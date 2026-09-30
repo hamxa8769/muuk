@@ -128,6 +128,8 @@ struct BrokerAccountInfo {
     double volumeMax = 0.0;
     int limitOrders = 0;
     std::string tradeMode;     // "demo", "contest", "real" ("" = not told)
+    double commissionInPerLot = -1.0;   // what the account paid per lot on opening / closing (its own
+    double commissionOutPerLot = -1.0;  // gold deals of the last 90 days); <0 = no history
     [[nodiscard]] bool real() const { return tradeMode == "real"; }
     [[nodiscard]] bool cent() const {
         return currency == "USC" || currency == "USc" || currency == "UScent" || currency == "USX";
@@ -433,6 +435,9 @@ private:
         // Orders: acknowledged by the broker (ExecType New) or listed as
         // working. Positions: seen in the broker's position list.
         bool confirmed = false;
+        // MT5: what the broker really charged when this position opened
+        // (commission + fees); <0 = not reported (cTrader, older state).
+        double brokerEntryCommission = -1.0;
     };
 
     // Applies a complete set of Position Reports (see syncPositions()).
@@ -446,7 +451,8 @@ private:
     // leg and the engine reacts (next order); one whose cancel was already
     // sent is closed straight away as surplus. Shared by live fills and
     // fills found on reconnect. Caller must hold engineMutex_.
-    void applyFillLocked(muuk::core::OrderId orderId, muuk::core::Price fillPrice, const std::string& positionId);
+    void applyFillLocked(muuk::core::OrderId orderId, muuk::core::Price fillPrice, const std::string& positionId,
+                         std::optional<double> brokerCommission = std::nullopt);
 
     // State persistence (see setStateFile). loadSavedState: reads the file
     // (before connecting). reconcileOnConnectLocked: matches it against the

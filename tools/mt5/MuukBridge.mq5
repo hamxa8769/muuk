@@ -263,8 +263,36 @@ double HedgedMarginPercent()
    return MathMin(100.0, MathMax(0.0, hedged / contract * 100.0));
 }
 
+// What this account really pays per 1 lot, from its own gold deals of the
+// last 90 days: commission + fees on opening (in) and on closing (out), as
+// a positive cost in the account's money. -1 = no deals to learn from.
+void CommissionFromHistory(double &inPerLot, double &outPerLot)
+{
+   inPerLot = -1.0;
+   outPerLot = -1.0;
+   if(!HistorySelect(TimeCurrent() - 90 * 86400, TimeCurrent() + 86400)) return;
+   double inCost = 0.0, inVol = 0.0, outCost = 0.0, outVol = 0.0;
+   const int n = HistoryDealsTotal();
+   for(int i = 0; i < n; i++)
+   {
+      const ulong d = HistoryDealGetTicket(i);
+      if(d == 0 || HistoryDealGetString(d, DEAL_SYMBOL) != g_sym) continue;
+      const long type = HistoryDealGetInteger(d, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL) continue;
+      const double vol = HistoryDealGetDouble(d, DEAL_VOLUME);
+      const double cost = -(HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE));
+      const long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN) { inCost += cost; inVol += vol; }
+      else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) { outCost += cost; outVol += vol; }
+   }
+   if(inVol > 0.0) inPerLot = MathMax(0.0, inCost / inVol);
+   if(outVol > 0.0) outPerLot = MathMax(0.0, outCost / outVol);
+}
+
 void QueueHello()
 {
+   double commIn = -1.0, commOut = -1.0;
+   CommissionFromHistory(commIn, commOut);
    const bool hedging = AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING;
    const long mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
    string s = "{\"t\":\"hello\"";
@@ -287,6 +315,7 @@ void QueueHello()
    s += ",\"marginPerLot\":" + Num(MarginPerLot(), 4);
    s += ",\"magic\":" + IntegerToString(MagicNumber);
    s += ",\"limitOrders\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LIMIT_ORDERS));
+   s += ",\"commIn\":" + Num(commIn, 4) + ",\"commOut\":" + Num(commOut, 4);
    s += "}";
    Send(s);
    if(!hedging) Print("MuukBridge: this is a NETTING account -- Muuk needs a hedging account.");
@@ -554,10 +583,12 @@ void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest&
    string id = IdForOrder(order);
    if(id == "") id = HistoryDealGetString(trans.deal, DEAL_COMMENT);
    if(id == "") return;  // not one of the bot's orders
+   // What this deal really cost: commission + fee (positive = charged).
+   const double cost = -(HistoryDealGetDouble(trans.deal, DEAL_COMMISSION) + HistoryDealGetDouble(trans.deal, DEAL_FEE));
    Send("{\"t\":\"fill\",\"id\":\"" + Esc(id) + "\",\"price\":" + Num(HistoryDealGetDouble(trans.deal, DEAL_PRICE), g_digits) +
         ",\"volume\":" + Num(HistoryDealGetDouble(trans.deal, DEAL_VOLUME), 4) + ",\"pos\":\"" +
         IntegerToString(HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID)) + "\",\"buy\":" +
-        (dealType == DEAL_TYPE_BUY ? "true" : "false") + "}");
+        (dealType == DEAL_TYPE_BUY ? "true" : "false") + ",\"comm\":" + Num(cost, 4) + "}");
    QueueAccount();
 }
 //+------------------------------------------------------------------+

@@ -369,7 +369,8 @@ TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order li
              {"currency", "USC"},  {"leverage", 500},     {"hedging", true},            {"symbol", "GOLD"},
              {"digits", 3},        {"contract", 100},     {"volMin", 0.10},             {"volStep", 0.01},
              {"volMax", 500},      {"hedgedMargin", 50},  {"magic", 770077},            {"tickSize", 0.001},
-             {"tickValue", 10.0},  {"marginPerLot", 86730.0}, {"limitOrders", 10}});
+             {"tickValue", 10.0},  {"marginPerLot", 86730.0}, {"limitOrders", 10},     {"commIn", 350.0},
+             {"commOut", 350.0}});
     ea.send({{"t", "account"}, {"balance", 100000.0}, {"equity", 100000.0}, {"margin", 0.0}, {"free", 100000.0},
              {"costs", nlohmann::json::array()}});
     REQUIRE(waitUntil([&] { return gateway.status().accountKnown; }));
@@ -391,6 +392,25 @@ TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order li
     REQUIRE(s.settings.initialLot == Catch::Approx(0.10));
     REQUIRE(s.settings.maxOrders == 8);                         // 10 pending allowed, 2 kept spare
     REQUIRE(s.moneyPerPointPerLot == Catch::Approx(10000.0));  // 10 per 0.001 -> 10,000 per 1.00
+    // Commission as this account really pays it (its own deals): 350 in + 350 out per lot.
+    REQUIRE(s.settings.commissionPerLot == Catch::Approx(700.0));
+    REQUIRE(s.settings.commissionPerMillion == Catch::Approx(0.0));
+
+    // A fill reports what it cost; the close too -- the basket books exactly that.
+    ea.send({{"t", "fill"}, {"id", buy.at("id")}, {"price", 4337.000}, {"volume", 0.10}, {"pos", "81001"}, {"buy", true},
+             {"comm", 36.0}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().positions.size() == 1; }));
+    ea.send({{"t", "tick"}, {"bid", 4337.500}, {"ask", 4337.550}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().bid && *runner.snapshot().bid == Catch::Approx(4337.500); }));
+    // Open: 36 charged + 35 expected on closing (350 per lot x 0.10).
+    REQUIRE(runner.snapshot().positions[0].pnl.commission == Catch::Approx(71.0));
+    runner.closeRange(false);
+    (void)ea.waitFor("cancel");
+    const auto close = ea.waitFor("market");
+    ea.send({{"t", "fill"}, {"id", close.at("id")}, {"price", 4337.500}, {"volume", 0.10}, {"pos", "81001"}, {"buy", false},
+             {"comm", 34.0}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
+    REQUIRE(runner.snapshot().baskets[0].commission == Catch::Approx(70.0));  // 36 + 34, exactly as charged
 }
 
 #include "muuk/mt5_bridge/mt5_launcher.hpp"

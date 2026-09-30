@@ -40,7 +40,8 @@ nlohmann::json legToJson(const PersistedLeg& l) {
             {"requestedPriceTicks", l.requestedPriceTicks},
             {"positionId", l.positionId},
             {"adopted", l.adopted},
-            {"closeClOrdId", l.closeClOrdId}};
+            {"closeClOrdId", l.closeClOrdId},
+            {"brokerEntryCommission", l.brokerEntryCommission}};
 }
 
 PersistedLeg legFromJson(const nlohmann::json& j) {
@@ -53,6 +54,7 @@ PersistedLeg legFromJson(const nlohmann::json& j) {
     l.positionId = j.value("positionId", std::string());
     l.adopted = j.value("adopted", false);
     l.closeClOrdId = j.value("closeClOrdId", std::string());
+    l.brokerEntryCommission = j.value("brokerEntryCommission", -1.0);
     return l;
 }
 

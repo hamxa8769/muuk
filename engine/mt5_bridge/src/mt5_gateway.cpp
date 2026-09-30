@@ -302,6 +302,8 @@ void Mt5Gateway::onEaLine(const std::string& line) {
             status_.magic = static_cast<int>(jsonNumber(j, "magic", 0));
             status_.limitOrders = static_cast<int>(jsonNumber(j, "limitOrders", 0));
             status_.tradeMode = jsonString(j, "tradeMode");
+            status_.commissionInPerLot = jsonNumber(j, "commIn", -1.0);
+            status_.commissionOutPerLot = jsonNumber(j, "commOut", -1.0);
             refuse = !status_.hedging;
         }
         const EaStatus s = status();
@@ -369,6 +371,10 @@ void Mt5Gateway::onEaLine(const std::string& line) {
         er.set(tag::LeavesQty, std::string("0"));
         const std::string pos = jsonString(j, "pos");
         if (!pos.empty()) er.set(tag::PosMaintRptID, pos);
+        if (j.contains("comm") && j.at("comm").is_number()) {
+            er.set(tag::Commission, jsonNumber(j, "comm"), 4);  // what MT5 charged on this deal
+            er.set(tag::CommType, std::string("3"));             // absolute
+        }
         sendFix(tc, er);
         std::scoped_lock lock(mutex_);
         orders_.erase(id);
@@ -636,6 +642,8 @@ void Mt5Gateway::sendAccountInfo(const FixConnPtr& conn, const nlohmann::json& c
     m.set(tag::MuukVolumeMax, s.volumeMax, 4);
     m.set(tag::MuukLimitOrders, static_cast<int64_t>(s.limitOrders));
     m.set(tag::MuukTradeMode, s.tradeMode);
+    m.set(tag::MuukCommissionInPerLot, s.commissionInPerLot, 4);
+    m.set(tag::MuukCommissionOutPerLot, s.commissionOutPerLot, 4);
     m.set(tag::MuukNoPositionCosts, static_cast<int64_t>(costs.size()));
     for (const auto& c : costs) {
         m.set(tag::MuukCostPositionId, jsonString(c, "pos"));
