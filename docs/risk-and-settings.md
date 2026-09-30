@@ -69,7 +69,7 @@ These came in `0884b78`:
 
 - **Menu:** one menu icon at the top. It opens on hover and closes after you choose; the page uses the full width.
 - **Risk & capital page** (`310a27b`):
-  - **Account cards:** balance, equity, margin used, free margin and margin level. They come from MT5; on cTrader they use the balance you type in.
+  - **Account cards** at the top of the **Positions** page (the first page): balance, equity, margin used, free margin and margin level. They come from MT5; on cTrader they use the balance you type in. The Risk & capital page repeats them in one line.
   - **One place for every risk setting.** Lot sizing and loss limits moved here from Settings, so no setting appears on two pages.
   - **On MT5, the fields the broker already reports are hidden.** These are balance, leverage, hedged margin, account type and commission; the cards show the broker's values instead.
   - **Risk table fixes:** the guard marker, the units (¢ / $) and the commission now follow MT5.
@@ -93,7 +93,8 @@ JustMarkets demo cent, 30 Sep 15:30–17:15.
 | Page | Settings |
 |---|---|
 | **Settings** | First order side, range width, profit target / auto target, entry offset, cooldowns, commission (cTrader only), market hours & news guard, account / platform |
-| **Risk & capital** | Account cards, account (cTrader only), lot sizing, loss limits, break-even, margin guards, escape, worst-case table, reverse-trade calculator |
+| **Positions** | Account cards (balance, equity, margin, free margin, margin level), then the open positions |
+| **Risk & capital** | Account (cTrader only), lot sizing, loss limits, break-even, margin guards, escape, worst-case table, reverse-trade calculator |
 | Target gear (under the chart) | A shortcut to the same auto-target setting; it applies at once |
 
 **Save & apply** writes the settings to the config file. It also hands them to the running bot:
@@ -102,7 +103,7 @@ JustMarkets demo cent, 30 Sep 15:30–17:15.
 
 ---
 
-## 3. The account cards
+## 3. The account cards (Positions page)
 
 | Card | Meaning |
 |---|---|

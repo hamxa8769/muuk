@@ -849,13 +849,22 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
         glass::pill("Offline", kGrey);
     }
 
-    const float themeWidth = 92.0f;
-    const float autoWidth = ImGui::CalcTextSize("Connect when the app opens").x + ImGui::GetFrameHeight() + 24.0f;
-    ImGui::SameLine(ImGui::GetWindowWidth() - themeWidth - autoWidth - ImGui::GetStyle().WindowPadding.x);
-    if (ImGui::Checkbox("Connect when the app opens", &prefs_.autoConnect)) savePrefs(prefs_);
-    ImGui::SetItemTooltip("Next time the app starts it connects by itself with the same config and picks up "
-                          "the running basket -- for an unattended PC/VPS.");
-    ImGui::SameLine(ImGui::GetWindowWidth() - themeWidth - ImGui::GetStyle().WindowPadding.x);
+    // Right-hand group: auto-connect + theme. It sits on this row when the
+    // pills leave room for it, otherwise on its own row -- never on top of them.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const char* autoLabel = "Auto-connect";
+    const float themeWidth = 96.0f;
+    const float autoWidth = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize(autoLabel).x;
+    const float groupWidth = autoWidth + 16.0f + themeWidth;
+    const float groupX = ImGui::GetWindowWidth() - style.WindowPadding.x - groupWidth;
+    ImGui::SameLine(0.0f, 16.0f);
+    if (ImGui::GetCursorPosX() > groupX) ImGui::NewLine();
+    ImGui::SetCursorPosX(std::max(groupX, style.WindowPadding.x));
+    ImGui::AlignTextToFramePadding();
+    if (ImGui::Checkbox(autoLabel, &prefs_.autoConnect)) savePrefs(prefs_);
+    ImGui::SetItemTooltip("Connect when the app opens: next time the app starts it connects by itself with the same "
+                          "config and picks up the running basket -- for an unattended PC/VPS.");
+    ImGui::SameLine(0.0f, 16.0f);
     if (glass::button(darkMode_ ? "Light mode" : "Dark mode", kViolet, ImVec2(themeWidth, 0))) {
         setTheme(!darkMode_);
     }
@@ -978,6 +987,9 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
     switch (currentTab_) {
         case Tab::None:
         case Tab::Positions:
+            // The account at a glance: balance, equity, margin, free margin, margin level.
+            renderAccountCards(snap);
+            ImGui::Spacing();
             if (snap) {
                 renderPositionsTab(controller, *snap, connected);
             } else {
@@ -3711,14 +3723,24 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
     if (fromMt5) s.accountKind = snap->brokerAccount.cent() ? "cent" : "standard";
 
     ImGui::Spacing();
-    renderAccountCards(snap);
-    ImGui::Spacing();
     withFont(boldFont_, [] {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Risk & capital");
     });
     ImGui::SameLine();
     ImGui::TextDisabled("-- every amount in the account's money%s", g_centUnits ? " (US cents)" : "");
+    // The account in one line (the full cards are on the Positions page).
+    if (fromMt5) {
+        const auto& a = snap->brokerAccount;
+        ImGui::TextColored(kGreen, "MT5 #%s: balance %s, equity %s, free margin %s, margin level %s, 1:%.0f",
+                           a.login.c_str(), amount(a.balance).c_str(), amount(a.equity).c_str(),
+                           amount(a.freeMargin).c_str(),
+                           a.margin > 0.0 ? (std::to_string(static_cast<int>(a.equity / a.margin * 100.0)) + "%").c_str()
+                                          : "no positions",
+                           a.leverage);
+    } else if (mt5) {
+        ImGui::TextDisabled("Balance, leverage and margin come from MT5 once it's connected.");
+    }
 
     auto section = [&](const char* title, const char* note) {
         ImGui::TableNextRow();
@@ -3738,8 +3760,8 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
         if (!mt5) {
             section("Account", "cTrader FIX sends no balance or margin");
             settingDouble("Account balance ($)",
-                          "Your balance -- FIX doesn't send it. The cards above, the table, the margin guards and the "
-                          "Audit use it.",
+                          "Your balance -- FIX doesn't send it. The account cards (Positions page), the table, the "
+                          "margin guards and the Audit use it.",
                           &s.accountBalance, 100.0, "%.2f", &settingsDirty_);
             settingDouble("Leverage (1:x)", "Your account's leverage, e.g. 500 for 1:500. Sets the margin per lot.",
                           &s.leverage, 50.0, "%.0f", &settingsDirty_);
