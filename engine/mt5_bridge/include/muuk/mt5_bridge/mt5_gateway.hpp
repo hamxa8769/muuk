@@ -52,6 +52,8 @@ struct EaStatus {
     double bid = 0.0;
     double ask = 0.0;
     int magic = 0;
+    int limitOrders = 0;  // the broker's cap on pending orders (0 = none given)
+    std::string tradeMode;  // "demo", "contest" or "real"
 };
 
 // The MT5 bridge. MuukBridge.mq5 runs inside MetaTrader 5 and talks to this

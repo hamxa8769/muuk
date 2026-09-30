@@ -124,6 +124,11 @@ struct BrokerAccountInfo {
     double tickSize = 0.0;
     double tickValue = 0.0;    // account money per tick per 1 lot
     double marginPerLot = 0.0; // account money, 1 lot at the current price
+    int digits = 0;
+    double volumeMax = 0.0;
+    int limitOrders = 0;
+    std::string tradeMode;     // "demo", "contest", "real" ("" = not told)
+    [[nodiscard]] bool real() const { return tradeMode == "real"; }
     [[nodiscard]] bool cent() const {
         return currency == "USC" || currency == "USc" || currency == "UScent" || currency == "USX";
     }
@@ -756,6 +761,11 @@ private:
     bool brokerSpecChecked_ = false;
     [[nodiscard]] bool brokerAccountFreshLocked() const;
     void onAccountInfoLocked(const FixMessage& msg);
+    // MT5: takes the symbol exactly as the broker has it -- price step and
+    // digits, lot min/step/max, tick value (money units) -- and re-expresses
+    // the configured range, lots and limits in it, so one config works with
+    // any broker. Only before the engine exists (it keeps its own copy).
+    void adoptBrokerSymbolLocked(const BrokerAccountInfo& a);
     muuk::core::OrderId guardLockOrderId_ = 0;
     muuk::core::Price guardRangeLow_{};
     muuk::core::Price guardRangeHigh_{};

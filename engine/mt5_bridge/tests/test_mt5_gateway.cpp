@@ -289,6 +289,19 @@ TEST_CASE("MT5 bridge: a netting account or a missing EA is refused at logon") {
         runner.setStateFile(freshState("mt5_no_ea"));
         REQUIRE_THROWS_WITH(runner.run(), Catch::Matchers::ContainsSubstring("isn't connected"));
     }
+    SECTION("a REAL account while the config says demo") {
+        FakeEa ea(gateway.eaPort());
+        ea.send({{"t", "hello"}, {"login", "49616"}, {"server", "Broker-Real"}, {"currency", "USD"}, {"hedging", true},
+                 {"symbol", "XAUUSD"}, {"digits", 2}, {"volMin", 0.01}, {"volStep", 0.01}, {"tickSize", 0.01},
+                 {"tickValue", 1.0}, {"marginPerLot", 867.0}, {"tradeMode", "real"}});
+        ea.send({{"t", "account"}, {"balance", 500.0}, {"equity", 500.0}, {"margin", 0.0}, {"free", 500.0}});
+        REQUIRE(waitUntil([&] { return gateway.status().accountKnown; }));
+        LiveRunner runner(mt5Config(gateway.fixPort()));  // environment "demo" (the default)
+        runner.setLogHandler([](const std::string&) {});
+        runner.setStateFile(freshState("mt5_real_refused"));
+        REQUIRE_THROWS_WITH(runner.run(), Catch::Matchers::ContainsSubstring("REAL money"));
+        REQUIRE_THROWS_AS(ea.waitFor("stop", 500ms), std::runtime_error);  // not a single order
+    }
     SECTION("netting account") {
         FakeEa ea(gateway.eaPort());
         ea.hello(false);
@@ -311,4 +324,40 @@ TEST_CASE("MT5 config: the example loads, needs no FIX login and points the bot 
     REQUIRE(cfg.connection.trade.port == "5201");
     REQUIRE(cfg.connection.accountKind == "cent");
     REQUIRE(cfg.strategy.lotProgression.multiplier == Catch::Approx(2.0));
+}
+
+TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order limit are taken from MT5") {
+    GatewayConfig gc;
+    gc.eaPort = 0;
+    gc.fixPort = 0;
+    Mt5Gateway gateway(gc, [](const std::string&) {});
+    gateway.start();
+    FakeEa ea(gateway.eaPort());
+    // Gold in 3 digits, lots from 0.10, at most 10 pending orders, money in US cents.
+    ea.send({{"t", "hello"},       {"login", "777"},      {"server", "AnyBroker-Demo"}, {"company", "Any"},
+             {"currency", "USC"},  {"leverage", 500},     {"hedging", true},            {"symbol", "GOLD"},
+             {"digits", 3},        {"contract", 100},     {"volMin", 0.10},             {"volStep", 0.01},
+             {"volMax", 500},      {"hedgedMargin", 50},  {"magic", 770077},            {"tickSize", 0.001},
+             {"tickValue", 10.0},  {"marginPerLot", 86730.0}, {"limitOrders", 10}});
+    ea.send({{"t", "account"}, {"balance", 100000.0}, {"equity", 100000.0}, {"margin", 0.0}, {"free", 100000.0},
+             {"costs", nlohmann::json::array()}});
+    REQUIRE(waitUntil([&] { return gateway.status().accountKnown; }));
+
+    LiveRunner runner(mt5Config(gateway.fixPort()));
+    runner.setLogHandler([](const std::string&) {});
+    runner.setStateFile(freshState("mt5_any_broker"));
+    RunnerThread thread(runner);
+    const auto posReq = ea.waitFor("positions");
+    ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", nlohmann::json::array()}});
+    const auto ordReq = ea.waitFor("orders");
+    ea.send({{"t", "orders"}, {"req", ordReq.at("req")}, {"list", nlohmann::json::array()}});
+    ea.send({{"t", "tick"}, {"bid", 4336.400}, {"ask", 4336.450}});
+
+    const auto buy = ea.waitFor("stop");
+    REQUIRE(buy.at("volume").get<double>() == Catch::Approx(0.10));  // raised to the broker's minimum
+    REQUIRE(buy.at("price").get<double>() == Catch::Approx(4337.000));
+    const LiveSnapshot s = runner.snapshot();
+    REQUIRE(s.settings.initialLot == Catch::Approx(0.10));
+    REQUIRE(s.settings.maxOrders == 8);                         // 10 pending allowed, 2 kept spare
+    REQUIRE(s.moneyPerPointPerLot == Catch::Approx(10000.0));  // 10 per 0.001 -> 10,000 per 1.00
 }

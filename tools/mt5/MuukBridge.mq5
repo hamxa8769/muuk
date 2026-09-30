@@ -216,6 +216,9 @@ void SendHello()
    s += ",\"volMax\":" + Num(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), 4);
    s += ",\"hedgedMargin\":" + Num(HedgedMarginPercent(), 2);
    s += ",\"magic\":" + IntegerToString(MagicNumber);
+   s += ",\"limitOrders\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LIMIT_ORDERS));
+   const long mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   s += ",\"tradeMode\":\"" + (mode == ACCOUNT_TRADE_MODE_DEMO ? "demo" : (mode == ACCOUNT_TRADE_MODE_CONTEST ? "contest" : "real")) + "\"";
    s += "}";
    if(SendLine(s)) g_helloSent = true;
    if(!hedging) Print("MuukBridge: this is a NETTING account -- Muuk needs a hedging account.");

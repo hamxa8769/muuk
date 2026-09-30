@@ -231,6 +231,8 @@ void Mt5Gateway::onEaLine(const std::string& line) {
             status_.tickValue = jsonNumber(j, "tickValue");
             status_.marginPerLot = jsonNumber(j, "marginPerLot");
             status_.magic = static_cast<int>(jsonNumber(j, "magic", 0));
+            status_.limitOrders = static_cast<int>(jsonNumber(j, "limitOrders", 0));
+            status_.tradeMode = jsonString(j, "tradeMode");
             refuse = !status_.hedging;
         }
         const EaStatus s = status();
@@ -561,6 +563,10 @@ void Mt5Gateway::sendAccountInfo(const FixConnPtr& conn, const nlohmann::json& c
     m.set(tag::MuukTickSize, s.tickSize, 8);
     m.set(tag::MuukTickValue, s.tickValue, 8);
     m.set(tag::MuukMarginPerLot, s.marginPerLot, 4);
+    m.set(tag::MuukDigits, static_cast<int64_t>(s.digits));
+    m.set(tag::MuukVolumeMax, s.volumeMax, 4);
+    m.set(tag::MuukLimitOrders, static_cast<int64_t>(s.limitOrders));
+    m.set(tag::MuukTradeMode, s.tradeMode);
     m.set(tag::MuukNoPositionCosts, static_cast<int64_t>(costs.size()));
     for (const auto& c : costs) {
         m.set(tag::MuukCostPositionId, jsonString(c, "pos"));

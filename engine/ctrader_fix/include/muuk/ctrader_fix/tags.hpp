@@ -117,6 +117,10 @@ inline constexpr int MuukSymbol = 20015;
 inline constexpr int MuukTickSize = 20016;
 inline constexpr int MuukTickValue = 20017;     // account money per tick per 1 lot
 inline constexpr int MuukMarginPerLot = 20018;  // account money, 1 lot at the current price
+inline constexpr int MuukDigits = 20019;
+inline constexpr int MuukVolumeMax = 20024;
+inline constexpr int MuukLimitOrders = 20025;   // the broker's cap on pending orders, 0 = none
+inline constexpr int MuukTradeMode = 20026;     // "demo", "contest" or "real"
 inline constexpr int MuukNoPositionCosts = 20020;  // repeating group:
 inline constexpr int MuukCostPositionId = 20021;   //   position id
 inline constexpr int MuukCostSwap = 20022;         //   swap so far (money, + = credited)

@@ -372,6 +372,24 @@ void LiveRunner::run() {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
+            BrokerAccountInfo a;
+            {
+                std::scoped_lock lock(engineMutex_);
+                a = brokerAccount_;
+            }
+            // Never trade an account the config doesn't expect: nothing has been sent yet.
+            if (!a.known) {
+                throw std::runtime_error("MT5 bridge: no account figures from MetaTrader 5 yet -- is MuukBridge running "
+                                         "on the chart? Not trading.");
+            }
+            if (a.real() && config_.connection.environment != "live") {
+                throw std::runtime_error("MT5 account " + a.login + " (" + a.server +
+                                         ") is a REAL money account, but this config says demo -- not trading. Log "
+                                         "MT5 into the demo account, or set the account type to LIVE if you mean it.");
+            }
+            if (!a.real() && config_.connection.environment == "live" && !a.tradeMode.empty()) {
+                log("[mt5] note: the config says LIVE but MT5 account " + a.login + " is " + a.tradeMode);
+            }
         }
         resolveSymbol();
         log("resolved symbol '" + config_.connection.symbolName + "' -> id " + symbolId_);
@@ -1182,6 +1200,10 @@ void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
     a.tickSize = num(tag::MuukTickSize);
     a.tickValue = num(tag::MuukTickValue);
     a.marginPerLot = num(tag::MuukMarginPerLot);
+    a.digits = static_cast<int>(num(tag::MuukDigits));
+    a.volumeMax = num(tag::MuukVolumeMax);
+    a.limitOrders = static_cast<int>(num(tag::MuukLimitOrders));
+    a.tradeMode = str(tag::MuukTradeMode);
     // Per-position swap: a repeating group, one id then its swap and commission.
     positionSwap_.clear();
     const auto ids = msg.getAll(tag::MuukCostPositionId);
@@ -1203,31 +1225,49 @@ void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
     }
     if (!brokerSpecChecked_ && a.known && a.volumeMin > 0.0) {
         brokerSpecChecked_ = true;
-        SymbolSpec& spec = config_.strategy.symbol;
-        // Count P/L, commission and margin in the account's own money: the
-        // broker's tick value per lot (US cents on a cent account). Only
-        // before the engine exists -- it keeps its own copy of the spec.
-        if (!engine_ && a.tickSize > 0.0 && a.tickValue > 0.0) {
-            if (std::fabs(a.tickSize - spec.tickSize) < 1e-9) {
-                spec.tickValue = a.tickValue;
-                spec.contractSize = a.tickValue / a.tickSize;  // money per 1.00 move per lot
-                spec.volumeMax = std::max(spec.volumeMax, a.volumeMin);
-                log("[mt5] P/L counted in " + a.currency + ": " + priceTextOf(spec.contractSize) +
-                    " per 1.00 move per lot (tick value " + std::to_string(a.tickValue) + ")");
-            } else {
-                noteBrokerIssueLocked("this MT5 symbol's price step is " + std::to_string(a.tickSize) +
-                                      ", the config says " + std::to_string(spec.tickSize) +
-                                      " -- set strategy.symbol.tickSize / digits to match");
-            }
-        }
-        const double firstLot = config_.strategy.lotProgression.initialLot.toDouble(spec);
-        if (firstLot + 1e-9 < a.volumeMin) {
-            noteBrokerIssueLocked("the first lot " + lotsTextOf(config_.strategy.lotProgression.initialLot.steps, spec) +
-                                  " is below this MT5 symbol's minimum " + priceTextOf(a.volumeMin) +
-                                  " -- set First lot to at least that in Settings");
-        }
-
+        if (!engine_) adoptBrokerSymbolLocked(a);
     }
+}
+
+void LiveRunner::adoptBrokerSymbolLocked(const BrokerAccountInfo& a) {
+    const SymbolSpec old = config_.strategy.symbol;
+    SymbolSpec spec = old;
+    if (a.tickSize > 0.0) spec.tickSize = a.tickSize;
+    if (a.digits > 0) spec.digits = a.digits;
+    if (a.tickValue > 0.0 && a.tickSize > 0.0) {
+        spec.tickValue = a.tickValue;
+        spec.contractSize = a.tickValue / a.tickSize;  // account money per 1.00 move per lot
+    }
+    if (a.volumeStep > 0.0) spec.volumeStep = a.volumeStep;
+    if (a.volumeMin > 0.0) spec.volumeMin = a.volumeMin;
+    if (a.volumeMax > 0.0) spec.volumeMax = a.volumeMax;
+    StrategyConfig& st = config_.strategy;
+    auto price = [&](Price p) { return Price::fromDouble(p.toDouble(old), spec); };
+    auto volume = [&](Volume v) { return Volume::fromDouble(v.toDouble(old), spec); };
+    auto ticks = [&](int64_t t) {
+        return static_cast<int64_t>(std::llround(static_cast<double>(t) * old.tickSize / spec.tickSize));
+    };
+    st.range = RangeConfig{price(st.range.lowerBound), price(st.range.upperBound)};
+    const double firstLot = st.lotProgression.initialLot.toDouble(old);
+    st.lotProgression.initialLot = volume(st.lotProgression.initialLot);
+    st.lotProgression.lotIncrement = volume(st.lotProgression.lotIncrement);
+    st.riskLimits.maxLot = volume(st.riskLimits.maxLot);
+    st.riskLimits.maxSpreadTicks = ticks(st.riskLimits.maxSpreadTicks);
+    st.riskLimits.maxSlippageTicks = ticks(st.riskLimits.maxSlippageTicks);
+    st.symbol = spec;
+    std::string notes;
+    if (firstLot + 1e-9 < spec.volumeMin) {
+        st.lotProgression.initialLot = Volume::fromDouble(spec.volumeMin, spec);
+        notes += "; first lot raised to the broker's minimum " + priceTextOf(spec.volumeMin);
+    }
+    if (a.limitOrders > 0 && st.riskLimits.maxOrders > a.limitOrders - 2) {
+        st.riskLimits.maxOrders = std::max(1, a.limitOrders - 2);
+        notes += "; max orders " + std::to_string(st.riskLimits.maxOrders) + " (the broker allows " +
+                 std::to_string(a.limitOrders) + " pending)";
+    }
+    log("[mt5] symbol " + a.symbol + " as the broker has it: " + std::to_string(spec.digits) + " digits, lots " +
+        priceTextOf(spec.volumeMin) + " min / " + priceTextOf(spec.volumeStep) + " step, P/L in " + a.currency + " (" +
+        priceTextOf(spec.contractSize) + " per 1.00 move per lot)" + notes);
 }
 
 bool LiveRunner::brokerAccountFreshLocked() const {
