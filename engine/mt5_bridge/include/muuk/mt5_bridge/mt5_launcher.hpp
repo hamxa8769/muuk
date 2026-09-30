@@ -26,7 +26,9 @@ struct Mt5StartOptions {
     std::string login;               // empty = whatever account MT5 last used
     std::string password;            // only with login; written to a startup file that is deleted again
     std::string server;
-    std::string chartSymbol = "XAUUSD";  // the chart the bridge is attached to (it finds the gold symbol itself)
+    // The chart the bridge is attached to (it trades the gold symbol it finds). Empty or "XAUUSD" = the gold
+    // symbol of a chart MT5 already has (brokers call it XAUUSD.c, XAUUSDc, GOLD...), else XAUUSD.
+    std::string chartSymbol;
     std::string pipeName = "MuukBridge_5200";
 };
 

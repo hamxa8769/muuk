@@ -70,6 +70,34 @@ bool writeUtf16(const fs::path& file, const std::string& text) {
     return static_cast<bool>(out);
 }
 
+bool isGoldName(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return s.rfind("XAUUSD", 0) == 0 || s.rfind("GOLD", 0) == 0;
+}
+
+// A chart file's text (MT5 writes them in UTF-16LE, older ones in UTF-8/ANSI).
+std::string chartText(const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF && static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        std::string out;
+        for (std::size_t i = 2; i + 1 < bytes.size(); i += 2) {
+            const unsigned c = static_cast<unsigned char>(bytes[i]) | (static_cast<unsigned char>(bytes[i + 1]) << 8);
+            out.push_back(c < 128 ? static_cast<char>(c) : '?');
+        }
+        return out;
+    }
+    return bytes;
+}
+
+std::string chartSymbolOf(const std::string& text) {
+    const auto at = text.find("\nsymbol=");
+    const std::size_t start = at == std::string::npos ? (text.rfind("symbol=", 0) == 0 ? 7 : std::string::npos) : at + 8;
+    if (start == std::string::npos) return {};
+    const auto end = text.find_first_of("\r\n", start);
+    return text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
 std::string readFile(const fs::path& file) {
     std::ifstream in(file, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -244,7 +272,32 @@ Mt5StartResult startMt5WithBridge(const Mt5StartOptions& o, const std::function<
         return r;
     }
 
-    // 3. The startup file: log in, algo trading on, MuukBridge on a chart.
+    // 3. The chart: the gold symbol of a chart MT5 already has (its real name
+    //    on this broker), and no leftover bridge charts from earlier starts
+    //    (MT5 is closed now, so its profile files can be changed).
+    std::string chartSymbol = o.chartSymbol;
+    const bool autoChart = chartSymbol.empty() || chartSymbol == "XAUUSD" || chartSymbol == "auto";
+    fs::file_time_type newest{};
+    for (const auto& entry : fs::recursive_directory_iterator(*data / "MQL5" / "Profiles" / "Charts", ec)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".chr") continue;
+        const std::string text = chartText(entry.path());
+        if (text.find("MuukBridge") != std::string::npos) {
+            fs::remove(entry.path(), ec);  // a bridge chart from an earlier start: the startup file adds a fresh one
+            continue;
+        }
+        const std::string sym = chartSymbolOf(text);
+        if (autoChart && isGoldName(sym)) {
+            const auto t = entry.last_write_time(ec);
+            if (t > newest) {
+                newest = t;
+                chartSymbol = sym;
+            }
+        }
+    }
+    if (chartSymbol.empty() || chartSymbol == "auto") chartSymbol = "XAUUSD";
+    say("bridge chart: " + chartSymbol);
+
+    // 4. The startup file: log in, algo trading on, MuukBridge on a chart.
     std::ostringstream ini;
     if (!o.login.empty()) {
         ini << "[Common]\r\nLogin=" << o.login << "\r\n";
@@ -253,8 +306,8 @@ Mt5StartResult startMt5WithBridge(const Mt5StartOptions& o, const std::function<
         ini << "KeepPrivate=1\r\nNewsEnable=0\r\n";
     }
     ini << "[Experts]\r\nAllowLiveTrading=1\r\nAllowDllImport=0\r\nEnabled=1\r\nAccount=0\r\nProfile=0\r\n";
-    ini << "[StartUp]\r\nExpert=Muuk\\MuukBridge\r\nExpertParameters=MuukBridge.set\r\nSymbol="
-        << (o.chartSymbol.empty() ? std::string("XAUUSD") : o.chartSymbol) << "\r\nPeriod=M1\r\n";
+    ini << "[StartUp]\r\nExpert=Muuk\\MuukBridge\r\nExpertParameters=MuukBridge.set\r\nSymbol=" << chartSymbol
+        << "\r\nPeriod=M1\r\n";
     const fs::path startup = *data / "muuk_startup.ini";
     if (!writeUtf16(startup, ini.str())) {
         r.message = "can't write " + startup.string();

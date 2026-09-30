@@ -34,6 +34,15 @@ ulong  g_lastConnectTryMs = 0;
 ulong  g_mapTicket[];
 string g_mapId[];
 
+// A one-line status in MQL5\Files\MuukBridge.status (MT5 writes its own logs late).
+void WriteStatus(const string text)
+{
+   const int h = FileOpen("MuukBridge.status", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+   FileWriteString(h, TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS) + " " + text + "\r\n");
+   FileClose(h);
+}
+
 //+------------------------------------------------------------------+
 bool IsGold(const string name)
 {
@@ -42,10 +51,16 @@ bool IsGold(const string name)
    return StringFind(u, "XAUUSD") == 0 || StringFind(u, "GOLD") == 0;
 }
 
+bool Exists(const string name)
+{
+   bool custom = false;
+   return name != "" && SymbolExist(name, custom);
+}
+
 string FindGoldSymbol()
 {
-   if(TradeSymbol != "" && SymbolSelect(TradeSymbol, true)) return TradeSymbol;
-   if(IsGold(_Symbol)) return _Symbol;
+   if(Exists(TradeSymbol) && SymbolSelect(TradeSymbol, true)) return TradeSymbol;
+   if(IsGold(_Symbol) && Exists(_Symbol)) return _Symbol;
    string best = "";
    for(int i = 0; i < SymbolsTotal(false); i++)
    {
@@ -55,14 +70,23 @@ string FindGoldSymbol()
       if(best == "" || StringLen(name) < StringLen(best)) best = name;  // XAUUSD before XAUUSD.x
    }
    if(best != "") { SymbolSelect(best, true); return best; }
-   return _Symbol;
+   return "";  // no gold on this account
 }
 
 int OnInit()
 {
    g_sym = FindGoldSymbol();
-   g_digits = (int)SymbolInfoInteger(g_sym, SYMBOL_DIGITS);
-   Print("MuukBridge: trading ", g_sym, ", waiting for the Muuk app on pipe ", PipeName);
+   if(g_sym == "")
+   {
+      Print("MuukBridge: no gold symbol found on this account (chart ", _Symbol, ")");
+      WriteStatus("no gold symbol on this account (chart " + _Symbol + ")");
+   }
+   else
+   {
+      g_digits = (int)SymbolInfoInteger(g_sym, SYMBOL_DIGITS);
+      Print("MuukBridge: trading ", g_sym, ", waiting for the Muuk app on pipe ", PipeName);
+      WriteStatus("trading " + g_sym + ", waiting for pipe " + PipeName);
+   }
    EventSetMillisecondTimer(MathMax(10, TimerMs));
    return INIT_SUCCEEDED;
 }
@@ -77,6 +101,13 @@ void OnTick() {}
 
 void OnTimer()
 {
+   if(g_sym == "")  // symbols may arrive a moment after login
+   {
+      g_sym = FindGoldSymbol();
+      if(g_sym == "") return;
+      g_digits = (int)SymbolInfoInteger(g_sym, SYMBOL_DIGITS);
+      WriteStatus("trading " + g_sym + ", waiting for pipe " + PipeName);
+   }
    if(g_pipe == INVALID_HANDLE)
    {
       if(GetTickCount64() - g_lastConnectTryMs > 1000) Connect();
@@ -90,11 +121,27 @@ void OnTimer()
 //+------------------------------------------------------------------+
 //| Pipe: one frame out, one frame back (4-byte length + JSON lines)  |
 //+------------------------------------------------------------------+
+int g_lastOpenError = -1;
+
 void Connect()
 {
    g_lastConnectTryMs = GetTickCount64();
-   g_pipe = FileOpen("\\\\.\\pipe\\" + PipeName, FILE_READ | FILE_WRITE | FILE_BIN | FILE_SHARE_READ | FILE_SHARE_WRITE);
-   if(g_pipe == INVALID_HANDLE) return;  // the app isn't running (yet) -- tried again every second
+   ResetLastError();
+   g_pipe = FileOpen("\\\\.\\pipe\\" + PipeName, FILE_READ | FILE_WRITE | FILE_BIN);
+   if(g_pipe == INVALID_HANDLE)
+   {
+      // The app isn't running (yet) -- tried again every second.
+      const int err = GetLastError();
+      if(err != g_lastOpenError)
+      {
+         g_lastOpenError = err;
+         Print("MuukBridge: waiting for the Muuk app (pipe ", PipeName, ", error ", err, ")");
+         WriteStatus("waiting for pipe " + PipeName + ", error " + IntegerToString(err) + ", symbol " + g_sym);
+      }
+      return;
+   }
+   g_lastOpenError = -1;
+   WriteStatus("connected to pipe " + PipeName + ", symbol " + g_sym);
    ArrayResize(g_out, 0);
    g_lastBid = 0.0;
    g_lastAsk = 0.0;
