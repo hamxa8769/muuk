@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "muuk/core/market_read.hpp"
 #include "muuk/core/risk_table.hpp"
 #include "muuk/core/strategy_engine.hpp"
 #include "muuk/ctrader_fix/basket_history.hpp"
@@ -233,6 +234,11 @@ struct LiveSnapshot {
     bool escapeTradeOpen = false;
     bool escapeTrailing = false;
     int escapeTries = 0;
+    std::string escapePhase;              // "reading the market, 3 min left", "waiting for an UP breakout above ..."
+    bool escapeAwaitingDecision = false;  // a try failed: Retry escape / Close range / Keep locked
+    bool escapeHeld = false;              // Keep locked was chosen
+    std::string marketRead;               // the market read in one line (trend, structure, ATR)
+    int marketScore = 0;                  // -4..+4
     // MT5 through the bridge: the account as MT5 reports it (exact balance,
     // equity, margin and swap). brokerAccountFresh: heard from in the last 15 s.
     std::string platform = "ctrader";
@@ -358,6 +364,13 @@ public:
     bool openRange();
     void closeRange(bool reopen = true);
     void closeAllPositions();
+    // After a failed escape (the basket locked again): try once more, or
+    // keep it locked and stop escaping. Close range is the third choice.
+    void retryEscape();
+    void keepLocked();
+    // Finished bars from the broker's chart (oldest first), so the market
+    // read doesn't start empty; also used by tests.
+    void addHistoryBars(const std::vector<muuk::core::Bar>& bars);
     void cancelAllPendingOrders();
 
     // Current tunable settings, and a way to change them. Changes that
@@ -791,9 +804,24 @@ private:
         muuk::core::Price entry{};
         bool trailing = false;
         muuk::core::OrderId relockId = 0;  // the re-lock market order in flight
+        double stop = 0.0;                 // re-lock once the price crosses this (against the escape)
+        double atr = 0.0;                  // the bar range when it was placed
     } escape_;
     int escapeTries_ = 0;
     bool escapeSkipLogged_ = false;
+    // Smart escape: 1-minute bars of every quote, the market read from them,
+    // when the lock (or the last re-lock) happened, and the operator's say.
+    muuk::core::BarSeries bars_{60'000, 240};
+    muuk::core::MarketRead marketRead_;
+    int64_t marketReadBar_ = -1;               // start of the newest closed bar it was read at
+    std::chrono::steady_clock::time_point lockedSince_{};
+    bool escapeAwaitingDecision_ = false;      // a try failed: wait for Retry / Close / Keep locked
+    bool escapeHeld_ = false;                  // the operator chose Keep locked
+    int escapeExtraTries_ = 0;                 // tries the operator added with Retry escape
+    std::string escapePhase_;                  // what the escape is doing, for the app
+    std::string escapePhaseKey_;               // its stage, logged once per change
+    void readMarketLocked();
+    void setEscapePhaseLocked(const char* key, const std::string& phase);
     struct ManagedMarket {
         OpenLeg leg;
         std::string what;

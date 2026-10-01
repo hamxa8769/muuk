@@ -458,6 +458,10 @@ void clampSettings(LiveSettings& s) {
     s.cooldownSeconds = std::max(0, s.cooldownSeconds);
     s.manualCloseCooldownSeconds = std::max(0, s.manualCloseCooldownSeconds);
     s.entryTimeoutSeconds = std::max(0, s.entryTimeoutSeconds);
+    s.recovery.escapeAnalyzeMinutes = std::clamp(s.recovery.escapeAnalyzeMinutes, 0, 240);
+    s.recovery.escapeLookbackBars = std::clamp(s.recovery.escapeLookbackBars, 4, 120);
+    s.recovery.escapeStopAtr = std::clamp(s.recovery.escapeStopAtr, 0.2, 10.0);
+    s.recovery.escapeMaxTries = std::clamp(s.recovery.escapeMaxTries, 0, 10);
     s.maxOrders = std::max(1, s.maxOrders);
     s.maxLot = std::max(0.01, s.maxLot);
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
@@ -1292,22 +1296,42 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
     }
     if (snap && snap->locked) {
         ImGui::PushStyleColor(ImGuiCol_Text, snap->escapeTradeOpen || snap->escapeOrdersOut ? kAmber : kRed);
-        std::string how = "Press Close range when you decide -- it closes both sides.";
-        if (snap->settings.recovery.escapeEnabled) {
-            how = snap->escapeTradeOpen
-                      ? std::string("Escape trade running") +
-                            (snap->escapeTrailing ? " (it locks again if the price comes back to its entry)" : "") +
-                            ": the basket closes at break-even, or locks again if the price turns back."
-                  : snap->escapeOrdersOut ? std::string("Escape orders wait outside the range for a breakout.")
-                  : snap->escapeTries >= snap->settings.recovery.escapeMaxTries
-                      ? std::string("Escape tries used up. Press Close range when you decide.")
-                      : std::string("Escape waits for enough margin (see the Audit).");
-        }
         ImGui::TextWrapped("Locked since %s at %s: the pending orders were cancelled and a hedge froze the loss. "
-                           "It stays about the same wherever the price goes (swap is charged every night). %s",
+                           "It stays about the same wherever the price goes (swap is charged every night).",
                            snap->lockedAt.size() > 11 ? snap->lockedAt.substr(11).c_str() : snap->lockedAt.c_str(),
-                           money(snap->lockedLoss).c_str(), how.c_str());
+                           money(snap->lockedLoss).c_str());
         ImGui::PopStyleColor();
+        if (snap->settings.recovery.escapeEnabled) {
+            // What the escape is doing, and what the market looks like to it.
+            ImGui::TextColored(snap->escapeAwaitingDecision ? kRed : kBlue, "Escape: %s",
+                               snap->escapePhase.empty() ? "waiting for a balanced book" : snap->escapePhase.c_str());
+            if (!snap->marketRead.empty()) ImGui::TextDisabled("Market: %s", snap->marketRead.c_str());
+        } else {
+            ImGui::TextDisabled("Escape is off: press Close range when you decide -- it closes both sides.");
+        }
+        // The operator's choices while locked.
+        const bool canRetry = snap->settings.recovery.escapeEnabled && !snap->escapeTradeOpen && !snap->escapeOrdersOut &&
+                              (snap->escapeAwaitingDecision || snap->escapeHeld ||
+                               snap->escapeTries >= snap->settings.recovery.escapeMaxTries);
+        const float third = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+        ImGui::BeginDisabled(!connected || !canRetry);
+        if (glass::button("Retry escape", kBlue, ImVec2(third, 0))) controller.retryEscape();
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("The bot reads the market again and escapes only with a clear trend: one stop order its "
+                              "way, beyond the recent high or low.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!connected || snap->escapeHeld || snap->escapeTradeOpen);
+        if (glass::button("Keep locked", glass::palette().neutral, ImVec2(third, 0))) controller.keepLocked();
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("No more escapes for this basket: the loss stays frozen until you close it.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!connected);
+        if (glass::button("Close range", kRed, ImVec2(third, 0))) {
+            confirm_ = Confirm::CloseRange;
+            openConfirmRequested_ = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Closes both sides and takes the frozen loss (%s).", money(snap->live.net).c_str());
     }
     const float chartHeight = rangeChartHeight();
     if (snap && connected) {
@@ -3982,22 +4006,42 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                       &s.recovery.guardStopMarginLevel, 50.0, "%.0f", &settingsDirty_);
 
         // --- Escape.
-        section("Escape from a lock", "off by default -- a bet on a breakout");
+        section("Escape from a lock", "off by default -- only with a clear trend");
         settingCheck("Escape",
-                     "From a lock: stop orders outside the range, sized so a run of the escape move wins the frozen "
-                     "loss back. If the price turns back (into the range, or to the entry once it ran the trail "
-                     "distance) it locks again. Each failed try adds its cost.",
+                     "From a lock: the bot first reads the market (trend, highs and lows, volatility from 1-minute "
+                     "bars). Only with a clear trend it places ONE stop order its way, beyond the recent high or low, "
+                     "sized so a run of the escape move wins the frozen loss back. The basket closes as soon as its "
+                     "net is back at break-even. It locks again only if the price goes the re-lock distance against "
+                     "it; then it asks you (Retry escape / Close range / Keep locked).",
                      &s.recovery.escapeEnabled, &settingsDirty_);
         if (s.recovery.escapeEnabled) {
+            settingInt("  read the market first (min)",
+                       "After a lock (or a failed try), wait this long before any escape: the market settles and the "
+                       "bot reads it.",
+                       &s.recovery.escapeAnalyzeMinutes, &settingsDirty_);
+            settingInt("  breakout of the last (min)",
+                       "The escape stop goes beyond the high (up trend) or low (down trend) of this many minutes -- a "
+                       "real breakout, not a wiggle.",
+                       &s.recovery.escapeLookbackBars, &settingsDirty_);
+            settingDouble("  re-lock after (x ATR)",
+                          "Room to breathe: the escape is locked again only once the price goes this many average "
+                          "1-minute ranges (ATR) against it. Bigger = fewer whipsaws, but a bigger loss when it fails.",
+                          &s.recovery.escapeStopAtr, 0.25, "%.2f", &settingsDirty_);
             settingDouble("  escape move ($)", "Price run the escape trade is sized to win the loss back over.",
                           &s.recovery.escapeMove, 0.5, "%.2f", &settingsDirty_);
-            settingDouble("  beyond the range by ($)", "Escape stop orders go this far outside the range lines.",
+            settingDouble("  at least beyond by ($)",
+                          "The least distance of the escape stop beyond the breakout line and the price.",
                           &s.recovery.escapeBuffer, 0.1, "%.2f", &settingsDirty_);
-            settingDouble("  trail to entry after ($)",
-                          "Once the escape ran this far, it locks again as soon as the price is back at its entry.",
+            settingDouble("  protect after ($)",
+                          "Once the escape ran this far, its re-lock line moves to its entry and then follows the "
+                          "price.",
                           &s.recovery.escapeTrailAt, 0.25, "%.2f", &settingsDirty_);
-            settingInt("  tries per basket", "After this many escapes that turned back, the basket just stays locked.",
+            settingInt("  tries per basket", "Escapes allowed before the basket just stays locked (Retry escape adds one).",
                        &s.recovery.escapeMaxTries, &settingsDirty_);
+            settingCheck("  retry by itself",
+                         "Off (recommended): after a failed try the bot waits for you. On: it reads the market again "
+                         "and tries by itself, up to the tries above.",
+                         &s.recovery.escapeAutoRetry, &settingsDirty_);
         }
         ImGui::EndTable();
     }

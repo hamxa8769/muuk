@@ -221,6 +221,11 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.escapeTradeOpen = escape_.legId != 0;
     snap.escapeTrailing = escape_.trailing;
     snap.escapeTries = escapeTries_;
+    snap.escapePhase = escapePhase_;
+    snap.escapeAwaitingDecision = escapeAwaitingDecision_;
+    snap.escapeHeld = escapeHeld_;
+    snap.marketRead = marketRead_.why;
+    snap.marketScore = marketRead_.score;
     snap.platform = config_.connection.platform;
     snap.brokerAccount = brokerAccount_;
     snap.brokerAccountFresh = brokerAccountFreshLocked();
@@ -1026,6 +1031,7 @@ void LiveRunner::onQuoteMessage(const FixMessage& msg) {
             }
             haveFullQuote = latestBid_.has_value() && latestAsk_.has_value();
             lastQuoteAt_ = std::chrono::steady_clock::now();
+            if (haveFullQuote) bars_.addQuote(utcNowMs(), (*latestBid_ + *latestAsk_) / 2.0);
             maybeEmitTick();
             // Clock check, now and then: how far this PC's clock is from the
             // broker's (a VPS with a drifting clock shows up here).
@@ -1112,6 +1118,7 @@ void LiveRunner::lockNowLocked(const std::string& why, double net) {
         locked_ = true;
         lockedLoss_ = net;
         lockedAt_ = localTimestamp();
+        lockedSince_ = std::chrono::steady_clock::now();
         if (currentBasket_) {
             currentBasket_->locked = true;
             currentBasket_->lockedLoss = net;
@@ -1150,8 +1157,11 @@ void LiveRunner::lockNowLocked(const std::string& why, double net) {
     auditEventLocked(8, 2,
                      why + ": pending orders cancelled, hedge " + hedgeText +
                          " -- the loss is frozen" +
-                         (config_.connection.recovery.escapeEnabled ? "; escape orders follow if the margin allows"
-                                                                    : "; the bot waits for you (Close range to unwind)"));
+                         (config_.connection.recovery.escapeEnabled
+                              ? "; the bot reads the market for " +
+                                    std::to_string(config_.connection.recovery.escapeAnalyzeMinutes) +
+                                    " min, then escapes only with a clear trend"
+                              : std::string("; the bot waits for you (Close range to unwind)")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,6 +1372,10 @@ void LiveRunner::resetRecoveryLocked() {
     escape_ = EscapeState{};
     escapeTries_ = 0;
     escapeSkipLogged_ = false;
+    escapeAwaitingDecision_ = false;
+    escapeHeld_ = false;
+    escapeExtraTries_ = 0;
+    escapePhase_.clear();
     locked_ = false;
 }
 
@@ -1431,6 +1445,7 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
         locked_ = true;
         lockedLoss_ = haveQuote ? floatingNetLocked() : 0.0;
         lockedAt_ = localTimestamp();
+        lockedSince_ = std::chrono::steady_clock::now();
         if (currentBasket_) {
             currentBasket_->locked = true;
             currentBasket_->lockedLoss = lockedLoss_;
@@ -1439,8 +1454,9 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
         markDirty();
         auditEventLocked(8, 2,
                          "the lock stop filled: buys = sells, the loss is frozen at " + usdText(lockedLoss_) +
-                             (config_.connection.recovery.escapeEnabled ? " -- escape orders follow if the margin allows"
-                                                                        : " -- close it when you decide (Close range)"));
+                             (config_.connection.recovery.escapeEnabled
+                                  ? " -- the bot reads the market first, then escapes only with a clear trend"
+                                  : " -- close it when you decide (Close range)"));
         return;
     }
     if (const auto mm = managedMarket_.find(orderId); mm != managedMarket_.end()) {
@@ -1448,7 +1464,16 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
         if (orderId == escape_.relockId) {
             escape_.relockId = 0;
             if (haveQuote) lockedLoss_ = floatingNetLocked();
-            auditEventLocked(8, 1, "locked again, frozen at " + usdText(lockedLoss_));
+            lockedSince_ = std::chrono::steady_clock::now();  // a fresh read of the market before any next try
+            if (currentBasket_) currentBasket_->lockedLoss = lockedLoss_;
+            if (config_.connection.recovery.escapeAutoRetry) {
+                auditEventLocked(8, 1, "locked again, frozen at " + usdText(lockedLoss_) +
+                                           " -- reading the market again before the next try");
+            } else {
+                escapeAwaitingDecision_ = true;
+                auditEventLocked(8, 2, "the escape didn't work out: locked again, frozen at " + usdText(lockedLoss_) +
+                                           ". Your call: Retry escape, Close range, or Keep locked");
+            }
         }
         markDirty();
         return;
@@ -1472,12 +1497,18 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
         }
         ++escapeTries_;
         if (currentBasket_) currentBasket_->escapeTries = escapeTries_;
+        // Room to breathe: locked again only once the price goes this far against it.
+        const RecoveryConfig& rc = config_.connection.recovery;
+        const double room = std::max(rc.escapeStopAtr * escape_.atr, rc.escapeBuffer);
+        const double entry = escape_.entry.toDouble(spec);
+        escape_.stop = buy ? entry - room : entry + room;
         markDirty();
         auditEventLocked(8, 1,
-                         std::string("escape ") + (buy ? "BUY" : "SELL") + " filled @ " +
-                             priceTextOf(escape_.entry.toDouble(spec)) + " (try " + std::to_string(escapeTries_) + " of " +
-                             std::to_string(config_.connection.recovery.escapeMaxTries) +
-                             ") -- closes at break-even, locks again if the price turns back");
+                         std::string("escape ") + (buy ? "BUY" : "SELL") + " filled @ " + priceTextOf(entry) + " (try " +
+                             std::to_string(escapeTries_) + " of " +
+                             std::to_string(rc.escapeMaxTries + escapeExtraTries_) +
+                             ") -- the basket closes once its net is back at break-even; locked again only if the "
+                             "price reaches " + priceTextOf(escape_.stop));
     }
 }
 
@@ -1559,11 +1590,66 @@ void LiveRunner::maybeGuardLocked() {
     if (locked_ && rc.escapeEnabled) manageEscapeLocked(net);
 }
 
+void LiveRunner::readMarketLocked() {
+    const std::deque<muuk::core::Bar> closed = bars_.closed();
+    const int64_t newest = closed.empty() ? -1 : closed.back().startMs;
+    if (newest == marketReadBar_ && marketReadBar_ != -1) return;  // read once per finished bar
+    marketReadBar_ = newest;
+    marketRead_ = muuk::core::readMarket(closed, config_.connection.recovery.escapeLookbackBars);
+}
+
+void LiveRunner::setEscapePhaseLocked(const char* key, const std::string& phase) {
+    escapePhase_ = phase;
+    // The log gets each stage once, not every changing number in it.
+    if (escapePhaseKey_ == key) return;
+    escapePhaseKey_ = key;
+    log("[escape] " + phase);
+}
+
+void LiveRunner::retryEscape() {
+    std::scoped_lock lock(engineMutex_);
+    if (!locked_) return;
+    escapeAwaitingDecision_ = false;
+    escapeHeld_ = false;
+    const int allowed = config_.connection.recovery.escapeMaxTries + escapeExtraTries_;
+    if (escapeTries_ >= allowed) ++escapeExtraTries_;
+    markDirty();
+    auditEventLocked(8, 1, "Retry escape: the bot reads the market again and escapes only with a clear trend");
+}
+
+void LiveRunner::keepLocked() {
+    std::scoped_lock lock(engineMutex_);
+    if (!locked_) return;
+    escapeAwaitingDecision_ = false;
+    escapeHeld_ = true;
+    for (OrderId* id : {&escape_.buyStopId, &escape_.sellStopId}) {
+        if (*id == 0) continue;
+        if (const auto it = placedOrderInfo_.find(*id); it != placedOrderInfo_.end() && tradeSession_) {
+            cancelledOrderInfo_.insert({*id, it->second});
+            placedOrderInfo_.erase(it);
+            tradeSession_->send(buildOrderCancelRequest("c" + std::to_string(nextCancelReqId_++), std::to_string(*id)));
+        }
+        *id = 0;
+    }
+    markDirty();
+    auditEventLocked(8, 1, "Keep locked: no more escapes for this basket -- close it when you decide (Close range)");
+}
+
+void LiveRunner::addHistoryBars(const std::vector<muuk::core::Bar>& bars) {
+    std::scoped_lock lock(engineMutex_);
+    for (const auto& b : bars) bars_.addClosed(b);
+    marketReadBar_ = -1;
+    readMarketLocked();
+}
+
 void LiveRunner::manageEscapeLocked(double net) {
     const RecoveryConfig& rc = config_.connection.recovery;
     const SymbolSpec& spec = config_.strategy.symbol;
     if (escape_.relockId != 0 || !managedMarket_.empty()) return;  // a lock / re-lock is still on its way
+    readMarketLocked();
+    using muuk::core::TrendDirection;
 
+    // --- The escape trade is running.
     if (escape_.legId != 0) {
         const OpenLeg* leg = nullptr;
         for (const auto& l : openLegs_) {
@@ -1575,17 +1661,30 @@ void LiveRunner::manageEscapeLocked(double net) {
             return;
         }
         const double entry = escape_.entry.toDouble(spec);
+        const double room = std::max(rc.escapeStopAtr * escape_.atr, rc.escapeBuffer);
+        if (escape_.stop <= 0.0) escape_.stop = escape_.buy ? entry - room : entry + room;  // e.g. after a restart
         const double favorable = escape_.buy ? *latestBid_ - entry : entry - *latestAsk_;
         if (!escape_.trailing && favorable >= rc.escapeTrailAt) {
             escape_.trailing = true;
+            escape_.stop = entry;  // from here it can't turn into a loss of its own
             markDirty();
-            log("[risk] the escape ran " + priceTextOf(favorable) +
-                " -- it now locks again if the price comes back to its entry");
+            log("[risk] the escape ran " + priceTextOf(favorable) + " -- its re-lock line moves to its entry " +
+                priceTextOf(entry));
         }
-        const bool back = escape_.trailing ? favorable <= 0.0
-                                           : (escape_.buy ? *latestBid_ < guardRangeHigh_.toDouble(spec)
-                                                          : *latestAsk_ > guardRangeLow_.toDouble(spec));
-        if (!back) return;
+        if (escape_.trailing) {
+            // Follow the price, `room` behind it: a winning run keeps what it won.
+            const double follow = escape_.buy ? *latestBid_ - room : *latestAsk_ + room;
+            if (escape_.buy ? follow > escape_.stop : follow < escape_.stop) {
+                escape_.stop = follow;
+                markDirty();
+            }
+        }
+        setEscapePhaseLocked("running", std::string("escape ") + (escape_.buy ? "BUY " : "SELL ") +
+                             lotsTextOf(leg->volume.steps, spec) + " lot running: net " + usdText(net) +
+                             ", closes at break-even (" + usdText(breakEvenMoneyLocked()) + "), locked again at " +
+                             priceTextOf(escape_.stop));
+        const bool hit = escape_.buy ? *latestBid_ <= escape_.stop : *latestAsk_ >= escape_.stop;
+        if (!hit) return;
         OpenLeg relock;
         relock.id = nextAdoptedId_++;
         relock.side = escape_.buy ? OrderSide::SellStop : OrderSide::BuyStop;
@@ -1593,28 +1692,84 @@ void LiveRunner::manageEscapeLocked(double net) {
         relock.price = relock.requestedPrice =
             Price::fromDouble(relock.side == OrderSide::BuyStop ? *latestAsk_ : *latestBid_, spec);
         auditEventLocked(8, 1,
-                         std::string("the escape turned back ") + (escape_.trailing ? "to its entry" : "into the range") +
-                             " -- locking again (" + std::to_string(escapeTries_) + " of " +
-                             std::to_string(rc.escapeMaxTries) + " tries used)");
+                         "the escape reached its re-lock line " + priceTextOf(escape_.stop) + " -- locking again (" +
+                             std::to_string(escapeTries_) + " of " +
+                             std::to_string(rc.escapeMaxTries + escapeExtraTries_) + " tries used)");
         escape_.legId = 0;
         escape_.trailing = false;
+        escape_.stop = 0.0;
         escape_.relockId = relock.id;
         sendManagedMarketLocked(relock, "re-lock");
         return;
     }
-    if (escape_.buyStopId != 0 || escape_.sellStopId != 0) return;  // waiting for a breakout
-    if (escapeTries_ >= rc.escapeMaxTries) return;
+
+    // --- Waiting on the operator, or nothing left to try.
+    if (escapeHeld_) {
+        setEscapePhaseLocked("held", "kept locked (your choice) -- close it when you decide");
+        return;
+    }
+    if (escapeAwaitingDecision_) {
+        setEscapePhaseLocked("await", "the escape didn't work out -- your call: Retry escape, Close range or Keep locked");
+        return;
+    }
+    if (escapeTries_ >= rc.escapeMaxTries + escapeExtraTries_) {
+        setEscapePhaseLocked("notries", "no escape tries left -- locked; Retry escape or Close range");
+        return;
+    }
     const BookLots book = bookLotsLocked();
     if (book.netSteps != 0) return;  // not balanced (yet)
-    const double mid = (*latestBid_ + *latestAsk_) / 2.0;
-    if (guardRangeHigh_.ticks <= guardRangeLow_.ticks) {
-        const RangeConfig range = config_.strategy.range;
-        const int64_t half = (range.upperBound.ticks - range.lowerBound.ticks) / 2;
-        const int64_t center = Price::fromDouble(mid, spec).ticks;
-        guardRangeLow_ = Price{center - half};
-        guardRangeHigh_ = Price{center + half};
-        markDirty();
+
+    // --- 1. Let the market settle and read it before anything.
+    const auto waited = std::chrono::steady_clock::now() - lockedSince_;
+    const auto analyze = std::chrono::minutes(rc.escapeAnalyzeMinutes);
+    if (waited < analyze) {
+        const auto left = std::chrono::duration_cast<std::chrono::seconds>(analyze - waited).count();
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "reading the market, %lld:%02lld left", static_cast<long long>(left / 60),
+                      static_cast<long long>(left % 60));
+        setEscapePhaseLocked("analyze", std::string(buf) + " -- " + marketRead_.why);
+        return;
     }
+    if (!marketRead_.enoughData) {
+        setEscapePhaseLocked("collect", "reading the market: " + marketRead_.why);
+        return;
+    }
+
+    // --- 2. An escape order out: keep it only while the trend still points its way.
+    const TrendDirection dir = marketRead_.direction;
+    if (escape_.buyStopId != 0 || escape_.sellStopId != 0) {
+        const bool up = escape_.buyStopId != 0;
+        if ((up && dir == TrendDirection::Up) || (!up && dir == TrendDirection::Down)) {
+            const OrderId id = up ? escape_.buyStopId : escape_.sellStopId;
+            const auto it = placedOrderInfo_.find(id);
+            setEscapePhaseLocked("waiting", std::string("waiting for the ") + (up ? "UP" : "DOWN") + " breakout: " +
+                                 (up ? "Buy" : "Sell") + " Stop" +
+                                 (it != placedOrderInfo_.end() ? " @ " + priceTextOf(it->second.price.toDouble(spec))
+                                                               : std::string()) +
+                                 " -- " + marketRead_.why);
+            return;
+        }
+        OrderId& id = up ? escape_.buyStopId : escape_.sellStopId;
+        if (const auto it = placedOrderInfo_.find(id); it != placedOrderInfo_.end()) {
+            cancelledOrderInfo_.insert({id, it->second});
+            placedOrderInfo_.erase(it);
+            tradeSession_->send(buildOrderCancelRequest("c" + std::to_string(nextCancelReqId_++), std::to_string(id)));
+        }
+        id = 0;
+        markDirty();
+        auditEventLocked(8, 1, std::string("the ") + (up ? "up" : "down") +
+                                   " trend faded before the escape order filled -- order taken back, still locked (" +
+                                   marketRead_.why + ")");
+        return;
+    }
+
+    // --- 3. Only with a clear trend, and only its way.
+    if (dir == TrendDirection::None) {
+        setEscapePhaseLocked("sideways", "no clear direction -- staying locked, no escape into a sideways market (" +
+                             marketRead_.why + ")");
+        return;
+    }
+    const double mid = (*latestBid_ + *latestAsk_) / 2.0;
     const double equity = equityEstimateLocked(net);
     muuk::core::ReverseTradeInput in;
     in.spec = spec;
@@ -1641,31 +1796,30 @@ void LiveRunner::manageEscapeLocked(double net) {
                                                                  pctText(std::max(0.0, r.marginLevelAfter)))) +
                                  " -- no escape, the basket stays locked");
         }
+        setEscapePhaseLocked("margin", "no escape: not enough margin for " + priceTextOf(r.lot) + " lot -- locked");
         return;
     }
-    const Volume volume = Volume::fromDouble(r.lot, spec);
-    const Price buffer = Price::fromDouble(std::max(0.0, rc.escapeBuffer), spec);
-    OpenLeg up;
-    up.id = nextAdoptedId_++;
-    up.side = OrderSide::BuyStop;
-    up.volume = volume;
-    up.price = up.requestedPrice = Price{guardRangeHigh_.ticks + buffer.ticks};
-    OpenLeg down;
-    down.id = nextAdoptedId_++;
-    down.side = OrderSide::SellStop;
-    down.volume = volume;
-    down.price = down.requestedPrice = Price{guardRangeLow_.ticks - buffer.ticks};
-    if (stopIsMarketable(up.side, up.price) || stopIsMarketable(down.side, down.price)) return;  // outside the range now
-    sendStopOrderLocked(up, 0);
-    sendStopOrderLocked(down, 0);
-    escape_.buyStopId = up.id;
-    escape_.sellStopId = down.id;
+    // Beyond the recent extreme (a real breakout), and never at the price itself.
+    const bool up = dir == TrendDirection::Up;
+    const double beyond = std::max(rc.escapeBuffer, 0.25 * marketRead_.atr);
+    const double line = up ? std::max(marketRead_.recentHigh + beyond, *latestAsk_ + rc.escapeBuffer)
+                           : std::min(marketRead_.recentLow - beyond, *latestBid_ - rc.escapeBuffer);
+    OpenLeg order;
+    order.id = nextAdoptedId_++;
+    order.side = up ? OrderSide::BuyStop : OrderSide::SellStop;
+    order.volume = Volume::fromDouble(r.lot, spec);
+    order.price = order.requestedPrice = Price::fromDouble(line, spec);
+    if (stopIsMarketable(order.side, order.price)) return;
+    sendStopOrderLocked(order, 0);
+    (up ? escape_.buyStopId : escape_.sellStopId) = order.id;
+    escape_.atr = marketRead_.atr;
     markDirty();
     auditEventLocked(8, 1,
-                     "escape orders out: Buy Stop @ " + priceTextOf(up.price.toDouble(spec)) + " and Sell Stop @ " +
-                         priceTextOf(down.price.toDouble(spec)) + ", " + lotsTextOf(volume.steps, spec) +
-                         " lot each (a " + priceTextOf(rc.escapeMove) + " run wins the " + usdText(net) +
-                         " back); margin level after about " + pctText(r.marginLevelAfter));
+                     std::string("market reads ") + marketRead_.why + " -- escape " + (up ? "Buy" : "Sell") +
+                         " Stop " + lotsTextOf(order.volume.steps, spec) + " lot @ " + priceTextOf(line) +
+                         (up ? " (beyond the last " : " (beyond the last ") +
+                         std::to_string(rc.escapeLookbackBars) + " minutes' " + (up ? "high" : "low") + "); a " +
+                         priceTextOf(rc.escapeMove) + " run wins the " + usdText(net) + " back");
 }
 
 bool LiveRunner::accountFlat() const {
@@ -2816,7 +2970,13 @@ void LiveRunner::reconcileOnConnectLocked() {
             escape_.buy = saved->escapeBuy;
             escape_.entry = Price{saved->escapeEntryTicks};
             escape_.trailing = saved->escapeTrailing;
+            escape_.stop = saved->escapeStop;
+            escape_.atr = saved->escapeAtr;
             escapeTries_ = saved->escapeTries;
+            escapeAwaitingDecision_ = saved->escapeAwaitingDecision;
+            escapeHeld_ = saved->escapeHeld;
+            escapeExtraTries_ = saved->escapeExtraTries;
+            lockedSince_ = std::chrono::steady_clock::now();  // read the market afresh after a restart
         }
         ticksProcessed_ += saved->ticksProcessed;
         tickDecisionUs_.carryOver(saved->tickDecisionUs);
@@ -3326,6 +3486,11 @@ PersistedState LiveRunner::buildStateLocked() const {
     s.escapeEntryTicks = escape_.entry.ticks;
     s.escapeTrailing = escape_.trailing;
     s.escapeTries = escapeTries_;
+    s.escapeStop = escape_.stop;
+    s.escapeAtr = escape_.atr;
+    s.escapeAwaitingDecision = escapeAwaitingDecision_;
+    s.escapeHeld = escapeHeld_;
+    s.escapeExtraTries = escapeExtraTries_;
     s.ticksProcessed = ticksProcessed_;
     s.tickDecisionUs = tickDecisionUs_.totals();
     s.fillReactionUs = fillReactionUs_.totals();
@@ -3733,10 +3898,8 @@ void LiveRunner::auditLocked() {
         if (locked_) {
             std::string how = " (swap is charged every night) -- close it when you decide (Close range)";
             if (rc.escapeEnabled) {
-                how = escape_.legId != 0 ? " -- escape trade running" + std::string(escape_.trailing ? ", stop at its entry" : "")
-                      : (escape_.buyStopId != 0 || escape_.sellStopId != 0) ? " -- escape orders out"
-                      : escapeTries_ >= rc.escapeMaxTries ? " -- escape tries used up; close it when you decide"
-                                                          : " -- escape waits for margin / a balanced book";
+                how = escapePhase_.empty() ? std::string(" -- escape: waiting for a balanced book")
+                                           : " -- escape: " + escapePhase_;
             }
             set(kAuditLock, 2,
                 "locked since " + (lockedAt_.size() > 11 ? lockedAt_.substr(11) : lockedAt_) + " at " + usd(lockedLoss_) +

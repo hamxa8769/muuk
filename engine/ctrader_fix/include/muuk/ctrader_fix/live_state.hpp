@@ -74,6 +74,11 @@ struct PersistedState {
     int64_t escapeEntryTicks = 0;
     bool escapeTrailing = false;
     int escapeTries = 0;
+    double escapeStop = 0.0;           // re-lock price of the running escape
+    double escapeAtr = 0.0;
+    bool escapeAwaitingDecision = false;
+    bool escapeHeld = false;
+    int escapeExtraTries = 0;
 
     // Lifetime statistics (since the last reset).
     std::string statsSince;

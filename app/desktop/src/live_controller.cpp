@@ -274,6 +274,14 @@ void LiveController::closeAllPositions() {
     if (runner_ && running_.load()) runner_->closeAllPositions();
 }
 
+void LiveController::retryEscape() {
+    if (runner_ && running_.load()) runner_->retryEscape();
+}
+
+void LiveController::keepLocked() {
+    if (runner_ && running_.load()) runner_->keepLocked();
+}
+
 void LiveController::cancelAllPendingOrders() {
     if (runner_ && running_.load()) runner_->cancelAllPendingOrders();
 }

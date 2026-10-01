@@ -1,5 +1,6 @@
 add_library(muuk_core STATIC
     src/lot_progression.cpp
+    src/market_read.cpp
     src/pnl.cpp
     src/risk.cpp
     src/risk_table.cpp
@@ -16,6 +17,7 @@ if(MUUK_BUILD_TESTS)
     add_executable(muuk_core_tests
         tests/test_types.cpp
         tests/test_lot_progression.cpp
+        tests/test_market_read.cpp
         tests/test_pnl.cpp
         tests/test_risk.cpp
         tests/test_strategy_engine.cpp

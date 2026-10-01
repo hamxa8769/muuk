@@ -130,6 +130,24 @@ Each try was a whipsaw. The price broke 0.30 below the range, came straight back
 
 This is the risk the setting warns about: escape is a bet on a breakout. In a sideways market it adds to the loss. **Keep it off** unless the market is clearly trending.
 
+### Smart escape (2 Oct)
+
+The escape was rebuilt after basket #165. What it does from a lock now:
+
+1. **Lock first, then read the market.** For *read the market first* (default 5 min) the bot only watches.
+   - It builds 1-minute bars from every quote.
+   - It reads the trend: EMA 8 vs EMA 21, the slope of EMA 21, and the price above or below it.
+   - It reads the structure: higher highs and lows, or lower ones, over the last 15 minutes.
+   - It reads the volatility (ATR).
+   - It needs 3 of the 4 signals to agree before it calls a direction.
+   - Neither the broker feed nor MT5 gives sentiment or order-book depth for gold here, so these come from the price alone.
+2. **Only with a clear trend, only its way.** One stop order: a Buy Stop above the last 15 minutes' high in an up trend, or a Sell Stop below the low in a down trend. It never places an order against the trend, and never both sides. If the trend fades before the order fills, the order is taken back. In a sideways market there is no escape at all.
+3. **Room to breathe.** The escape is locked again only when the price goes *re-lock after* × ATR (default 1 ATR) against it. A dip back into the range no longer triggers it, which was the 0.30 whipsaw of #165. Once it has run *protect after* ($1), its re-lock line moves to its entry and then follows the price.
+4. **Positive = done.** As soon as the basket's net is back at break-even (+0.50), everything closes.
+5. **A failed try asks you.** The app shows **Retry escape / Keep locked / Close range** in red. Nothing more happens by itself unless *retry by itself* is on.
+
+Escape is still a bet that the trend continues. These rules make each try rarer and better placed, but a trend can still reverse.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

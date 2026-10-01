@@ -1358,13 +1358,35 @@ LiveConfig escapeConfig(const MockFixServer& server) {
     cfg.connection.recovery.escapeBuffer = 0.30;
     cfg.connection.recovery.escapeTrailAt = 1.0;
     cfg.connection.recovery.escapeMaxTries = 1;
+    cfg.connection.recovery.escapeAnalyzeMinutes = 0;  // no settling time in a test
+    cfg.connection.recovery.escapeLookbackBars = 15;
+    cfg.connection.recovery.escapeStopAtr = 1.0;
     cfg.connection.manualCloseCooldownSeconds = 0;
     return cfg;
 }
 
+// 40 finished one-minute bars before now: closes rising 0.20 a bar to
+// 4336.20 (up), falling to it (down), or swinging around it (sideways).
+// Each bar is 0.30 taller than its move: ATR 0.50 for the trends.
+std::vector<Bar> historyBars(int trend) {
+    const int64_t thisMinute = utcNowMs() / 60'000 * 60'000;
+    std::vector<Bar> out;
+    auto closeAt = [&](int i) {
+        if (trend == 0) return 4336.20 + ((i % 2) ? 0.6 : -0.6);
+        return 4336.20 + trend * 0.20 * (i - 39);
+    };
+    double prev = closeAt(0);
+    for (int i = 0; i < 40; ++i) {
+        const double c = closeAt(i);
+        out.push_back(Bar{thisMinute - (40 - i) * 60'000LL, prev, std::max(prev, c) + 0.15, std::min(prev, c) - 0.15, c});
+        prev = c;
+    }
+    return out;
+}
+
 // Buy 0.01 @ 4337, the price falls to 4336.20/30, locked with a sell 0.01 @
-// 4336.20 (P2); then the escape orders go out. Returns {buy stop, sell stop}.
-std::pair<FixMessage, FixMessage> lockThenEscapeOrders(MockFixServer& server, int& seq) {
+// 4336.20 (P2); then a quote at 4336.40/50 lets the escape decide.
+void lockTheBasket(MockFixServer& server, int& seq) {
     const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
     const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
@@ -1375,29 +1397,28 @@ std::pair<FixMessage, FixMessage> lockThenEscapeOrders(MockFixServer& server, in
     sendFill(server, seq++, hedge.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
     std::this_thread::sleep_for(200ms);
     sendQuote(server, 3, 4336.40, 4336.50);
-    FixMessage a = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
-    FixMessage b = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
-    if (a.getInt(tag::Side) != 1) std::swap(a, b);
-    return {a, b};
 }
 }  // namespace
 
-TEST_CASE("Escape: from a lock, stop orders outside the range; a run the escape's way closes it all") {
+TEST_CASE("Escape: only with the trend -- one stop beyond the recent high in an up market; a run closes it all") {
     MockFixServer server;
     Bot bot(escapeConfig(server), freshStateFile("escape_win"));
     int seq = handshake(server, {}, {});
-    const auto [up, down] = lockThenEscapeOrders(server, seq);
-    REQUIRE(up.getInt(tag::OrdType) == 3);
-    REQUIRE(up.getDouble(tag::StopPx) == Catch::Approx(4337.30));    // range top + 0.30
-    REQUIRE(down.getDouble(tag::StopPx) == Catch::Approx(4335.70));  // range bottom - 0.30
-    REQUIRE(up.getDouble(tag::OrderQty) == Catch::Approx(1.0));      // (0.90 + costs) / $2 -> 0.01
+    bot.runner().addHistoryBars(historyBars(+1));
+    lockTheBasket(server, seq);
 
-    sendFill(server, seq++, up.getString(tag::ClOrdID), 4337.30, 1.0, "P3");
-    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
-    REQUIRE(cancel.getString(tag::OrigClOrdID) == down.getString(tag::ClOrdID));
+    const FixMessage up = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(up.getInt(tag::OrdType) == 3);
+    REQUIRE(up.getInt(tag::Side) == 1);  // with the trend: a Buy Stop, and no Sell Stop against it
+    // Beyond the last 15 minutes' high (4336.35) and 0.30 above the ask (4336.50).
+    REQUIRE(up.getDouble(tag::StopPx) == Catch::Approx(4336.80));
+    REQUIRE(up.getDouble(tag::OrderQty) == Catch::Approx(1.0));  // (0.90 + costs) / $2 -> 0.01
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 800ms), std::runtime_error);
+
+    sendFill(server, seq++, up.getString(tag::ClOrdID), 4336.80, 1.0, "P3");
     REQUIRE(waitUntil([&] { return bot.runner().snapshot().escapeTradeOpen; }));
 
-    sendQuote(server, 4, 4339.00, 4339.10);  // frozen -0.90 + 1.75 - 0.05 = +0.80
+    sendQuote(server, 4, 4339.00, 4339.10);  // frozen -0.90 + 2.20 - spread: back above break-even
     for (int i = 0; i < 3; ++i) {
         const FixMessage c = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
         REQUIRE(c.getOptionalString(tag::PosMaintRptID).has_value());
@@ -1410,29 +1431,78 @@ TEST_CASE("Escape: from a lock, stop orders outside the range; a run the escape'
     bot.rethrow();
 }
 
-TEST_CASE("Escape: a breakout that turns back into the range is locked again; tries are capped") {
+TEST_CASE("Escape: room to breathe -- a dip back into the range doesn't re-lock; the ATR line does, then it asks") {
     MockFixServer server;
     Bot bot(escapeConfig(server), freshStateFile("escape_whipsaw"));
     int seq = handshake(server, {}, {});
-    const auto [up, down] = lockThenEscapeOrders(server, seq);
-    sendFill(server, seq++, up.getString(tag::ClOrdID), 4337.30, 1.0, "P3");
-    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    bot.runner().addHistoryBars(historyBars(+1));
+    lockTheBasket(server, seq);
+    const FixMessage up = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, up.getString(tag::ClOrdID), 4336.80, 1.0, "P3");
     REQUIRE(waitUntil([&] { return bot.runner().snapshot().escapeTradeOpen; }));
 
-    sendQuote(server, 4, 4336.80, 4336.90);  // back inside the range (under 4337) before any trail
+    // Back under the range top (4337) but above the re-lock line 4336.80 - 1 ATR = 4336.30: it holds.
+    sendQuote(server, 4, 4336.60, 4336.70);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1000ms), std::runtime_error);
+    REQUIRE(bot.runner().snapshot().escapeTradeOpen);
+
+    sendQuote(server, 5, 4336.25, 4336.35);  // through the line: locked again
     const FixMessage relock = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(relock.getInt(tag::OrdType) == 1);
     REQUIRE(relock.getInt(tag::Side) == 2);
-    REQUIRE(relock.getDouble(tag::OrderQty) == Catch::Approx(1.0));
-    sendFill(server, seq++, relock.getString(tag::ClOrdID), 4336.80, 1.0, "P4");
+    sendFill(server, seq++, relock.getString(tag::ClOrdID), 4336.25, 1.0, "P4");
     REQUIRE(waitUntil([&] {
         const LiveSnapshot s = bot.runner().snapshot();
-        return s.positions.size() == 4 && !s.escapeTradeOpen && s.escapeTries == 1;
+        return s.positions.size() == 4 && !s.escapeTradeOpen && s.escapeAwaitingDecision;
     }));
-    REQUIRE(bot.runner().snapshot().locked);
-    // One try allowed: no new escape orders.
-    sendQuote(server, 5, 4336.50, 4336.60);
+
+    // It waits for the operator: no new escape by itself...
+    sendQuote(server, 6, 4336.40, 4336.50);
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1000ms), std::runtime_error);
+    // ...until Retry escape (the one try was used: Retry adds one).
+    bot.runner().retryEscape();
+    sendQuote(server, 7, 4336.40, 4336.50);
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::OrdType) == 3);
+    REQUIRE(again.getInt(tag::Side) == 1);
+
+    // Keep locked takes it back and stops escaping.
+    bot.runner().keepLocked();
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == again.getString(tag::ClOrdID));
+    REQUIRE(bot.runner().snapshot().escapeHeld);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Escape: a sideways market gets no escape at all -- the basket stays locked") {
+    MockFixServer server;
+    Bot bot(escapeConfig(server), freshStateFile("escape_sideways"));
+    int seq = handshake(server, {}, {});
+    bot.runner().addHistoryBars(historyBars(0));
+    lockTheBasket(server, seq);
     REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+    const LiveSnapshot s = bot.runner().snapshot();
+    REQUIRE(s.locked);
+    REQUIRE_FALSE(s.escapeOrdersOut);
+    REQUIRE(s.escapePhase.find("no clear direction") != std::string::npos);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Escape: in a down market only a Sell Stop, below the recent low") {
+    MockFixServer server;
+    Bot bot(escapeConfig(server), freshStateFile("escape_down"));
+    int seq = handshake(server, {}, {});
+    bot.runner().addHistoryBars(historyBars(-1));
+    lockTheBasket(server, seq);
+    const FixMessage down = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(down.getInt(tag::Side) == 2);
+    // Below the last 15 minutes' low (4336.05) by 0.30, and 0.30 under the bid (4336.40).
+    REQUIRE(down.getDouble(tag::StopPx) == Catch::Approx(4335.75));
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 800ms), std::runtime_error);
 
     bot.finish();
     bot.rethrow();

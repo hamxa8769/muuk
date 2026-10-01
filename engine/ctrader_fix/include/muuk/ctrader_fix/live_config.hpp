@@ -32,15 +32,28 @@ struct RecoveryConfig {
     // While a lock waits or holds: once the net is back at the break-even
     // escape amount (strategy.breakEvenEscape.profit), close everything.
     bool closeAtBreakEven = true;
-    // Escape (off by default): from a lock, stop orders outside the range
-    // sized to win the frozen loss back over escapeMove. If the price turns
-    // back (into the range, or to the entry once it ran escapeTrailAt), the
-    // escape trade is locked again. At most escapeMaxTries per basket.
+    // Escape (off by default), from a lock:
+    //  1. wait escapeAnalyzeMinutes while the market settles and the bot
+    //     reads it from 1-minute bars (trend, structure, volatility);
+    //  2. only with a clear trend: ONE stop order in its direction, beyond
+    //     the last escapeLookbackBars' high (or low) -- never against it, and
+    //     taken back if the trend fades before it fills;
+    //  3. sized to win the frozen loss back over escapeMove; the basket
+    //     closes once its net is back at break-even or better;
+    //  4. locked again only if the price goes escapeStopAtr x ATR against
+    //     it (or back to its entry once it ran escapeTrailAt);
+    //  5. after a failed try it waits for the operator (Retry escape /
+    //     Close range / Keep locked), unless escapeAutoRetry.
+    // At most escapeMaxTries per basket.
     bool escapeEnabled = false;
     double escapeMove = 2.0;
-    double escapeBuffer = 0.30;
+    double escapeBuffer = 0.30;   // the least distance beyond the breakout line / the price
     double escapeTrailAt = 1.0;
     int escapeMaxTries = 2;
+    int escapeAnalyzeMinutes = 5;
+    int escapeLookbackBars = 15;
+    double escapeStopAtr = 1.0;
+    bool escapeAutoRetry = false;
 };
 
 // Connection/credential details for one cTrader FIX account. Loaded from a

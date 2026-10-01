@@ -181,7 +181,12 @@ nlohmann::json stateToJson(const PersistedState& s) {
                           {"escapeBuy", s.escapeBuy},
                           {"escapeEntryTicks", s.escapeEntryTicks},
                           {"escapeTrailing", s.escapeTrailing},
-                          {"escapeTries", s.escapeTries}}},
+                          {"escapeTries", s.escapeTries},
+                          {"escapeStop", s.escapeStop},
+                          {"escapeAtr", s.escapeAtr},
+                          {"escapeAwaitingDecision", s.escapeAwaitingDecision},
+                          {"escapeHeld", s.escapeHeld},
+                          {"escapeExtraTries", s.escapeExtraTries}}},
                         {"ticksProcessed", s.ticksProcessed},
                         {"tickDecisionUs", totalsToJson(s.tickDecisionUs)},
                         {"fillReactionUs", totalsToJson(s.fillReactionUs)},
@@ -233,6 +238,11 @@ PersistedState stateFromJson(const nlohmann::json& j) {
         s.escapeEntryTicks = r.value("escapeEntryTicks", int64_t{0});
         s.escapeTrailing = r.value("escapeTrailing", false);
         s.escapeTries = r.value("escapeTries", 0);
+        s.escapeStop = r.value("escapeStop", 0.0);
+        s.escapeAtr = r.value("escapeAtr", 0.0);
+        s.escapeAwaitingDecision = r.value("escapeAwaitingDecision", false);
+        s.escapeHeld = r.value("escapeHeld", false);
+        s.escapeExtraTries = r.value("escapeExtraTries", 0);
     }
     s.ticksProcessed = j.value("ticksProcessed", uint64_t{0});
     s.tickDecisionUs = totalsFromJson(j, "tickDecisionUs");

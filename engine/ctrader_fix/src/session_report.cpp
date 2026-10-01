@@ -297,9 +297,12 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
                               ? fmt("hold next level < %.0f%%", s.recovery.guardLockMarginLevel) +
                                     fmt(", lock < %.0f%%", s.recovery.guardStopMarginLevel)
                               : std::string("off")},
-        {"Escape from a lock", s.recovery.escapeEnabled ? fmt("on, $%.2f move", s.recovery.escapeMove) + ", " +
-                                                              std::to_string(s.recovery.escapeMaxTries) + " tries"
-                                                        : std::string("off")},
+        {"Escape from a lock",
+         s.recovery.escapeEnabled
+             ? "trend only, read " + std::to_string(s.recovery.escapeAnalyzeMinutes) + " min, re-lock " +
+                   fmt("%.2g ATR", s.recovery.escapeStopAtr) + ", " + std::to_string(s.recovery.escapeMaxTries) +
+                   (s.recovery.escapeAutoRetry ? " tries" : " try then ask")
+             : std::string("off")},
         {"Market hours filter", s.market.enabled ? "on, pause " + std::to_string(s.market.pauseMinutesBefore) +
                                                        " min before / " + std::to_string(s.market.pauseMinutesAfter) +
                                                        " min after session ends"

@@ -44,6 +44,10 @@ RecoveryConfig recoveryFromJson(const nlohmann::json& j) {
     r.escapeBuffer = j.value("escapeBuffer", r.escapeBuffer);
     r.escapeTrailAt = j.value("escapeTrailAt", r.escapeTrailAt);
     r.escapeMaxTries = std::clamp(j.value("escapeMaxTries", r.escapeMaxTries), 0, 10);
+    r.escapeAnalyzeMinutes = std::clamp(j.value("escapeAnalyzeMinutes", r.escapeAnalyzeMinutes), 0, 240);
+    r.escapeLookbackBars = std::clamp(j.value("escapeLookbackBars", r.escapeLookbackBars), 4, 120);
+    r.escapeStopAtr = std::clamp(j.value("escapeStopAtr", r.escapeStopAtr), 0.2, 10.0);
+    r.escapeAutoRetry = j.value("escapeAutoRetry", r.escapeAutoRetry);
     return r;
 }
 
@@ -56,7 +60,11 @@ nlohmann::json recoveryToJson(const RecoveryConfig& r) {
             {"escapeMove", r.escapeMove},
             {"escapeBuffer", r.escapeBuffer},
             {"escapeTrailAt", r.escapeTrailAt},
-            {"escapeMaxTries", r.escapeMaxTries}};
+            {"escapeMaxTries", r.escapeMaxTries},
+            {"escapeAnalyzeMinutes", r.escapeAnalyzeMinutes},
+            {"escapeLookbackBars", r.escapeLookbackBars},
+            {"escapeStopAtr", r.escapeStopAtr},
+            {"escapeAutoRetry", r.escapeAutoRetry}};
 }
 
 }  // namespace

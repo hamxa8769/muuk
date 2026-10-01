@@ -79,6 +79,9 @@ public:
     bool openRange();
     // reopen=false: don't open a new range after the cooldown (exit guard).
     void closeRange(bool reopen = true);
+    // After a failed escape: try once more / keep it locked (LiveRunner).
+    void retryEscape();
+    void keepLocked();
     void closeAllPositions();
     void cancelAllPendingOrders();
     void closePosition(muuk::core::OrderId id);
