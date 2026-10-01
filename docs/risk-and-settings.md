@@ -90,6 +90,19 @@ Under the label, "On the way" lists what acted: margin guard held a level, locke
 
 Baskets saved before this change have no guard or lock information. A basket with two or more fills that reached its target still shows as "loss recovered".
 
+### Closing a deep basket fast (1 Oct)
+
+The VPS report of 1 Oct shows the problem this fixes. Basket #116 reached level 10 (5.12 lot last), and the break-even target fired. But it booked −166.68 USC.
+
+Why: its 10 positions were closed one after another, each waiting for the broker's answer (round trip about 0.46 s on average on the VPS). That is about 4–5 seconds, with up to 3+ lots exposed. The price moved 0.6–1.2 against it in that time.
+
+Now:
+- **MT5:** the bridge sends every close without waiting (`OrderSendAsync`), so a basket's closes reach the broker together. A refused close is still reported to the app.
+- **Close order:** the positions close in the order that keeps the open exposure smallest. The big net-side leg goes first, then the hedged pairs. Market movement during the rest barely matters.
+- **Report:**
+  - a cent account's amounts are now in USC, not "$";
+  - the Settings section shows lot growth (×2), break-even target, lock at loss, margin guards and escape.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

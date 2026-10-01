@@ -1282,6 +1282,8 @@ void LiveRunner::adoptBrokerSymbolLocked(const BrokerAccountInfo& a) {
     st.riskLimits.maxSlippageTicks = ticks(st.riskLimits.maxSlippageTicks);
     st.symbol = spec;
     std::string notes;
+    // Cent or standard: what the account's currency says (the report and the app count in it).
+    config_.connection.accountKind = a.cent() ? "cent" : "standard";
     // Commission: what this account really pays, learned from its own deals.
     if (a.commissionInPerLot >= 0.0 || a.commissionOutPerLot >= 0.0) {
         const double in = a.commissionInPerLot >= 0.0 ? a.commissionInPerLot : a.commissionOutPerLot;
@@ -2047,7 +2049,39 @@ void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
         return;
     }
     markDirty();
-    for (const auto& leg : legs) {
+    // The order to close them in: each next close leaves the open exposure
+    // (buy lots - sell lots still open) as small as it can. A deep basket is
+    // mostly hedged pairs plus a net; closing the big net-side leg first
+    // means the market moving while the rest fill barely matters. (In the
+    // order they opened, a 10-level x2 basket kept up to 3+ lots exposed
+    // until its very last close.)
+    std::vector<std::size_t> order;
+    {
+        auto signedSteps = [](const OpenLeg& l) {
+            return l.side == OrderSide::BuyStop ? l.volume.steps : -l.volume.steps;
+        };
+        int64_t open = 0;
+        for (const auto& l : legs) open += signedSteps(l);
+        std::vector<bool> used(legs.size(), false);
+        for (std::size_t k = 0; k < legs.size(); ++k) {
+            std::size_t best = legs.size();
+            int64_t bestLeft = 0;
+            for (std::size_t i = 0; i < legs.size(); ++i) {
+                if (used[i]) continue;
+                const int64_t left = std::llabs(open - signedSteps(legs[i]));
+                if (best == legs.size() || left < bestLeft ||
+                    (left == bestLeft && legs[i].volume.steps > legs[best].volume.steps)) {
+                    best = i;
+                    bestLeft = left;
+                }
+            }
+            used[best] = true;
+            open -= signedSteps(legs[best]);
+            order.push_back(best);
+        }
+    }
+    for (const std::size_t index : order) {
+        const OpenLeg& leg = legs[index];
         if (leg.positionId.empty()) {
             // Sending it anyway would open a *new* opposite position.
             log("[basket] CRITICAL: can't close a " + std::string(leg.side == OrderSide::BuyStop ? "buy" : "sell") +

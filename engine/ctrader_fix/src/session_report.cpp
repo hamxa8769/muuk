@@ -33,9 +33,24 @@ std::string fmt(const char* f, double v) {
     return buf;
 }
 
+// A cent account's money is US cents: amounts say "USC" instead of "$".
+bool g_centReport = false;
+
 std::string money(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%s$%.2f", v < -0.005 ? "-" : (v > 0.005 ? "+" : ""), std::fabs(v));
+    char buf[40];
+    const char* sign = v < -0.005 ? "-" : (v > 0.005 ? "+" : "");
+    if (g_centReport) {
+        std::snprintf(buf, sizeof(buf), "%s%.2f USC", sign, std::fabs(v));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s$%.2f", sign, std::fabs(v));
+    }
+    return buf;
+}
+
+// An amount without a sign, for settings.
+std::string amount(double v) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), g_centReport ? "%.2f USC" : "$%.2f", v);
     return buf;
 }
 
@@ -271,9 +286,20 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Range width", fmt("$%.2f", s.rangeWidth)},
         {"Profit target (net)", s.autoTarget ? "auto level " + std::to_string((s.autoTargetPercent - 160) / 2) + ": " +
                                                    std::to_string(s.autoTargetPercent) + "% of the positions' cost"
-                                             : fmt("$%.2f", s.profitTarget)},
-        {"Stop loss (net)", s.stopLoss > 0 ? fmt("$%.2f", s.stopLoss) : std::string("off")},
-        {"Daily loss limit", s.dailyLossLimit > 0 ? fmt("$%.2f", s.dailyLossLimit) : std::string("off")},
+                                             : amount(s.profitTarget)},
+        {"Stop loss (net)", s.stopLoss > 0 ? amount(s.stopLoss) : std::string("off")},
+        {"Daily loss limit", s.dailyLossLimit > 0 ? amount(s.dailyLossLimit) : std::string("off")},
+        {"Lock & pause at loss", s.lockAtLoss > 0 ? amount(s.lockAtLoss) : std::string("off")},
+        {"Break-even target", s.escapeFromLevel > 0 ? "from level " + std::to_string(s.escapeFromLevel) + ", close at " +
+                                                          amount(s.escapeProfit)
+                                                    : std::string("off")},
+        {"Margin guards", s.recovery.guardLockMarginLevel > 0 || s.recovery.guardStopMarginLevel > 0
+                              ? fmt("hold next level < %.0f%%", s.recovery.guardLockMarginLevel) +
+                                    fmt(", lock < %.0f%%", s.recovery.guardStopMarginLevel)
+                              : std::string("off")},
+        {"Escape from a lock", s.recovery.escapeEnabled ? fmt("on, $%.2f move", s.recovery.escapeMove) + ", " +
+                                                              std::to_string(s.recovery.escapeMaxTries) + " tries"
+                                                        : std::string("off")},
         {"Market hours filter", s.market.enabled ? "on, pause " + std::to_string(s.market.pauseMinutesBefore) +
                                                        " min before / " + std::to_string(s.market.pauseMinutesAfter) +
                                                        " min after session ends"
@@ -284,13 +310,16 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
                                  s.market.newsCurrencies + ", " + std::to_string(s.market.newsMinutesBefore) +
                                  " min before / " + std::to_string(s.market.newsMinutesAfter) + " after"
                            : std::string("off")},
-        {"First lot / increment", fmt("%.2f", s.initialLot) + " / " + fmt("%.2f", s.lotIncrement)},
+        {"First lot / growth", fmt("%.2f", s.initialLot) + " / " +
+                                   (s.lotMultiplier > 1.0 ? fmt("x%.2g each fill", s.lotMultiplier)
+                                                          : fmt("+%.2f each fill", s.lotIncrement))},
+        {"Account", s.accountKind == "cent" ? std::string("cent (amounts in USC)") : std::string("standard ($)")},
         {"Entry offset", fmt("$%.2f", s.seedOffset)},
         {"Commission", s.commissionPerMillion > 0 ? fmt("$%.2f per $1M traded, each side", s.commissionPerMillion)
                                                 : fmt("$%.2f per lot, round turn", s.commissionPerLot)},
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
         {"Max orders / max lot", std::to_string(s.maxOrders) + " / " + fmt("%.2f", s.maxLot)},
-        {"Max basket loss", s.maxBasketLoss > 0 ? fmt("$%.2f", s.maxBasketLoss) : "off"},
+        {"Max basket loss", s.maxBasketLoss > 0 ? amount(s.maxBasketLoss) : "off"},
         {"Auto-open next range", s.autoContinue ? "on" : "off"},
     };
     PdfDocument& doc = lay.doc();
@@ -494,6 +523,7 @@ void basketTrees(Layout& lay, const std::vector<BasketRecord>& newestFirst, std:
 }  // namespace
 
 std::string buildSessionReportPdf(const SessionReportInput& in) {
+    g_centReport = in.settings.accountKind == "cent";
     PdfDocument doc;
     Layout lay(doc);
 

@@ -341,11 +341,14 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
     rally.set(tag::MDEntryPx, std::string("4342.01"));
     server.sendToClient(kQuoteConn, rally);
 
+    // Closed in the order that keeps the open exposure smallest: net long
+    // .02, so the Buy .03 first (leaves .01 short), then the Sell .02
+    // (leaves .01 long), then the Buy .01.
     const FixMessage close1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close1.getInt(tag::OrdType) == 1);
-    REQUIRE(close1.getInt(tag::Side) == 2);  // closes the Buy .01 leg
-    REQUIRE(close1.getDouble(tag::OrderQty) == Catch::Approx(1.0));
-    REQUIRE(close1.getString(tag::PosMaintRptID) == "P" + order1ClOrdId);
+    REQUIRE(close1.getInt(tag::Side) == 2);  // closes the Buy .03 leg
+    REQUIRE(close1.getDouble(tag::OrderQty) == Catch::Approx(3.0));
+    REQUIRE(close1.getString(tag::PosMaintRptID) == "P" + order3ClOrdId);
 
     const FixMessage close2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close2.getInt(tag::OrdType) == 1);
@@ -355,21 +358,21 @@ TEST_CASE("LiveRunner closes every filled leg individually on basket close, "
 
     const FixMessage close3 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
     REQUIRE(close3.getInt(tag::OrdType) == 1);
-    REQUIRE(close3.getInt(tag::Side) == 2);  // closes the Buy .03 leg
-    REQUIRE(close3.getDouble(tag::OrderQty) == Catch::Approx(3.0));
-    REQUIRE(close3.getString(tag::PosMaintRptID) == "P" + order3ClOrdId);
+    REQUIRE(close3.getInt(tag::Side) == 2);  // closes the Buy .01 leg
+    REQUIRE(close3.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    REQUIRE(close3.getString(tag::PosMaintRptID) == "P" + order1ClOrdId);
 
     // Not one of these three closing orders has been confirmed filled yet
     // -- the next cycle must still be blocked.
     REQUIRE(runner.snapshot().status == EngineStatus::Completed);
 
-    sendFill(7, close1.getString(tag::ClOrdID), "4342.00", "0.01");
+    sendFill(7, close1.getString(tag::ClOrdID), "4342.00", "0.03");
     sendFill(8, close2.getString(tag::ClOrdID), "4342.00", "0.02");
     // Two of three confirmed: still blocked.
     REQUIRE(runner.snapshot().status == EngineStatus::Completed);
     REQUIRE(runner.snapshot().activeOrderCount == 0);
 
-    sendFill(9, close3.getString(tag::ClOrdID), "4342.00", "0.03");
+    sendFill(9, close3.getString(tag::ClOrdID), "4342.00", "0.01");
 
     // All three legs confirmed flat -> the next cycle starts.
     // The fixed range's Buy Stop (4337) is below the market (4342) here, so

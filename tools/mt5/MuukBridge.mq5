@@ -491,6 +491,17 @@ void PlaceMarket(const string line)
       req.position = ticket;
       const double held = PositionGetDouble(POSITION_VOLUME);
       if(held < req.volume) req.volume = held;
+      // Closes go out without waiting for each answer: a basket's closes
+      // reach the broker together instead of one round trip (often 0.3-0.5 s)
+      // after another while the market moves. Fills arrive through
+      // OnTradeTransaction; a refusal too (TRADE_TRANSACTION_REQUEST).
+      if(!OrderSendAsync(req, res))
+      {
+         SendReject(id, "MT5 " + IntegerToString(res.retcode) + ": " + res.comment);
+         return;
+      }
+      if(res.order != 0) MapPut(res.order, id);
+      return;
    }
    bool ok = OrderSend(req, res);
    if(!ok && res.retcode == TRADE_RETCODE_INVALID_FILL)
@@ -573,6 +584,31 @@ void ListOrders(const string reqId)
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest& request, const MqlTradeResult& result)
 {
+   // The broker's answer to an asynchronous close.
+   if(trans.type == TRADE_TRANSACTION_REQUEST)
+   {
+      if(request.magic != MagicNumber || request.action != TRADE_ACTION_DEAL || request.position == 0) return;
+      const string id = request.comment;
+      if(id == "") return;
+      if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED ||
+         result.retcode == TRADE_RETCODE_DONE_PARTIAL)
+      {
+         if(result.order != 0) MapPut(result.order, id);
+         return;
+      }
+      if(result.retcode == TRADE_RETCODE_INVALID_FILL && request.type_filling != ORDER_FILLING_RETURN)
+      {
+         // The other filling mode, once.
+         MqlTradeRequest again = request;
+         MqlTradeResult res;
+         ZeroMemory(res);
+         again.type_filling = request.type_filling == ORDER_FILLING_FOK ? ORDER_FILLING_IOC : ORDER_FILLING_RETURN;
+         again.price = again.type == ORDER_TYPE_BUY ? SymbolInfoDouble(g_sym, SYMBOL_ASK) : SymbolInfoDouble(g_sym, SYMBOL_BID);
+         if(OrderSendAsync(again, res)) return;
+      }
+      SendReject(id, "MT5 " + IntegerToString(result.retcode) + ": " + result.comment);
+      return;
+   }
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
    if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != g_sym) return;
