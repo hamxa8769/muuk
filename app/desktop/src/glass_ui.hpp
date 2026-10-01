@@ -92,6 +92,11 @@ bool railItem(const char* label, const char* badge, ImVec4 badgeColor, bool sele
 // dot. Returns true while the mouse is over it.
 bool menuIcon(const char* id, float size, float open, bool alert);
 
+// Who is using the app: a round avatar with the name's first letter, the
+// name, and the role as a small tag ("ADMIN"). Returns true while hovered.
+bool userBadge(const char* name, const char* role, ImVec4 color);
+[[nodiscard]] float userBadgeWidth(const char* name, const char* role);
+
 // Eases a displayed value towards `target` (per-id), for smooth numbers.
 [[nodiscard]] float ease(const char* id, float target, float speed = 10.0f);
 

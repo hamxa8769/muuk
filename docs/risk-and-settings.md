@@ -74,6 +74,28 @@ These came in `0884b78`:
   - **On MT5, the fields the broker already reports are hidden.** These are balance, leverage, hedged margin, account type and commission; the cards show the broker's values instead.
   - **Risk table fixes:** the guard marker, the units (¢ / $) and the commission now follow MT5.
 
+### How each basket ended (History and the PDF report)
+
+Every basket now carries a label saying how it ended, in the same words in the app and in the report:
+
+| Label | Colour | Meaning |
+|---|---|---|
+| Profit target | green | Straight to the target; the price never turned against the first position. |
+| Loss recovered -> profit target | blue | The basket went into loss (a second level filled) and still closed at the full target. |
+| Loss recovered -> break-even exit | blue | It closed on the lowered break-even target (from level N). |
+| Guard used -> closed in profit / Guard: lock -> back to break-even | blue | The margin guard held a level, or a lock froze the loss, and the basket still closed at or above 0. |
+| Stop loss / Closed by you - in loss / ... - in loss | red | Closed in loss, with the reason. |
+
+Under the label, "On the way" lists what acted: margin guard held a level, locked at −X, escape tries, the break-even target, the deepest point. The report's overview counts them: profit target, loss recovered, closed in loss, guard used.
+
+Baskets saved before this change have no guard or lock information. A basket with two or more fills that reached its target still shows as "loss recovered".
+
+### Layout
+
+- **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.
+- **The costs under the P/L bar are folded by default.** One line shows the net and the total cost; a click opens the breakdown (gross, slippage, spread, commission, swap).
+- **Admin badge** at the top right: an avatar with the user's name and an ADMIN tag. The name comes from Windows unless `userName` is set in `%APPDATA%\Muuk\desktop.json`. A `role` is kept there too, ready for more users with their own accounts later.
+
 ### The first MT5 run
 
 JustMarkets demo cent, 30 Sep 15:30–17:15.

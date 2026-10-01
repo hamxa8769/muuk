@@ -32,6 +32,8 @@ AppPrefs loadPrefs() {
         prefs.autoConnect = j.value("autoConnect", false);
         prefs.autoReconnect = j.value("autoReconnect", true);
         prefs.liteMode = j.value("liteMode", false);
+        prefs.userName = j.value("userName", std::string());
+        prefs.role = j.value("role", std::string("admin"));
     } catch (const std::exception&) {
         return AppPrefs{};
     }
@@ -48,11 +50,27 @@ void savePrefs(const AppPrefs& prefs) {
                               {"darkMode", prefs.darkMode},
                               {"autoConnect", prefs.autoConnect},
                               {"autoReconnect", prefs.autoReconnect},
-                              {"liteMode", prefs.liteMode}}
+                              {"liteMode", prefs.liteMode},
+                              {"userName", prefs.userName},
+                              {"role", prefs.role}}
                    .dump(2);
     } catch (const std::exception&) {
         // Preferences are a convenience -- never worth interrupting the app for.
     }
+}
+
+std::string displayUserName(const AppPrefs& prefs) {
+    if (!prefs.userName.empty()) return prefs.userName;
+#ifdef _WIN32
+    char* name = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&name, &len, "USERNAME") == 0 && name != nullptr) {
+        std::string out(name);
+        std::free(name);
+        if (!out.empty()) return out;
+    }
+#endif
+    return "Owner";
 }
 
 }  // namespace muuk::desktop

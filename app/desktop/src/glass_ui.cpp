@@ -594,4 +594,40 @@ void pnlBar(const char* id, float value, float negScale, float posScale, float h
     ImGui::Dummy(ImVec2(w, h));
 }
 
+float userBadgeWidth(const char* name, const char* role) {
+    return ImGui::GetFrameHeight() + 8.0f + ImGui::CalcTextSize(name).x + 8.0f + ImGui::CalcTextSize(role).x + 16.0f;
+}
+
+bool userBadge(const char* name, const char* role, ImVec4 color) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = ImGui::GetFrameHeight();
+    const float w = userBadgeWidth(name, role);
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##user_badge", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+
+    // Avatar: the name's first letter in a ring.
+    const float r = h * 0.5f;
+    const ImVec2 c(a.x + r, a.y + r);
+    dl->AddCircleFilled(c, r, col(alpha(color, hovered ? 0.32f : 0.20f)), 28);
+    dl->AddCircle(c, r - 0.75f, col(alpha(color, 0.90f)), 28, 1.5f);
+    const char initial[2] = {static_cast<char>(name[0] >= 'a' && name[0] <= 'z' ? name[0] - 32 : (name[0] ? name[0] : '?')),
+                             '\0'};
+    const ImVec2 ts = ImGui::CalcTextSize(initial);
+    dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col(color), initial);
+
+    // Name, then the role as a small tag.
+    const float ty = a.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+    float x = a.x + h + 8.0f;
+    dl->AddText(ImVec2(x, ty), col(g_palette.text), name);
+    x += ImGui::CalcTextSize(name).x + 8.0f;
+    const ImVec2 rs = ImGui::CalcTextSize(role);
+    const ImVec2 ra(x, a.y + 3.0f);
+    const ImVec2 rb(x + rs.x + 16.0f, a.y + h - 3.0f);
+    dl->AddRectFilled(ra, rb, col(alpha(color, 0.18f)), (rb.y - ra.y) * 0.5f);
+    dl->AddRect(ra, rb, col(alpha(color, 0.55f)), (rb.y - ra.y) * 0.5f, 0, 1.0f);
+    dl->AddText(ImVec2(x + 8.0f, ty), col(color), role);
+    return hovered;
+}
+
 }  // namespace muuk::desktop::glass

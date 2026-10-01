@@ -54,11 +54,32 @@ struct BasketRecord {
     // fired (0 = closed some other way). net - netAtTrigger is what the
     // closing market orders gained or lost to slippage on the way out.
     double netAtTrigger = 0.0;
+    // What protected the basket on the way.
+    bool guardHeld = false;       // the margin guard held back a level (a lock stop waited at its line)
+    bool locked = false;          // a lock froze the loss (lock & pause, or the guard's lock stop filled)
+    double lockedLoss = 0.0;      // the net it was frozen at
+    int escapeTries = 0;          // escape trades out of the lock
+    int breakEvenFromLevel = 0;   // >0: it closed on the break-even target (in force from this level)
     std::vector<BasketLegRecord> legs;
     double gross = 0.0;
     double commission = 0.0;
     double net = 0.0;
 };
+
+// How a basket ended, in words a trader reads at a glance -- the same in
+// the app's History and in the PDF report.
+enum class BasketVerdictKind {
+    Profit,     // reached the profit target without ever going against the first position
+    Recovered,  // was in loss on the way (or guarded / locked) and still closed at or above 0
+    Loss,       // closed in loss
+    Neutral,    // closed at about 0 some other way
+};
+struct BasketVerdict {
+    BasketVerdictKind kind = BasketVerdictKind::Neutral;
+    std::string label;   // "Profit target", "Loss recovered -> profit", "Stop loss", ...
+    std::string detail;  // what acted on the way: "margin guard held a level, locked at -12.40", ...
+};
+[[nodiscard]] BasketVerdict basketVerdict(const BasketRecord& basket);
 
 [[nodiscard]] nlohmann::json basketToJson(const BasketRecord& basket);
 [[nodiscard]] BasketRecord basketFromJson(const nlohmann::json& j);

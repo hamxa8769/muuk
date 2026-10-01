@@ -45,6 +45,16 @@ PdfColor pnlColor(double v) {
     return kDim;
 }
 
+PdfColor verdictColor(BasketVerdictKind k) {
+    switch (k) {
+        case BasketVerdictKind::Profit: return kGreen;
+        case BasketVerdictKind::Recovered: return kBlue;
+        case BasketVerdictKind::Loss: return kRed;
+        case BasketVerdictKind::Neutral: break;
+    }
+    return kDim;
+}
+
 std::string duration(double seconds) {
     const long s = static_cast<long>(seconds + 0.5);
     char buf[32];
@@ -395,7 +405,8 @@ void basketTable(Layout& lay, const std::vector<BasketRecord>& newestFirst) {
         doc.text(c[1], lay.y(), b.closedAt.substr(0, 16), 8.0f, false, kInk);
         doc.text(c[2], lay.y(), duration(b.durationSeconds), 8.0f, false, kInk);
         doc.text(c[3], lay.y(), std::to_string(b.legs.size()), 8.0f, false, kInk);
-        doc.text(c[4], lay.y(), b.closeReason.substr(0, 26), 8.0f, false, kDim);
+        const BasketVerdict v = basketVerdict(b);
+        doc.text(c[4], lay.y(), v.label.substr(0, 34), 7.5f, false, verdictColor(v.kind));
         doc.textRight(c[6], lay.y(), money(b.gross), 8.0f, false, pnlColor(b.gross));
         doc.textRight(c[7], lay.y(), money(-b.commission), 8.0f, false, b.commission > 0.005 ? kRed : kDim);
         doc.textRight(c[8], lay.y(), money(b.net), 8.0f, true, pnlColor(b.net));
@@ -413,7 +424,7 @@ void basketTrees(Layout& lay, const std::vector<BasketRecord>& newestFirst, std:
     for (const auto& b : newestFirst) {
         if (shown++ >= limit) break;
         const float rowH = 14.0f;
-        const float needed = 34.0f + rowH * static_cast<float>(std::max<std::size_t>(1, b.legs.size()));
+        const float needed = 47.0f + rowH * static_cast<float>(std::max<std::size_t>(1, b.legs.size()));
         lay.ensure(std::min(needed, 300.0f));
 
         // Basket node.
@@ -422,10 +433,16 @@ void basketTrees(Layout& lay, const std::vector<BasketRecord>& newestFirst, std:
         doc.text(kLeft + 6.0f, top, "Basket #" + std::to_string(b.number), 9.0f, true, kInk);
         std::string meta = b.closedAt.substr(0, 16) + "   " + duration(b.durationSeconds);
         if (b.rangeUpper > b.rangeLower) meta += "   range " + fmt("%.2f", b.rangeLower) + " - " + fmt("%.2f", b.rangeUpper);
-        meta += "   " + b.closeReason;
         doc.text(kLeft + 72.0f, top, meta, 7.5f, false, kDim);
         doc.textRight(kRight - 6.0f, top, money(b.net), 9.0f, true, pnlColor(b.net));
         lay.advance(16.0f);
+        // How it ended, and what protected it on the way.
+        const BasketVerdict v = basketVerdict(b);
+        doc.text(kLeft + 6.0f, lay.y(), v.label, 8.0f, true, verdictColor(v.kind));
+        std::string why = b.closeReason;
+        if (!v.detail.empty()) why += (why.empty() ? "" : "  |  ") + v.detail;
+        doc.text(kLeft + 200.0f, lay.y(), why.substr(0, 90), 7.0f, false, kDim);
+        lay.advance(13.0f);
 
         // Branches.
         const float trunkX = kLeft + 14.0f;
@@ -494,6 +511,28 @@ std::string buildSessionReportPdf(const SessionReportInput& in) {
     overview(lay, "ALL TIME (" + std::to_string(in.allBaskets.size()) + " baskets saved)", statsOf(in.allBaskets));
     lay.advance(4.0f);
     overview(lay, "THIS SESSION", statsOf(in.sessionBaskets));
+    {
+        // How every basket ended (the same words as each basket below).
+        int profit = 0, recovered = 0, loss = 0, neutral = 0, guarded = 0;
+        for (const auto& b : in.allBaskets) {
+            switch (basketVerdict(b).kind) {
+                case BasketVerdictKind::Profit: ++profit; break;
+                case BasketVerdictKind::Recovered: ++recovered; break;
+                case BasketVerdictKind::Loss: ++loss; break;
+                case BasketVerdictKind::Neutral: ++neutral; break;
+            }
+            if (b.guardHeld || b.locked || b.escapeTries > 0) ++guarded;
+        }
+        lay.ensure(16.0f);
+        doc.text(kLeft, lay.y(), "HOW THE BASKETS ENDED", 7.5f, true, kDim);
+        doc.text(kLeft + 120.0f, lay.y(), "profit target " + std::to_string(profit), 8.5f, true, kGreen);
+        doc.text(kLeft + 220.0f, lay.y(), "loss recovered " + std::to_string(recovered), 8.5f, true, kBlue);
+        doc.text(kLeft + 330.0f, lay.y(), "closed in loss " + std::to_string(loss), 8.5f, true, kRed);
+        doc.text(kLeft + 430.0f, lay.y(),
+                 "guard used " + std::to_string(guarded) + (neutral > 0 ? "   at 0: " + std::to_string(neutral) : ""), 8.5f,
+                 false, kDim);
+        lay.advance(16.0f);
+    }
     if (in.openPositions > 0) {
         lay.ensure(16.0f);
         doc.text(kLeft, lay.y(), "Still open at the time of this report: " + std::to_string(in.openPositions) +

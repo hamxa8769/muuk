@@ -225,6 +225,57 @@ TEST_CASE("Volume statistics: lots, value traded, won/lost lots and P/L per day,
     REQUIRE(exits.slippage == Catch::Approx(2 * 0.05 + 0.08));
 }
 
+TEST_CASE("How a basket ended: target, loss recovered, guard, break-even, loss -- and it survives a save") {
+    // One fill straight to the target.
+    BasketRecord straight = sampleBasket(1, 0.98);
+    straight.outcome = "target";
+    straight.legs.resize(1);
+    REQUIRE(basketVerdict(straight).kind == BasketVerdictKind::Profit);
+    REQUIRE(basketVerdict(straight).label == "Profit target");
+
+    // Two fills: the price turned against the first, the basket still made its target.
+    BasketRecord recovered = sampleBasket(2, 0.98);
+    recovered.outcome = "target";
+    recovered.worstNet = -4.20;
+    const BasketVerdict r = basketVerdict(recovered);
+    REQUIRE(r.kind == BasketVerdictKind::Recovered);
+    REQUIRE(r.label == "Loss recovered -> profit target");
+    REQUIRE(r.detail == "deepest -4.20");
+
+    // The lowered (break-even) target from level 5.
+    BasketRecord breakEven = recovered;
+    breakEven.breakEvenFromLevel = 5;
+    REQUIRE(basketVerdict(breakEven).label == "Loss recovered -> break-even exit");
+
+    // The margin guard held a level, then a lock, then back to break-even.
+    BasketRecord guarded = sampleBasket(3, 0.50);
+    guarded.outcome = "break-even";
+    guarded.guardHeld = true;
+    guarded.locked = true;
+    guarded.lockedLoss = -12.40;
+    const BasketVerdict g = basketVerdict(guarded);
+    REQUIRE(g.kind == BasketVerdictKind::Recovered);
+    REQUIRE(g.label == "Guard: lock -> back to break-even");
+    REQUIRE(g.detail.find("margin guard held a level") != std::string::npos);
+    REQUIRE(g.detail.find("locked at -12.40") != std::string::npos);
+
+    // Stop loss, and a manual close in loss.
+    BasketRecord stopped = sampleBasket(4, -20.0);
+    stopped.outcome = "stop loss";
+    REQUIRE(basketVerdict(stopped).kind == BasketVerdictKind::Loss);
+    BasketRecord manual = sampleBasket(5, -3.0);
+    manual.outcome = "manual";
+    REQUIRE(basketVerdict(manual).label == "Closed by you - in loss");
+    REQUIRE(basketVerdict(manual).kind == BasketVerdictKind::Loss);
+
+    // The new fields are saved with the basket.
+    const BasketRecord back = basketFromJson(basketToJson(guarded));
+    REQUIRE(back.guardHeld);
+    REQUIRE(back.locked);
+    REQUIRE(back.lockedLoss == Catch::Approx(-12.40));
+    REQUIRE(basketFromJson(basketToJson(breakEven)).breakEvenFromLevel == 5);
+}
+
 TEST_CASE("InstanceLock: only one holder per config file at a time") {
     const auto file = std::filesystem::temp_directory_path() / "muuk_test_instance.lock";
     muuk::ctrader_fix::InstanceLock first;

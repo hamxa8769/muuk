@@ -1111,6 +1111,10 @@ void LiveRunner::lockNowLocked(const std::string& why, double net) {
         locked_ = true;
         lockedLoss_ = net;
         lockedAt_ = localTimestamp();
+        if (currentBasket_) {
+            currentBasket_->locked = true;
+            currentBasket_->lockedLoss = net;
+        }
         setCloseReason("locked at " + usdText(net));
     }
     markDirty();
@@ -1406,6 +1410,7 @@ bool LiveRunner::guardNextOrderLocked(const PlaceOrderCommand& place) {
     }
     sendStopOrderLocked(lk, 0);
     guardLockOrderId_ = lk.id;
+    if (currentBasket_) currentBasket_->guardHeld = true;
     auditEventLocked(8, 1,
                      what + " -- not placed. A lock stop " + (lk.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
                          lotsTextOf(lk.volume.steps, spec) + " lot waits at that line instead" +
@@ -1423,6 +1428,10 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
         locked_ = true;
         lockedLoss_ = haveQuote ? floatingNetLocked() : 0.0;
         lockedAt_ = localTimestamp();
+        if (currentBasket_) {
+            currentBasket_->locked = true;
+            currentBasket_->lockedLoss = lockedLoss_;
+        }
         setCloseReason("locked by the margin guard");
         markDirty();
         auditEventLocked(8, 2,
@@ -1459,6 +1468,7 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
             if (leg.id == orderId) escape_.entry = leg.price;
         }
         ++escapeTries_;
+        if (currentBasket_) currentBasket_->escapeTries = escapeTries_;
         markDirty();
         auditEventLocked(8, 1,
                          std::string("escape ") + (buy ? "BUY" : "SELL") + " filled @ " +
@@ -2007,7 +2017,13 @@ void LiveRunner::handleCommand(const Command& cmd) {
             " leg(s) to flatten");
         ++basketsClosed_;  // booked P/L itself comes from the real closing fills (see onTradeMessage)
         setCloseReason(close->stopLoss ? "stop loss" : "profit target");
-        if (currentBasket_) currentBasket_->netAtTrigger = close->netPnlMoney;
+        if (currentBasket_) {
+            currentBasket_->netAtTrigger = close->netPnlMoney;
+            // Closed on the lowered (break-even) target rather than the full one.
+            if (!close->stopLoss && engine_ && engine_->escapeActive()) {
+                currentBasket_->breakEvenFromLevel = config_.strategy.escapeFromLevel;
+            }
+        }
         closeLegs(std::exchange(openLegs_, {}));
     } else if (const auto* alert = std::get_if<RiskAlertCommand>(&cmd)) {
         log("[risk] ALERT: limit breached (kind=" + std::to_string(static_cast<int>(alert->kind)) +

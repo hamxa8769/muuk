@@ -529,6 +529,62 @@ void treeConnector(bool buy, bool last) {
     ImGui::Dummy(ImVec2(26.0f, h));
 }
 
+// A page's scroll area. Text wraps at its right edge (inside a table: at
+// the column's edge), so a long line is never cut off by the window.
+void beginPage(const char* id) {
+    ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::PushTextWrapPos(0.0f);
+}
+void endPage() {
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+}
+
+// Short pieces laid out left to right; a piece that doesn't fit on the
+// current line starts the next one -- a row of facts that never runs off
+// the right edge.
+class Flow {
+public:
+    explicit Flow(float gap = 14.0f)
+        : gap_(gap), right_(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x) {}
+    // Moves to where an item `width` wide goes next.
+    void place(float width) {
+        if (!first_) {
+            ImGui::SameLine(0.0f, gap_);
+            if (ImGui::GetCursorScreenPos().x + width > right_) ImGui::NewLine();
+        }
+        first_ = false;
+    }
+    void text(const std::string& s, ImVec4 color = ImVec4(0, 0, 0, 0)) {
+        place(ImGui::CalcTextSize(s.c_str()).x);
+        if (color.w > 0.0f) {
+            ImGui::TextColored(color, "%s", s.c_str());
+        } else {
+            ImGui::TextDisabled("%s", s.c_str());
+        }
+    }
+    void pill(const std::string& s, ImVec4 color) {
+        place(ImGui::CalcTextSize(s.c_str()).x + 42.0f);  // glass::pill: padding, dot and gap
+        glass::pill(s.c_str(), color);
+    }
+
+private:
+    float gap_;
+    float right_;
+    bool first_ = true;
+};
+
+ImVec4 verdictColor(muuk::ctrader_fix::BasketVerdictKind k) {
+    using K = muuk::ctrader_fix::BasketVerdictKind;
+    switch (k) {
+        case K::Profit: return kGreen;
+        case K::Recovered: return kBlue;
+        case K::Loss: return kRed;
+        case K::Neutral: break;
+    }
+    return kGrey;
+}
+
 // One basket's legs, in the order they opened.
 void basketLegsTable(const BasketRecord& b, bool inProgress) {
     const ImGuiTableFlags flags =
@@ -712,7 +768,9 @@ void DashboardWindow::render(LiveController& controller) {
     const float leftWidth = std::max(380.0f, ImGui::GetContentRegionAvail().x * 0.35f);
     // Scrollable, so nothing in the range panel is ever cut off on a small window.
     ImGui::BeginChild("left", ImVec2(leftWidth, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::PushTextWrapPos(0.0f);
     renderRangePanel(controller, snap, connected);
+    ImGui::PopTextWrapPos();
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -849,17 +907,28 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
         glass::pill("Offline", kGrey);
     }
 
-    // Right-hand group: auto-connect + theme. It sits on this row when the
-    // pills leave room for it, otherwise on its own row -- never on top of them.
+    // Right-hand group: who runs the app, auto-connect, theme. It sits on this
+    // row when the pills leave room for it, otherwise on its own row -- never
+    // on top of them.
     const ImGuiStyle& style = ImGui::GetStyle();
+    const std::string userName = displayUserName(prefs_);
+    std::string roleTag = prefs_.role.empty() ? std::string("ADMIN") : prefs_.role;
+    for (auto& ch : roleTag) ch = static_cast<char>(ch >= 'a' && ch <= 'z' ? ch - 32 : ch);
+    const float userWidth = glass::userBadgeWidth(userName.c_str(), roleTag.c_str());
     const char* autoLabel = "Auto-connect";
     const float themeWidth = 96.0f;
     const float autoWidth = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize(autoLabel).x;
-    const float groupWidth = autoWidth + 16.0f + themeWidth;
+    const float groupWidth = userWidth + 16.0f + autoWidth + 16.0f + themeWidth;
     const float groupX = ImGui::GetWindowWidth() - style.WindowPadding.x - groupWidth;
     ImGui::SameLine(0.0f, 16.0f);
     if (ImGui::GetCursorPosX() > groupX) ImGui::NewLine();
     ImGui::SetCursorPosX(std::max(groupX, style.WindowPadding.x));
+    if (glass::userBadge(userName.c_str(), roleTag.c_str(), kViolet)) {
+        ImGui::SetTooltip("Signed in as %s -- %s.\nThe admin owns this copy of Muuk: every account, setting and trade. "
+                          "Other users with their own accounts can be added later.",
+                          userName.c_str(), roleTag == "ADMIN" ? "administrator" : prefs_.role.c_str());
+    }
+    ImGui::SameLine(0.0f, 16.0f);
     ImGui::AlignTextToFramePadding();
     if (ImGui::Checkbox(autoLabel, &prefs_.autoConnect)) savePrefs(prefs_);
     ImGui::SetItemTooltip("Connect when the app opens: next time the app starts it connects by itself with the same "
@@ -984,6 +1053,7 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::PushTextWrapPos(0.0f);
     switch (currentTab_) {
         case Tab::None:
         case Tab::Positions:
@@ -1016,14 +1086,14 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
             renderAuditTab(snap, connected);
             break;
         case Tab::Volume:
-            ImGui::BeginChild("volume_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+            beginPage("volume_scroll");
             renderVolumeTab();
-            ImGui::EndChild();
+            endPage();
             break;
         case Tab::Performance:
-            ImGui::BeginChild("performance_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+            beginPage("performance_scroll");
             renderPerformanceTab(controller, snap);
-            ImGui::EndChild();
+            endPage();
             break;
         case Tab::Settings:
             renderSettingsPanel(controller, snap, connected);
@@ -1032,6 +1102,7 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
             renderLogTab(controller);
             break;
     }
+    ImGui::PopTextWrapPos();
     ImGui::EndChild();
 
     // The drawer.
@@ -1254,43 +1325,54 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
 
     if (snap && connected) {
         ImGui::Spacing();
-        withFont(boldFont_, [] { ImGui::TextUnformatted("Costs & net P/L"); });
-        ImGui::SameLine();
-        ImGui::TextDisabled("(all open positions, if closed now)");
-        if (ImGui::BeginTable("pnl_breakdown", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        // One line by default (the net and the total cost); a click opens the breakdown.
+        const auto& live = snap->live;
+        char costLine[160];
+        std::snprintf(costLine, sizeof(costLine), "Net %s   |   costs %s###costs_toggle", money(live.net).c_str(),
+                      money(-live.costs()).c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, pnlColor(live.net));
+        const bool costsOpen = ImGui::TreeNodeEx(costLine, ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_NoTreePushOnOpen);
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("Net P/L of all open positions if they closed now, after every cost. Click for the "
+                              "breakdown: gross, slippage, spread, commission and swap.");
+        if (costsOpen) {
+            ImGui::TextDisabled("Costs & net P/L (all open positions, if closed now)");
+            if (ImGui::BeginTable("pnl_breakdown", 2, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                const auto& b = snap->live;
+                breakdownRow("Gross P/L", "Price move from each order's requested price to the current mid.", b.gross,
+                             false);
+                breakdownRow("Slippage", "Fills worse (+) or better (-) than the requested Stop price.", b.slippage, true);
+                breakdownRow("Spread", "Cost of closing at bid/ask instead of mid, right now.", b.spread, true);
+                breakdownRow("Commission",
+                             "Open + close. MT5: what the broker really charged on opening, plus closing at this "
+                             "account's own rate (learned from its deals). cTrader: Settings > Commission, worked out "
+                             "per position exactly as the broker does.",
+                             b.commission, true);
+                breakdownRow("Swap", "Overnight financing. MT5 reports it per position; cTrader FIX doesn't (0 there).",
+                             b.swap, true);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Separator();
+                ImGui::TableNextColumn();
+                ImGui::Separator();
+                breakdownRow("Net P/L", "What you would actually take home if everything closed now.", b.net, false,
+                             boldFont_);
+                ImGui::EndTable();
+            }
+            if (account_.platform != 1 && snap->settings.commissionPerLot <= 0.0 &&
+                snap->settings.commissionPerMillion <= 0.0) {
+                ImGui::TextColored(kAmber, "Commission is set to $0 - enter your broker's rate in Strategy settings.");
+            }
+            // The same numbers in the broker's own columns, to compare side by side.
             const auto& b = snap->live;
-            breakdownRow("Gross P/L", "Price move from each order's requested price to the current mid.", b.gross,
-                         false);
-            breakdownRow("Slippage", "Fills worse (+) or better (-) than the requested Stop price.", b.slippage, true);
-            breakdownRow("Spread", "Cost of closing at bid/ask instead of mid, right now.", b.spread, true);
-            breakdownRow("Commission",
-                         "Open + close. MT5: what the broker really charged on opening, plus closing at this "
-                         "account's own rate (learned from its deals). cTrader: Settings > Commission, worked out "
-                         "per position exactly as the broker does.",
-                         b.commission, true);
-            breakdownRow("Swap", "Overnight financing. MT5 reports it per position; cTrader FIX doesn't (0 there).",
-                         b.swap, true);
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::Separator();
-            ImGui::TableNextColumn();
-            ImGui::Separator();
-            breakdownRow("Net P/L", "What you would actually take home if everything closed now.", b.net, false,
-                         boldFont_);
-            ImGui::EndTable();
+            ImGui::TextDisabled("As %s shows it:  Gross %s   Commission %s   Net %s",
+                                account_.platform == 1 ? "MT5" : "cTrader", money(b.net + b.commission + b.swap).c_str(),
+                                money(-b.commission).c_str(), money(b.net).c_str());
+            ImGui::SetItemTooltip("The broker's Gross is the move from each actual fill to the price it would close at now "
+                                  "(bid for buys, ask for sells) -- slippage and spread are already inside it.");
         }
-        if (snap->settings.commissionPerLot <= 0.0 && snap->settings.commissionPerMillion <= 0.0) {
-            ImGui::TextColored(kAmber, "Commission is set to $0 - enter your broker's rate in Strategy settings.");
-        }
-        // The same numbers in cTrader's own columns, to compare side by side.
-        const auto& b = snap->live;
-        ImGui::TextDisabled("As cTrader shows it:  Gross %s   Commission %s   Net %s",
-                            money(b.net + b.commission + b.swap).c_str(), money(-b.commission).c_str(),
-                            money(b.net).c_str());
-        ImGui::SetItemTooltip("cTrader's Gross is the move from each actual fill to the price it would close at now "
-                              "(bid for buys, ask for sells) -- slippage and spread are already inside it.");
     }
 
 
@@ -1365,7 +1447,7 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
 
 void DashboardWindow::renderSettingsPanel(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                           bool connected) {
-    ImGui::BeginChild("settings_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    beginPage("settings_scroll");
     renderAccountSection(controller.isRunning());
     ImGui::Spacing();
     withFont(boldFont_, [] {
@@ -1480,17 +1562,17 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
     renderMarketSettings();
     ImGui::EndDisabled();
     renderSaveBar(controller, snap, connected);
-    ImGui::EndChild();
+    endPage();
 }
 
 void DashboardWindow::renderRiskPage(LiveController& controller, const std::optional<LiveSnapshot>& snap,
                                      bool connected) {
-    ImGui::BeginChild("risk_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    beginPage("risk_scroll");
     ImGui::BeginDisabled(!settingsLoaded_);
     renderRiskCalculator(snap);
     ImGui::EndDisabled();
     renderSaveBar(controller, snap, connected);
-    ImGui::EndChild();
+    endPage();
 }
 
 void DashboardWindow::renderSaveBar(LiveController& controller, const std::optional<LiveSnapshot>& snap,
@@ -2005,7 +2087,7 @@ void DashboardWindow::renderSpeed(const LiveSnapshot& snap) {
 void DashboardWindow::renderHistoryTab(LiveController& controller, const std::optional<LiveSnapshot>& snap) {
     // One scroll for the whole tab: the summary, the per-session table and
     // every basket -- however long it gets.
-    ImGui::BeginChild("history_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    beginPage("history_scroll");
     const std::string configPath(configPathBuffer_.data());
 
     // Summary across every saved basket.
@@ -2092,25 +2174,40 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
             fillsTotal += static_cast<double>(b.legs.size());
         }
         const int n = static_cast<int>(history_.size());
-        ImGui::TextDisabled("Outcomes:");
-        ImGui::SameLine();
-        ImGui::TextColored(kGreen, "target %d", target);
-        ImGui::SameLine();
-        ImGui::TextColored(stop > 0 ? kRed : glass::palette().textDim, "stop loss %d", stop);
-        ImGui::SameLine();
-        ImGui::TextDisabled("manual %d", manual);
-        ImGui::SameLine();
-        ImGui::TextColored(interrupted > 0 ? kAmber : glass::palette().textDim, "interrupted %d", interrupted);
-        ImGui::SameLine();
-        ImGui::TextColored(failed > 0 ? kRed : glass::palette().textDim, "failed %d", failed);
-        if (other > 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("older/other %d", other);
+        // How they ended, in the same words as each basket below.
+        int vProfit = 0, vRecovered = 0, vLoss = 0, vGuard = 0;
+        for (const auto& b : history_) {
+            switch (muuk::ctrader_fix::basketVerdict(b).kind) {
+                case muuk::ctrader_fix::BasketVerdictKind::Profit: ++vProfit; break;
+                case muuk::ctrader_fix::BasketVerdictKind::Recovered: ++vRecovered; break;
+                case muuk::ctrader_fix::BasketVerdictKind::Loss: ++vLoss; break;
+                case muuk::ctrader_fix::BasketVerdictKind::Neutral: break;
+            }
+            if (b.guardHeld || b.locked || b.escapeTries > 0) ++vGuard;
         }
-        ImGui::TextDisabled("Success rate (target reached) %.0f%%   |   deepest drawdown in a basket %s   |   avg %.1f "
-                            "positions per basket   |   missed orders re-placed %d",
-                            n > 0 ? 100.0 * target / n : 0.0, money(deepest).c_str(), n > 0 ? fillsTotal / n : 0.0,
-                            missed);
+        auto count = [](const char* what, int k) { return std::string(what) + " " + std::to_string(k); };
+        Flow ended;
+        ended.text("How they ended:");
+        ended.text(count("profit target", vProfit), kGreen);
+        ended.text(count("loss recovered", vRecovered), kBlue);
+        ended.text(count("closed in loss", vLoss), vLoss > 0 ? kRed : glass::palette().textDim);
+        ended.text(count("guard used", vGuard), vGuard > 0 ? kAmber : glass::palette().textDim);
+        Flow outcomes;
+        outcomes.text("Closed by:");
+        outcomes.text(count("target", target), kGreen);
+        outcomes.text(count("stop loss", stop), stop > 0 ? kRed : glass::palette().textDim);
+        outcomes.text(count("manual", manual));
+        outcomes.text(count("interrupted", interrupted), interrupted > 0 ? kAmber : glass::palette().textDim);
+        outcomes.text(count("failed", failed), failed > 0 ? kRed : glass::palette().textDim);
+        if (other > 0) outcomes.text(count("other", other));
+        char buf[96];
+        Flow facts;
+        std::snprintf(buf, sizeof(buf), "success rate %.0f%%", n > 0 ? 100.0 * target / n : 0.0);
+        facts.text(buf);
+        facts.text("deepest drawdown " + money(deepest));
+        std::snprintf(buf, sizeof(buf), "avg %.1f positions per basket", n > 0 ? fillsTotal / n : 0.0);
+        facts.text(buf);
+        facts.text(count("missed orders re-placed", missed));
     }
     renderSessionStats();
     if (snap) {
@@ -2123,15 +2220,16 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
     if (snap && snap->currentBasket && !snap->currentBasket->legs.empty()) {
         const BasketRecord& b = *snap->currentBasket;
         ImGui::PushID("current");
-        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth,
-                                            "Basket #%d", b.number);
-        ImGui::SameLine(150.0f);
-        glass::pill("in progress", kAmber, true);
-        ImGui::SameLine();
-        ImGui::TextColored(pnlColor(snap->live.net), "%s", money(snap->live.net).c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("net now  |  %zu position(s)  |  range %s - %s  |  started %s", b.legs.size(),
-                            price(b.rangeLower).c_str(), price(b.rangeUpper).c_str(), timeOf(b.startedAt).c_str());
+        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_DefaultOpen, "Basket #%d", b.number);
+        Flow row;
+        row.place(0.0f);
+        row.pill("in progress", kAmber);
+        row.text(money(snap->live.net) + " net now", pnlColor(snap->live.net));
+        row.text(std::to_string(b.legs.size()) + " position(s)");
+        row.text("range " + price(b.rangeLower) + " - " + price(b.rangeUpper));
+        row.text("started " + timeOf(b.startedAt));
+        if (b.guardHeld) row.text("margin guard holding a level", kAmber);
+        if (b.locked) row.text("locked at " + money(b.lockedLoss), kRed);
         if (open) {
             basketLegsTable(b, true);
             ImGui::TreePop();
@@ -2158,18 +2256,28 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
             lastSession = b.session;
         }
         ImGui::PushID(static_cast<int>(i));
-        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_SpanAvailWidth, "Basket #%d", b.number);
-        ImGui::SameLine(150.0f);
-        withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", money(b.net).c_str()); });
-        ImGui::SameLine(240.0f);
-        ImGui::TextDisabled("%zu position(s)  |  %s  |  worst %s  |  %s  |  closed %s", b.legs.size(),
-                            b.outcome.empty() ? b.closeReason.c_str() : b.outcome.c_str(), money(b.worstNet).c_str(),
-                            duration(b.durationSeconds).c_str(), b.closedAt.c_str());
-        if (b.ordersPlaced > 0) {
-            ImGui::SetItemTooltip("%s\nOrders placed %d, filled %d, rejected %d, missed and re-placed %d\nMost lots open "
-                                  "at once %.2f, best point %s",
-                                  b.closeReason.c_str(), b.ordersPlaced, b.ordersFilled, b.ordersRejected,
-                                  b.ordersMissed, b.maxOpenLots, money(b.bestNet).c_str());
+        const muuk::ctrader_fix::BasketVerdict verdict = muuk::ctrader_fix::basketVerdict(b);
+        const bool open = ImGui::TreeNodeEx("node", ImGuiTreeNodeFlags_None, "Basket #%d", b.number);
+        Flow row;
+        row.place(0.0f);
+        const std::string netText = money(b.net);
+        row.place(ImGui::CalcTextSize(netText.c_str()).x);
+        withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(b.net), "%s", netText.c_str()); });
+        row.pill(verdict.label, verdictColor(verdict.kind));
+        ImGui::SetItemTooltip("How it ended: %s\nReason: %s%s%s\nOrders placed %d, filled %d, rejected %d, missed and "
+                              "re-placed %d\nMost lots open at once %.2f, best point %s, worst %s",
+                              verdict.label.c_str(), b.closeReason.c_str(), verdict.detail.empty() ? "" : "\nOn the way: ",
+                              verdict.detail.c_str(), b.ordersPlaced, b.ordersFilled, b.ordersRejected, b.ordersMissed,
+                              b.maxOpenLots, money(b.bestNet).c_str(), money(b.worstNet).c_str());
+        row.text(std::to_string(b.legs.size()) + " position(s)");
+        row.text("worst " + money(b.worstNet));
+        row.text(duration(b.durationSeconds));
+        row.text("closed " + b.closedAt);
+        if (!verdict.detail.empty()) {
+            ImGui::Indent();
+            ImGui::TextColored(b.locked || b.guardHeld ? kAmber : glass::palette().textDim, "On the way: %s",
+                               verdict.detail.c_str());
+            ImGui::Unindent();
         }
         if (b.outcome == "target" || b.outcome == "stop loss") {
             // What the bot saw when it fired vs what the closing fills really booked.
@@ -2196,7 +2304,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
         ImGui::SameLine();
         if (ImGui::SmallButton("Show 500 more")) historyShown_ += 500;
     }
-    ImGui::EndChild();
+    endPage();
 }
 
 void DashboardWindow::selectTabByName(const std::string& name) {
@@ -3548,14 +3656,14 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
 }
 
 void DashboardWindow::renderAuditTab(const std::optional<LiveSnapshot>& snap, bool connected) {
-    ImGui::BeginChild("audit_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    beginPage("audit_scroll");
     withFont(boldFont_, [] { ImGui::TextUnformatted("Audit"); });
     ImGui::SameLine();
     ImGui::TextDisabled("-- the bot checks itself every second and fixes what it can by itself");
     if (!connected || !snap || snap->audit.empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("Connect to run the audit.");
-        ImGui::EndChild();
+        endPage();
         return;
     }
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
@@ -3617,7 +3725,7 @@ void DashboardWindow::renderAuditTab(const std::optional<LiveSnapshot>& snap, bo
         "partial fill).\n"
         "Daily loss limit: closes everything and pauses until tomorrow (Settings).\n"
         "Risk settings: warns while there is no stop loss / no daily loss limit.");
-    ImGui::EndChild();
+    endPage();
 }
 
 void DashboardWindow::renderAccountCards(const std::optional<LiveSnapshot>& snap) {
