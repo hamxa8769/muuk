@@ -318,6 +318,8 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Commission", s.commissionPerMillion > 0 ? fmt("$%.2f per $1M traded, each side", s.commissionPerMillion)
                                                 : fmt("$%.2f per lot, round turn", s.commissionPerLot)},
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
+        {"Entry timeout", s.entryTimeoutSeconds > 0 ? std::to_string(s.entryTimeoutSeconds) + " s, then a new range"
+                                                    : std::string("off")},
         {"Max orders / max lot", std::to_string(s.maxOrders) + " / " + fmt("%.2f", s.maxLot)},
         {"Max basket loss", s.maxBasketLoss > 0 ? amount(s.maxBasketLoss) : "off"},
         {"Auto-open next range", s.autoContinue ? "on" : "off"},

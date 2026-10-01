@@ -975,6 +975,31 @@ TEST_CASE("Market hours: no new range during a pause (here a news guard); it ope
     bot.rethrow();
 }
 
+TEST_CASE("Entry timeout: an entry order the price walked away from is cancelled and the range opens again around it") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.entryTimeoutSeconds = 1;
+    Bot bot(cfg, freshStateFile("entry_timeout"));
+    (void)handshake(server, {}, {});
+    const FixMessage first = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const double firstStop = first.getDouble(tag::StopPx);
+
+    // Nothing fills; the price is far above the old entry a little later.
+    std::this_thread::sleep_for(1200ms);
+    sendQuote(server, 2, 4345.00, 4345.10);
+    const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    REQUIRE(cancel.getString(tag::OrigClOrdID) == first.getString(tag::ClOrdID));
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(again.getInt(tag::Side) == 1);  // Buy Stop first, as configured
+    REQUIRE(again.getDouble(tag::StopPx) > 4345.0);
+    REQUIRE(again.getDouble(tag::StopPx) != Catch::Approx(firstStop));
+    // Nothing had filled: no basket is recorded for the abandoned range.
+    REQUIRE(bot.runner().snapshot().baskets.empty());
+
+    bot.finish();
+    bot.rethrow();
+}
+
 TEST_CASE("Auto profit target: a percentage of what the open positions cost, growing with every fill") {
     MockFixServer server;
     LiveConfig cfg = resumeConfig(server);

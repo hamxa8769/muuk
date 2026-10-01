@@ -1086,6 +1086,7 @@ void LiveRunner::maybeEmitTick() {
     retryManagedMarketLocked();
     releaseWaitingOrdersLocked();
     maybeRestartAfterBasketClose();
+    maybeRefreshStaleEntryLocked();
 }
 
 bool LiveRunner::basketRunningLocked() const {
@@ -1960,6 +1961,32 @@ void LiveRunner::maybeRestartAfterBasketClose() {
     closeReason_.clear();
     beginBasket();
     for (const auto& cmd : engine_->restart()) handleCommand(cmd);
+}
+
+void LiveRunner::maybeRefreshStaleEntryLocked() {
+    const int timeout = config_.connection.entryTimeoutSeconds;
+    if (timeout <= 0 || !engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
+    if (engine_->status() != EngineStatus::Active) return;
+    // Only a range that hasn't started: nothing filled, nothing closing,
+    // no lock or guard order of its own.
+    if (!openLegs_.empty() || !pendingCloses_.empty() || locked_ || guardLockOrderId_ != 0) return;
+    if (currentBasket_ && !currentBasket_->legs.empty()) return;
+    if (std::chrono::steady_clock::now() - currentBasketStart_ < std::chrono::seconds(timeout)) return;
+    // A new range would only wait too (spread spike, market pause): keep this one.
+    if (spreadTooWideLocked() || marketBlocksLocked()) return;
+
+    log("[range] the entry order didn't trigger within " + std::to_string(timeout) +
+        "s -- cancelling it and opening the range again around " +
+        std::to_string((*latestBid_ + *latestAsk_) / 2.0));
+    cancelPendingLocked();
+    engine_->stopCycle();
+    currentBasket_.reset();  // nothing filled: nothing to record
+    closeReason_.clear();
+    cooldownActive_ = false;
+    markDirty();
+    prepareNextCycle(true);
+    beginBasket();
+    for (const auto& cmd : engine_->start()) handleCommand(cmd);
 }
 
 void LiveRunner::waitForFirstQuote() {

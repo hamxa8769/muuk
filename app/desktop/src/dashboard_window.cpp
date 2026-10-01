@@ -457,6 +457,7 @@ void clampSettings(LiveSettings& s) {
     s.stopLoss = std::max(0.0, s.stopLoss);
     s.cooldownSeconds = std::max(0, s.cooldownSeconds);
     s.manualCloseCooldownSeconds = std::max(0, s.manualCloseCooldownSeconds);
+    s.entryTimeoutSeconds = std::max(0, s.entryTimeoutSeconds);
     s.maxOrders = std::max(1, s.maxOrders);
     s.maxLot = std::max(0.01, s.maxLot);
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
@@ -1511,6 +1512,11 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                       "How far beyond the current price the first order sits. Its fill sets the range. "
                       "0 = place the first order at the range boundary instead.",
                       &s.seedOffset, 0.01, "%.2f", &settingsDirty_);
+        settingInt("Entry timeout (s)",
+                   "A new range whose first order hasn't triggered after this long (the price walked away from it) "
+                   "is cancelled and opened again around the live price. Only before anything has filled. 0 = off: "
+                   "it waits for the price however long it takes.",
+                   &s.entryTimeoutSeconds, &settingsDirty_);
         settingInt("Cooldown (s)", "Pause after a basket is fully closed before the next range opens.",
                    &s.cooldownSeconds, &settingsDirty_);
         settingInt("Cooldown after Close range (s)",

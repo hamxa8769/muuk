@@ -725,6 +725,10 @@ private:
     bool locked_ = false;
     double lockedLoss_ = 0.0;
     std::string lockedAt_;
+    // A range whose entry order hasn't triggered within
+    // connection.entryTimeoutSeconds (the price walked away): cancel it and
+    // open the range again around the live price. Called on every quote.
+    void maybeRefreshStaleEntryLocked();
     // A basket is running: armed, or halted by a risk limit (max orders / max
     // lot / max basket loss) with positions still open -- it adds nothing
     // more but is still watched, closed at its target / stop loss, and locked.

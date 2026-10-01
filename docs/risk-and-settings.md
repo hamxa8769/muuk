@@ -103,6 +103,33 @@ Now:
   - a cent account's amounts are now in USC, not "$";
   - the Settings section shows lot growth (×2), break-even target, lock at loss, margin guards and escape.
 
+### Entry timeout (2 Oct)
+
+Settings → **Entry timeout (s)**, default **120**. When a new range's first order hasn't triggered after this long, the order is cancelled and the range opens again around the live price. This happens when the price walked away from it.
+
+- It only applies while nothing has filled.
+- It waits during a market pause or a spread spike.
+- 0 turns it off.
+
+### Escape from a lock: what happened on 1 Oct (basket #165)
+
+The basket was locked at −70.56 USC after 6 levels (lock BUY 0.21). Escape was switched on with 2 tries.
+
+| Time | Event | Frozen loss |
+|---|---|---|
+| 19:41:29 | Lock BUY 0.21 | −70.56 |
+| 19:41:30 | Escape stops placed: BUY 4177.69 / SELL 4175.09, 0.44 lot each | |
+| 19:43:06 | SELL 0.44 filled at 4175.09 | |
+| 19:43:08 | Price back inside the range (above 4175.39): re-lock BUY 0.44 | −103.51 |
+| 19:43:09 | Escape stops again, 0.60 lot each (sized for the bigger loss) | |
+| 19:43:13 | SELL 0.60 filled at 4175.09 | |
+| 19:43:19 | Back inside the range: re-lock BUY 0.60 | −141.31 |
+| 19:51:22 | Closed by hand | −140.00 |
+
+Each try was a whipsaw. The price broke 0.30 below the range, came straight back within 2–6 seconds, and the re-lock bought back higher. Each try also added a spread on the bigger book.
+
+This is the risk the setting warns about: escape is a bet on a breakout. In a sideways market it adds to the loss. **Keep it off** unless the market is clearly trending.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

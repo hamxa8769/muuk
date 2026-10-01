@@ -117,6 +117,11 @@ struct LiveConnectionConfig {
     // wait for Open range, like closeAllPositions/cancelAllPendingOrders.
     int manualCloseCooldownSeconds = 15;
 
+    // A new range whose entry order hasn't triggered after this long (the
+    // price walked away from it) is cancelled and opened again around the
+    // live price. 0 = off: it waits for the price however long it takes.
+    int entryTimeoutSeconds = 120;
+
     // An order the broker hasn't confirmed at all after this long is
     // checked with an Order Mass Status Request and placed again if the
     // broker doesn't have it (logged as MISSED).
@@ -187,6 +192,7 @@ struct LiveSettings {
     int autoTargetPercent = 100; // 20 / 40 / 60 / 80 / 100
     int cooldownSeconds = 0;     // pause after a basket is fully flat
     int manualCloseCooldownSeconds = 15;  // pause after Close range before a new range opens; 0 = don't reopen
+    int entryTimeoutSeconds = 120;  // entry order not triggered by then: the range moves to the live price; 0 = off
     int maxOrders = 20;
     double maxLot = 10.0;
     double maxBasketLoss = 0.0;  // $; 0 = no limit

@@ -104,6 +104,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.autoRangeWidthPoints = conn.value("autoRangeWidthPoints", 0.0);
     cfg.connection.basketCooldownSeconds = conn.value("basketCooldownSeconds", 0);
     cfg.connection.manualCloseCooldownSeconds = conn.value("manualCloseCooldownSeconds", 15);
+    cfg.connection.entryTimeoutSeconds = std::max(0, conn.value("entryTimeoutSeconds", 120));
     cfg.connection.orderAckTimeoutSeconds = conn.value("orderAckTimeoutSeconds", 8);
     cfg.connection.verifySeconds = conn.value("verifySeconds", 30);
     cfg.connection.closeConfirmSeconds = conn.value("closeConfirmSeconds", 10);
@@ -154,6 +155,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.market = config.market;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
     s.manualCloseCooldownSeconds = config.connection.manualCloseCooldownSeconds;
+    s.entryTimeoutSeconds = config.connection.entryTimeoutSeconds;
     s.maxOrders = config.strategy.riskLimits.maxOrders;
     s.maxLot = config.strategy.riskLimits.maxLot.toDouble(spec);
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
@@ -207,6 +209,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     config.connection.autoRangeWidthPoints = s.rangeWidth;
     config.connection.basketCooldownSeconds = s.cooldownSeconds;
     config.connection.manualCloseCooldownSeconds = s.manualCloseCooldownSeconds;
+    config.connection.entryTimeoutSeconds = std::max(0, s.entryTimeoutSeconds);
     config.connection.autoContinue = s.autoContinue;
 }
 
@@ -375,6 +378,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["autoRangeWidthPoints"] = s.rangeWidth;
     conn["basketCooldownSeconds"] = s.cooldownSeconds;
     conn["manualCloseCooldownSeconds"] = s.manualCloseCooldownSeconds;
+    conn["entryTimeoutSeconds"] = s.entryTimeoutSeconds;
     conn["autoContinue"] = s.autoContinue;
     conn["dailyLossLimitMoney"] = s.dailyLossLimit;
     conn["lockAtLossMoney"] = s.lockAtLoss;
