@@ -188,16 +188,26 @@ CycleState cycleState(const std::optional<LiveSnapshot>& snap, bool connected) {
     if (!connected || !snap) return {"Disconnected", kGrey};
     if (snap->closeFailed) return {"Close failed - needs attention", kRed};
     if (snap->closingInProgress) return {"Closing basket", kAmber};
-    if (snap->cooldownRemainingSeconds > 0) return {"Cooldown", kBlue};
+    static std::string text;  // the label with its countdown, valid until the next call
+    const int64_t now = muuk::ctrader_fix::utcNowMs();
+    if (snap->cooldownRemainingSeconds > 0) {
+        text = "Cooldown - next range in " + countdown(static_cast<int64_t>(snap->cooldownRemainingSeconds) * 1000);
+        return {text.c_str(), kBlue};
+    }
     if (snap->locked) {
-        if (snap->escapeTradeOpen) return {"LOCKED - escape trade running", kAmber};
-        if (snap->escapeOrdersOut) return {"LOCKED - escape orders out", kAmber};
-        return {"LOCKED - loss frozen, waiting for you", kRed};
+        const int64_t since = muuk::ctrader_fix::localTimestampToUtcMs(snap->lockedAt);
+        const std::string forHow = since > 0 && now > since ? " for " + countdown(now - since) : std::string();
+        if (snap->escapeTradeOpen) text = "LOCKED" + forHow + " - escape trade running";
+        else if (snap->escapeOrdersOut) text = "LOCKED" + forHow + " - escape order out";
+        else text = "LOCKED" + forHow + " - loss frozen, waiting for you";
+        return {text.c_str(), snap->escapeTradeOpen || snap->escapeOrdersOut ? kAmber : kRed};
     }
     if (snap->guardLockPending) return {"MARGIN GUARD - lock stop waiting", kAmber};
     if (snap->marketKnown && !snap->market.canOpenRange &&
         (snap->status == EngineStatus::Idle || snap->status == EngineStatus::Completed)) {
-        return {snap->market.label.c_str(), phaseColor(snap->market.phase)};
+        text = snap->market.label;
+        if (snap->market.nextChangeUtcMs > now) text += " - resumes in " + countdown(snap->market.nextChangeUtcMs - now);
+        return {text.c_str(), phaseColor(snap->market.phase)};
     }
     switch (snap->status) {
         case EngineStatus::Active:
@@ -1327,12 +1337,14 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
         ImGui::SetItemTooltip("No more escapes for this basket: the loss stays frozen until you close it.");
         ImGui::SameLine();
         ImGui::BeginDisabled(!connected);
-        if (glass::button("Close range", kRed, ImVec2(third, 0))) {
+        if (glass::button("Close locked trade", kRed, ImVec2(third, 0))) {
             confirm_ = Confirm::CloseRange;
             openConfirmRequested_ = true;
         }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Closes both sides and takes the frozen loss (%s).", money(snap->live.net).c_str());
+        ImGui::SetItemTooltip("Closes every position of the locked basket (both sides) and takes the frozen loss (%s). "
+                              "With Auto-open on, a new range starts after the Close range cooldown.",
+                              money(snap->live.net).c_str());
     }
     const float chartHeight = rangeChartHeight();
     if (snap && connected) {
@@ -1943,11 +1955,23 @@ void DashboardWindow::renderConfirmPopup(LiveController& controller) {
     const char* detail = "";
     const char* action = "";
     switch (confirm_) {
-        case Confirm::CloseRange:
-            title = "Close the running range?";
-            detail = manualReopenText_.c_str();
-            action = "Close range";
+        case Confirm::CloseRange: {
+            const auto now = controller.snapshot();
+            if (now && now->locked) {
+                static std::string lockedText;
+                lockedText = "Closes all " + std::to_string(now->positions.size()) +
+                             " positions of the locked basket at market and takes the frozen loss of about " +
+                             money(now->live.net) + ". " + manualReopenText_;
+                title = "Close the locked trade?";
+                detail = lockedText.c_str();
+                action = "Close locked trade";
+            } else {
+                title = "Close the running range?";
+                detail = manualReopenText_.c_str();
+                action = "Close range";
+            }
             break;
+        }
         case Confirm::CloseAllPositions:
             title = "Close every open position at market?";
             detail = "Pending orders stay at the broker. The bot stops trading until you open a new range.";
@@ -3193,10 +3217,12 @@ void DashboardWindow::renderMarketStrip(LiveController& controller, const std::o
     const LiveSettings& s = connected && snap ? snap->settings : editSettings_;
     const int64_t now = muuk::ctrader_fix::utcNowMs();
 
+    // One row that wraps (pieces move to the next line) instead of running off the card.
+    Flow row(10.0f);
+    row.place(ImGui::CalcTextSize("Session").x);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("Session");
-    ImGui::SameLine();
-    glass::pill(m.sessionLabel.c_str(), m.marketOpen ? kBlue : kGrey);
+    row.pill(m.sessionLabel, m.marketOpen ? kBlue : kGrey);
     if (ImGui::BeginItemTooltip()) {
         ImGui::TextUnformatted("Trading sessions in your time (daylight saving included):");
         for (int i = 0; i < muuk::ctrader_fix::kSessionCount; ++i) {
@@ -3210,28 +3236,30 @@ void DashboardWindow::renderMarketStrip(LiveController& controller, const std::o
         ImGui::EndTooltip();
     }
 
-    ImGui::SameLine(0.0f, 14.0f);
-    ImGui::TextDisabled("Market");
-    ImGui::SameLine();
+    row.text("Market");
     std::string label = m.label;
     if (!s.market.enabled) label = m.marketOpen ? "Filter off" : m.label + " (filter off)";
+    // During a pause the pill itself counts down to the end of it.
+    if (s.market.enabled && !m.canOpenRange && m.nextChangeUtcMs > now) {
+        label += "  -  resumes in " + countdown(m.nextChangeUtcMs - now);
+    }
+    row.place(ImGui::CalcTextSize(label.c_str()).x + 42.0f);
     glass::pill(label.c_str(), s.market.enabled ? phaseColor(m.phase) : kGrey,
                 m.phase == MarketPhase::NewsPause && s.market.enabled);
-    ImGui::SetItemTooltip("%s%s", m.detail.c_str(),
-                          s.market.enabled ? "\nA running range keeps being managed; only new ranges wait."
+    ImGui::SetItemTooltip("%s%s%s%s", m.detail.c_str(),
+                          m.nextChangeUtcMs > 0 ? "\nNext change: " : "",
+                          m.nextChangeUtcMs > 0 ? muuk::ctrader_fix::formatLocalDateTime(m.nextChangeUtcMs).c_str() : "",
+                          s.market.enabled ? " (your time)\nA running range keeps being managed; only new ranges wait."
                                            : "\nMarket hours filter is off (Settings > Market hours & news).");
-    if (s.market.enabled && m.nextChangeUtcMs > 0) {
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
+    if (s.market.enabled && m.canOpenRange && m.nextChangeUtcMs > now) {
+        // Open now: how long until the next pause starts.
         const int64_t left = m.nextChangeUtcMs - now;
-        const bool soon = m.canOpenRange && left < 15 * 60'000;
-        ImGui::TextColored(soon ? kAmber : glass::palette().textDim, "%s in %s", m.nextChangeLabel.c_str(),
-                           countdown(left).c_str());
+        row.text(m.nextChangeLabel + " in " + countdown(left), left < 15 * 60'000 ? kAmber : glass::palette().textDim);
         ImGui::SetItemTooltip("At %s (your time).", muuk::ctrader_fix::formatLocalDateTime(m.nextChangeUtcMs).c_str());
     }
 
-    ImGui::SameLine(0.0f, 18.0f);
     bool guard = s.market.newsGuard;
+    row.place(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("News guard").x);
     if (ImGui::Checkbox("News guard", &guard)) {
         quickApply(controller, snap, connected, [guard](LiveSettings& x) { x.market.newsGuard = guard; });
     }
@@ -3240,16 +3268,24 @@ void DashboardWindow::renderMarketStrip(LiveController& controller, const std::o
                           s.market.newsMinutesBefore, s.market.newsMinutesAfter, s.market.newsHigh ? "red" : "",
                           s.market.newsMedium ? (s.market.newsHigh ? " and orange" : "orange") : "",
                           s.market.newsCurrencies.c_str());
-    ImGui::SameLine();
     if (!guard) {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(kAmber, "news ignored");
+        row.text("news ignored", kAmber);
     } else if (m.hasNextNews) {
         const NewsEvent& n = m.nextNews;
         const int64_t to = n.utcMs - now;
         const bool inWindow = m.phase == MarketPhase::NewsPause;
+        const int64_t guardFrom = n.utcMs - static_cast<int64_t>(s.market.newsMinutesBefore) * 60'000;
+        const int64_t guardTo = n.utcMs + static_cast<int64_t>(s.market.newsMinutesAfter) * 60'000;
+        std::string when;
+        if (inWindow) {
+            when = (to > 0 ? "  -  release in " + countdown(to) : "  -  released " + countdown(-to) + " ago") +
+                   ", guard ends in " + countdown(guardTo - now);
+        } else {
+            when = "  in " + countdown(to) + (guardFrom > now ? "  (guard in " + countdown(guardFrom - now) + ")" : "");
+        }
         const std::string text = std::string(inWindow ? "NEWS NOW: " : "") + (n.currency.empty() ? "" : n.currency + " ") +
-                                 n.title + (to > 0 ? "  in " + countdown(to) : "  " + countdown(-to) + " ago");
+                                 n.title + when;
+        row.place(ImGui::CalcTextSize(text.c_str()).x + 42.0f);
         glass::pill(text.c_str(), impactColor(n.impact), inWindow);
         if (ImGui::IsItemClicked()) selectTab_ = Tab::News;
         ImGui::SetItemTooltip("%s impact, %s (your time)%s%s%s%s\nNew ranges pause %d min before to %d min after. "
@@ -3259,14 +3295,13 @@ void DashboardWindow::renderMarketStrip(LiveController& controller, const std::o
                               n.previous.empty() ? "" : "   Previous ", n.previous.c_str(), s.market.newsMinutesBefore,
                               s.market.newsMinutesAfter);
     } else {
-        ImGui::AlignTextToFramePadding();
         const auto news = controller.news();
         const auto st = news ? news->status() : muuk::ctrader_fix::NewsFeed::Status{};
         if (!st.loaded) {
-            ImGui::TextColored(st.error.empty() ? glass::palette().textDim : kAmber, "%s",
-                               st.error.empty() ? "loading ForexFactory calendar..." : st.error.c_str());
+            row.text(st.error.empty() ? std::string("loading ForexFactory calendar...") : st.error,
+                     st.error.empty() ? glass::palette().textDim : kAmber);
         } else {
-            ImGui::TextDisabled("no guarded news ahead this week");
+            row.text("no guarded news ahead this week");
         }
     }
 }
