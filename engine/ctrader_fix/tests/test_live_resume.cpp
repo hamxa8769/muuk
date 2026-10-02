@@ -1235,6 +1235,40 @@ TEST_CASE("Lock & pause at a share of the balance: 25% of $2 locks at -0.50, and
     bot.rethrow();
 }
 
+TEST_CASE("Lock, then close: a lock that holds closes the whole basket the set seconds later") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.lockAtLossMoney = 0.50;
+    cfg.connection.closeLockedAfterSeconds = 1;
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    Bot bot(cfg, freshStateFile("lock_then_close"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 2, 4336.20, 4336.30);  // net -0.80: locked
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, hedge.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 2; }));
+    REQUIRE(bot.runner().snapshot().locked);
+
+    // About a second later both sides are closed by the bot itself.
+    const FixMessage c1 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 4s);
+    const FixMessage c2 = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(c1.getOptionalString(tag::PosMaintRptID).has_value());
+    REQUIRE(c2.getOptionalString(tag::PosMaintRptID).has_value());
+    sendFill(server, seq++, c1.getString(tag::ClOrdID), 4336.20, 1.0, c1.getString(tag::PosMaintRptID));
+    sendFill(server, seq++, c2.getString(tag::ClOrdID), 4336.30, 1.0, c2.getString(tag::PosMaintRptID));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().baskets.size() == 1; }, 4s));
+    REQUIRE(bot.runner().snapshot().baskets[0].outcome == "locked");
+    REQUIRE(waitUntil([&] { return !bot.runner().snapshot().locked; }, 4s));
+
+    bot.finish();
+    bot.rethrow();
+}
+
 namespace {
 // $20,000 at 1:1 on the $1 test range: after the first fill (buy 0.01 @ 4337)
 // level 2 (Sell Stop 0.02 @ 4336) would need 0.02 x 433,600 = $8,672 of

@@ -120,6 +120,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.dailyLossLimitMoney = conn.value("dailyLossLimitMoney", 0.0);
     cfg.connection.lockAtLossMoney = conn.value("lockAtLossMoney", 0.0);
     cfg.connection.lockAtLossPercent = std::clamp(conn.value("lockAtLossPercent", 0.0), 0.0, 100.0);
+    cfg.connection.closeLockedAfterSeconds = std::max(0, conn.value("closeLockedAfterSeconds", 0));
     cfg.connection.accountBalance = conn.value("accountBalance", 0.0);
     cfg.connection.leverage = conn.value("leverage", 500.0);
     cfg.connection.accountKind = conn.value("accountKind", std::string("standard"));
@@ -173,6 +174,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.dailyLossLimit = config.connection.dailyLossLimitMoney;
     s.lockAtLoss = config.connection.lockAtLossMoney;
     s.lockAtLossPercent = config.connection.lockAtLossPercent;
+    s.closeLockedAfterSeconds = config.connection.closeLockedAfterSeconds;
     s.escapeFromLevel = config.strategy.escapeFromLevel;
     s.escapeProfit = config.strategy.escapeProfitMoney;
     s.accountBalance = config.connection.accountBalance;
@@ -211,6 +213,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     config.connection.dailyLossLimitMoney = s.dailyLossLimit;
     config.connection.lockAtLossMoney = s.lockAtLoss;
     config.connection.lockAtLossPercent = std::clamp(s.lockAtLossPercent, 0.0, 100.0);
+    config.connection.closeLockedAfterSeconds = std::max(0, s.closeLockedAfterSeconds);
     config.connection.accountBalance = s.accountBalance;
     config.connection.leverage = s.leverage;
     config.connection.accountKind = s.accountKind;
@@ -398,6 +401,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["dailyLossLimitMoney"] = s.dailyLossLimit;
     conn["lockAtLossMoney"] = s.lockAtLoss;
     conn["lockAtLossPercent"] = s.lockAtLossPercent;
+    conn["closeLockedAfterSeconds"] = s.closeLockedAfterSeconds;
     conn["accountBalance"] = s.accountBalance;
     conn["leverage"] = s.leverage;
     conn["accountKind"] = s.accountKind;

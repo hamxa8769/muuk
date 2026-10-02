@@ -164,6 +164,11 @@ Escape is still a bet that the trend continues. These rules make each try rarer 
 
 On a ~19,000 USC account that is a margin level near 2,000%. The broker's margin call (40%) would only come after a loss of about 18,600 USC. **On this leverage the loss limits protect the account, not the margin.**
 
+### Lock, then close (3 Oct)
+
+- **Close it after (s)**, under Lock & pause. Once a lock holds (buys = sells), the whole locked basket closes this many seconds later. The loss is taken at its frozen amount, and with Auto-open on a new range follows. 0 = off: it waits for you.
+- **Max orders / Max lot: 0 = no limit.** On MT5 the broker's own order limit and largest lot still apply, because orders past them would only be refused.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

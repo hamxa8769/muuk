@@ -293,7 +293,9 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
          s.lockAtLoss > 0 || s.lockAtLossPercent > 0
              ? (s.lockAtLoss > 0 ? amount(s.lockAtLoss) : std::string()) +
                    (s.lockAtLoss > 0 && s.lockAtLossPercent > 0 ? " or " : "") +
-                   (s.lockAtLossPercent > 0 ? fmt("%.0f%% of the balance", s.lockAtLossPercent) : std::string())
+                   (s.lockAtLossPercent > 0 ? fmt("%.0f%% of the balance", s.lockAtLossPercent) : std::string()) +
+                   (s.closeLockedAfterSeconds > 0 ? ", closed " + std::to_string(s.closeLockedAfterSeconds) + " s later"
+                                                  : std::string())
              : std::string("off")},
         {"Break-even target", s.escapeFromLevel > 0 ? "from level " + std::to_string(s.escapeFromLevel) + ", close at " +
                                                           amount(s.escapeProfit)
@@ -328,7 +330,8 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
         {"Entry timeout", s.entryTimeoutSeconds > 0 ? std::to_string(s.entryTimeoutSeconds) + " s, then a new range"
                                                     : std::string("off")},
-        {"Max orders / max lot", std::to_string(s.maxOrders) + " / " + fmt("%.2f", s.maxLot)},
+        {"Max orders / max lot", (s.maxOrders > 0 ? std::to_string(s.maxOrders) : std::string("no limit")) + " / " +
+                                     (s.maxLot > 0 ? fmt("%.2f", s.maxLot) : std::string("no limit"))},
         {"Max basket loss", s.maxBasketLoss > 0 ? amount(s.maxBasketLoss) : "off"},
         {"Auto-open next range", s.autoContinue ? "on" : "off"},
     };

@@ -163,6 +163,10 @@ struct LiveConnectionConfig {
     // accountBalance on cTrader): 25 = lock once the basket's net reaches
     // -25% of the balance. With both set, whichever is reached first. 0 = off.
     double lockAtLossPercent = 0.0;
+    // Once a lock holds (buys = sells), close the whole basket this many
+    // seconds later -- the loss taken at the frozen amount instead of
+    // waiting for the operator. 0 = off (it waits).
+    int closeLockedAfterSeconds = 0;
     // Not sent over FIX -- typed in, for the risk calculator and margin warnings.
     double accountBalance = 0.0;
     double leverage = 500.0;
@@ -218,6 +222,7 @@ struct LiveSettings {
     double dailyLossLimit = 0.0; // $; today's booked + floating net at minus this closes everything for the day; 0 = off
     double lockAtLoss = 0.0;     // $; basket net at minus this is locked (hedged) and the bot pauses; 0 = off
     double lockAtLossPercent = 0.0;  // % of the balance, the same; with both, the first reached; 0 = off
+    int closeLockedAfterSeconds = 0; // a holding lock closes the whole basket this long after; 0 = waits for you
     int escapeFromLevel = 0;     // from this fill on the target drops to escapeProfit; 0 = off
     double escapeProfit = 0.50;  // $ net, after every cost
     double accountBalance = 0.0; // $, for the risk calculator

@@ -1329,7 +1329,8 @@ void LiveRunner::adoptBrokerSymbolLocked(const BrokerAccountInfo& a) {
         st.lotProgression.initialLot = Volume::fromDouble(spec.volumeMin, spec);
         notes += "; first lot raised to the broker's minimum " + priceTextOf(spec.volumeMin);
     }
-    if (a.limitOrders > 0 && st.riskLimits.maxOrders > a.limitOrders - 2) {
+    // Also with Max orders off (0): past the broker's own limit its orders would only be refused.
+    if (a.limitOrders > 0 && (st.riskLimits.maxOrders <= 0 || st.riskLimits.maxOrders > a.limitOrders - 2)) {
         st.riskLimits.maxOrders = std::max(1, a.limitOrders - 2);
         notes += "; max orders " + std::to_string(st.riskLimits.maxOrders) + " (the broker allows " +
                  std::to_string(a.limitOrders) + " pending)";
@@ -1584,6 +1585,20 @@ void LiveRunner::maybeGuardLocked() {
         closeReason_ = std::string("break-even: back to ") + usdText(net) +
                        (locked_ ? " after a lock" : " while the margin guard held the next level");
         closeRangeLocked(true, closeReason_);
+        return;
+    }
+
+    // A lock that holds is closed by itself after closeLockedAfterSeconds:
+    // the loss taken at its frozen amount, then the bot carries on.
+    if (locked_ && config_.connection.closeLockedAfterSeconds > 0 && managedMarket_.empty() &&
+        escape_.relockId == 0 && bookLotsLocked().netSteps == 0 &&
+        std::chrono::steady_clock::now() - lockedSince_ >=
+            std::chrono::seconds(config_.connection.closeLockedAfterSeconds)) {
+        auditEventLocked(8, 1,
+                         "the lock held " + std::to_string(config_.connection.closeLockedAfterSeconds) +
+                             " s -- closing the locked basket at " + usdText(net));
+        closeRangeLocked(true, "locked at " + usdText(lockedLoss_) + ", closed after " +
+                                   std::to_string(config_.connection.closeLockedAfterSeconds) + " s");
         return;
     }
 

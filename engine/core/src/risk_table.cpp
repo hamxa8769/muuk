@@ -14,7 +14,7 @@ std::vector<RiskRow> riskTable(const RiskTableInput& in) {
     double commission = 0.0;
     for (int n = 1; n <= in.levels; ++n) {
         const double lot = computeSequenceLot(in.lots, n, in.spec).toDouble(in.spec);
-        if (lot > in.maxLot + 1e-9) break;
+        if (in.maxLot > 0.0 && lot > in.maxLot + 1e-9) break;  // 0 = no max lot
         const bool buy = n % 2 == 1;
         (buy ? buys : sells) += lot;
         commission += roundTurnCommissionMoney(lot, in.price, in.spec, in.costs);
@@ -70,7 +70,7 @@ ReverseTrade reverseTrade(const ReverseTradeInput& in) {
         }
     }
     q = roundUp(q);
-    if (q > in.maxLot + 1e-9) {
+    if (in.maxLot > 0.0 && q > in.maxLot + 1e-9) {
         q = in.maxLot;
         r.capped = true;
     }

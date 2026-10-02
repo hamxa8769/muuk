@@ -472,8 +472,8 @@ void clampSettings(LiveSettings& s) {
     s.recovery.escapeLookbackBars = std::clamp(s.recovery.escapeLookbackBars, 4, 120);
     s.recovery.escapeStopAtr = std::clamp(s.recovery.escapeStopAtr, 0.2, 10.0);
     s.recovery.escapeMaxTries = std::clamp(s.recovery.escapeMaxTries, 0, 10);
-    s.maxOrders = std::max(1, s.maxOrders);
-    s.maxLot = std::max(0.01, s.maxLot);
+    s.maxOrders = std::max(0, s.maxOrders);  // 0 = no limit
+    s.maxLot = std::max(0.0, s.maxLot);      // 0 = no limit
     s.maxBasketLoss = std::max(0.0, s.maxBasketLoss);
     s.commissionPerLot = std::max(0.0, s.commissionPerLot);
     s.commissionPerMillion = std::max(0.0, s.commissionPerMillion);
@@ -495,6 +495,7 @@ void clampSettings(LiveSettings& s) {
     s.escapeProfit = std::max(0.0, s.escapeProfit);
     s.lockAtLoss = std::max(0.0, s.lockAtLoss);
     s.lockAtLossPercent = std::clamp(s.lockAtLossPercent, 0.0, 100.0);
+    s.closeLockedAfterSeconds = std::max(0, s.closeLockedAfterSeconds);
 }
 
 
@@ -2059,9 +2060,10 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) 
     double total = 0.0;
     int limitAt = 0;
     const char* limitWhy = "";
-    for (int n = 1; n <= std::min(s.maxOrders, 16); ++n) {
+    const int shownLevels = s.maxOrders > 0 ? std::min(s.maxOrders, 16) : 16;
+    for (int n = 1; n <= shownLevels; ++n) {
         const double lot = muuk::core::computeSequenceLot(lp, n, spec).toDouble(spec);
-        if (lot > s.maxLot + 1e-9) {
+        if (s.maxLot > 0.0 && lot > s.maxLot + 1e-9) {
             limitAt = n;
             limitWhy = "Max lot";
             break;
@@ -2070,14 +2072,14 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) 
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%s%.2f", line.empty() ? "" : "  ", lot);
         line += buf;
-        if (n == 8 && s.maxOrders > 8) {
+        if (n == 8 && shownLevels > 8) {
             // Wrap for readability.
             ImGui::TextUnformatted(line.c_str());
             line.clear();
         }
     }
     if (!line.empty()) ImGui::TextUnformatted(line.c_str());
-    if (limitAt == 0 && s.maxOrders <= 16) {
+    if (limitAt == 0 && s.maxOrders > 0 && s.maxOrders <= 16) {
         limitAt = s.maxOrders + 1;
         limitWhy = "Max orders";
     }
@@ -2091,9 +2093,9 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) 
         const double at = livePrice > 0.0 ? livePrice : 4000.0;
         const double first = muuk::core::roundTurnCommissionMoney(s.initialLot, at, spec, costs);
         double all = 0.0;
-        for (int n = 1; n <= std::min(s.maxOrders, 16); ++n) {
+        for (int n = 1; n <= shownLevels; ++n) {
             const double lot = muuk::core::computeSequenceLot(lp, n, spec).toDouble(spec);
-            if (lot > s.maxLot + 1e-9) break;
+            if (s.maxLot > 0.0 && lot > s.maxLot + 1e-9) break;
             all += muuk::core::roundTurnCommissionMoney(lot, at, spec, costs);
         }
         if (account_.platform == 1) {
@@ -4033,9 +4035,13 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             settingDouble("  increment", "Added to the lot on every following order (0.01 -> 0.02 -> 0.03...).",
                           &s.lotIncrement, 0.01, "%.2f", &settingsDirty_);
         }
-        settingInt("Max orders", "No more orders are placed in a range beyond this many (the deepest level).",
+        settingInt("Max orders",
+                   "No more orders are placed in a range beyond this many (the deepest level). 0 = no limit (on MT5 "
+                   "the broker's own order limit still applies).",
                    &s.maxOrders, &settingsDirty_);
-        settingDouble("Max lot", "No single order bigger than this; the level that would need more is not placed.",
+        settingDouble("Max lot",
+                      "No single order bigger than this; the level that would need more is not placed. 0 = no limit "
+                      "(the broker's largest lot still applies).",
                       &s.maxLot, 0.10, "%.2f", &settingsDirty_);
 
         // --- Loss limits.
@@ -4053,6 +4059,11 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                       "The same lock as a share of the account balance: 25 = lock once the basket's net reaches -25% "
                       "of the balance. With an amount above too, whichever is reached first. 0 = off.",
                       &s.lockAtLossPercent, 1.0, "%.1f", &settingsDirty_);
+        settingInt("  close it after (s)",
+                   "Once the lock holds (buys = sells), the whole locked basket is closed this many seconds later -- "
+                   "the loss taken at its frozen amount -- and with Auto-open on a new range follows. 0 = off: it "
+                   "stays locked until you decide (or the escape gets it out).",
+                   &s.closeLockedAfterSeconds, &settingsDirty_);
         {
             const double bal = snap && snap->brokerAccountFresh ? snap->brokerAccount.balance : s.accountBalance;
             if (s.lockAtLossPercent > 0.0 && bal > 0.0) {
@@ -4157,7 +4168,7 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
     in.spread = live ? std::max(0.0, *snap->ask - *snap->bid) : 0.30;
     in.leverage = s.leverage;
     in.maxLot = s.maxLot;
-    in.levels = std::clamp(s.maxOrders, 1, 16);
+    in.levels = s.maxOrders > 0 ? std::clamp(s.maxOrders, 1, 16) : 16;
     in.balance = s.accountBalance;
     in.hedgedPercent = s.recovery.hedgedMarginPercent;
     if (fromMt5) {
