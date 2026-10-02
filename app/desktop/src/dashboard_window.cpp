@@ -3943,6 +3943,28 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
 
         // --- Lot sizing.
         section("Lot sizing", "from the next range");
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Lot template");
+        ImGui::SetItemTooltip("Ready-made lot plans. Cent: 0.10, 0.20, 0.40, 0.80... (first lot 0.10, x2) -- the plan "
+                              "for cent accounts. Standard: 0.01, 0.02, 0.04, 0.08... (first lot 0.01, x2). The table "
+                              "below shows what each can lose.");
+        ImGui::TableNextColumn();
+        {
+            const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+            auto lotTemplate = [&](const char* label, double first, ImVec4 color) {
+                const bool on = std::fabs(s.initialLot - first) < 0.001 && std::fabs(s.lotMultiplier - 2.0) < 0.01;
+                if (glass::button(label, on ? color : glass::palette().neutral, ImVec2(half, 0))) {
+                    s.initialLot = first;
+                    s.lotMultiplier = 2.0;
+                    settingsDirty_ = true;
+                }
+            };
+            lotTemplate("Cent: 0.10 x2", 0.10, kViolet);
+            ImGui::SameLine();
+            lotTemplate("Standard: 0.01 x2", 0.01, kBlue);
+        }
         settingDouble("First lot", "Lot size of the first order in each range. Every amount below grows with it.",
                       &s.initialLot, 0.01, "%.2f", &settingsDirty_);
         ImGui::TableNextRow();

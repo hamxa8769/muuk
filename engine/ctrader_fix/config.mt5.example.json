@@ -44,7 +44,7 @@
       "upper": 4338.0
     },
     "lotProgression": {
-      "initialLot": 0.01,
+      "initialLot": 0.1,
       "lotIncrement": 0.01,
       "lotMultiplier": 2.0
     },
