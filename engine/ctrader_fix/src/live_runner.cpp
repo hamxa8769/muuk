@@ -1664,7 +1664,11 @@ void LiveRunner::manageEscapeLocked(double net) {
         const double room = std::max(rc.escapeStopAtr * escape_.atr, rc.escapeBuffer);
         if (escape_.stop <= 0.0) escape_.stop = escape_.buy ? entry - room : entry + room;  // e.g. after a restart
         const double favorable = escape_.buy ? *latestBid_ - entry : entry - *latestAsk_;
-        if (!escape_.trailing && favorable >= rc.escapeTrailAt) {
+        // Protect it only after a run bigger than the market's ordinary
+        // swing: moving the line to the entry after $1 when a minute
+        // typically moves $1.66 just got it knocked out (1 Oct, #36).
+        const double protectAfter = std::max(rc.escapeTrailAt, room);
+        if (!escape_.trailing && favorable >= protectAfter) {
             escape_.trailing = true;
             escape_.stop = entry;  // from here it can't turn into a loss of its own
             markDirty();

@@ -146,6 +146,10 @@ The escape was rebuilt after basket #165. What it does from a lock now:
 4. **Positive = done.** As soon as the basket's net is back at break-even (+0.50), everything closes.
 5. **A failed try asks you.** The app shows **Retry escape / Keep locked / Close range** in red. Nothing more happens by itself unless *retry by itself* is on.
 
+**2 Oct, basket #36:** the escape SELL ran $1.22 and *protect after* ($1) moved its re-lock line to the entry. In that hour a minute moved $1.66 on average, so the price came back to the entry 1 second later and the basket locked again (−151 → −158). Protection now starts only after a run of at least the re-lock distance (re-lock × ATR) as well as *protect after*.
+
+**Micro-harvesting (closing a slice of a winner against a loser inside a lock) was looked at and not built.** The slice's profit and the loser's loss cancel to $0, so the frozen loss is exactly the same afterwards. The two sides no longer match in size either, so the basket is no longer locked: part of it moves with the price again.
+
 Escape is still a bet that the trend continues. These rules make each try rarer and better placed, but a trend can still reverse.
 
 ### Layout

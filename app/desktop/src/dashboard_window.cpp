@@ -4033,8 +4033,8 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                           "The least distance of the escape stop beyond the breakout line and the price.",
                           &s.recovery.escapeBuffer, 0.1, "%.2f", &settingsDirty_);
             settingDouble("  protect after ($)",
-                          "Once the escape ran this far, its re-lock line moves to its entry and then follows the "
-                          "price.",
+                          "Once the escape ran this far (and at least its re-lock distance, the ATR rule above), its "
+                          "re-lock line moves to its entry and then follows the price.",
                           &s.recovery.escapeTrailAt, 0.25, "%.2f", &settingsDirty_);
             settingInt("  tries per basket", "Escapes allowed before the basket just stays locked (Retry escape adds one).",
                        &s.recovery.escapeMaxTries, &settingsDirty_);
