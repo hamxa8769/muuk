@@ -152,6 +152,18 @@ The escape was rebuilt after basket #165. What it does from a lock now:
 
 Escape is still a bet that the trend continues. These rules make each try rarer and better placed, but a trend can still reverse.
 
+### Lock at a share of the balance, and the last-lot target (2 Oct)
+
+- **Lock & pause at % of the balance** (Risk & capital). For example, 25 locks the basket once its net reaches −25% of the balance; MT5's own balance is used. With an amount set too, whichever is reached first locks.
+- **Last-lot target** (Settings). The target is what the last (deepest) lot opened earns on a $1 move: 1.00 lot = 100 USC on a cent account, 0.01 lot = 1. It replaces the fixed and the auto target, and it grows level by level like the lots. The break-even target from its level still lowers it.
+
+**Margin on the JustMarkets cent account.** Margin per lot is about price × 100 ÷ 3000 ≈ 139 USC, and a buy + sell pair is charged on the larger side only. So:
+- pending orders cost nothing;
+- a lock adds no margin, because it doesn't make the larger side bigger;
+- an x2 basket at level 10 (6.82 lots on the larger side) holds about 950 USC.
+
+On a ~19,000 USC account that is a margin level near 2,000%. The broker's margin call (40%) would only come after a loss of about 18,600 USC. **On this leverage the loss limits protect the account, not the margin.**
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.
