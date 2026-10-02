@@ -43,6 +43,12 @@ struct StrategyConfig {
     // So one 0.01 lot aims low, and the target grows with every fill.
     bool autoProfitTarget = false;
     double autoTargetPercent = 100.0;
+    // Last-lot target (replaces the two above while on): the basket books
+    // once its net reaches what the deepest filled level's lot earns on a
+    // lastLotTargetMove price move -- 1.00 lot x $1 = 100 (USC on a cent
+    // account, $ on a standard one); 0.01 lot = 1.
+    bool lastLotTarget = false;
+    double lastLotTargetMove = 1.0;
     // Break-even escape: once the basket has filled this many levels, its
     // target drops to escapeProfitMoney (net, after every cost) -- a deep
     // basket closes at the first bounce back instead of waiting for the

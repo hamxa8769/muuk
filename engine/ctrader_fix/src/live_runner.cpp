@@ -241,13 +241,17 @@ LiveSnapshot LiveRunner::snapshot() const {
     // Worked out from the positions as they stand (the same formula the
     // engine applies on every quote) -- also right after a resume, before
     // the first new quote (e.g. during the daily break).
-    snap.targetNow = config_.strategy.autoProfitTarget
-                         ? muuk::core::autoTargetMoney(snap.live.commission + 2.0 * snap.live.spread,
-                                                       config_.strategy.autoTargetPercent)
-                         : config_.strategy.basketProfitTargetMoney;
-    if (snap.escapeActive) {
-        const double escape = std::max(0.01, config_.strategy.escapeProfitMoney);
-        snap.targetNow = snap.targetNow > 0.0 ? std::min(snap.targetNow, escape) : escape;
+    if (engine_) {
+        // The engine's own rule (fixed, auto, last lot, break-even), on the positions as they stand.
+        muuk::core::BasketPnlResult now;
+        now.commissionMoney = snap.live.commission;
+        now.spreadCostMoney = snap.live.spread;
+        snap.targetNow = engine_->effectiveTargetMoney(now);
+    } else {
+        snap.targetNow = config_.strategy.autoProfitTarget
+                             ? muuk::core::autoTargetMoney(snap.live.commission + 2.0 * snap.live.spread,
+                                                           config_.strategy.autoTargetPercent)
+                             : config_.strategy.basketProfitTargetMoney;
     }
     return snap;
 }
@@ -1101,8 +1105,21 @@ bool LiveRunner::basketRunningLocked() const {
     return st == EngineStatus::Active || (st == EngineStatus::HaltedByRisk && !openLegs_.empty());
 }
 
+double LiveRunner::lockAtLossMoneyLocked() const {
+    double at = config_.connection.lockAtLossMoney > 0.0 ? config_.connection.lockAtLossMoney : 0.0;
+    if (config_.connection.lockAtLossPercent > 0.0) {
+        const double balance = brokerAccount_.known && brokerAccount_.balance > 0.0 ? brokerAccount_.balance
+                                                                                    : config_.connection.accountBalance;
+        if (balance > 0.0) {
+            const double share = balance * config_.connection.lockAtLossPercent / 100.0;
+            at = at > 0.0 ? std::min(at, share) : share;  // whichever is reached first
+        }
+    }
+    return at;
+}
+
 void LiveRunner::maybeLockLocked() {
-    const double lockAt = config_.connection.lockAtLossMoney;
+    const double lockAt = lockAtLossMoneyLocked();
     if (lockAt <= 0.0 || locked_ || !engine_ || !tradeSession_ || !latestBid_ || !latestAsk_) return;
     if (openLegs_.empty() || !pendingCloses_.empty()) return;
     if (!basketRunningLocked() && guardLockOrderId_ == 0) return;
@@ -3897,7 +3914,7 @@ void LiveRunner::auditLocked() {
         }
         retryManagedMarketLocked();
         maybeGuardLocked();  // also when no quote arrives (e.g. right after a lock filled)
-        const double lockAt = config_.connection.lockAtLossMoney;
+        const double lockAt = lockAtLossMoneyLocked();
         const RecoveryConfig& rc = config_.connection.recovery;
         if (locked_) {
             std::string how = " (swap is charged every night) -- close it when you decide (Close range)";

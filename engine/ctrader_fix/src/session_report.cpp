@@ -284,12 +284,17 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
     const std::vector<std::pair<std::string, std::string>> items = {
         {"First order", start},
         {"Range width", fmt("$%.2f", s.rangeWidth)},
-        {"Profit target (net)", s.autoTarget ? "auto level " + std::to_string((s.autoTargetPercent - 160) / 2) + ": " +
+        {"Profit target (net)", s.lastLotTarget ? fmt("last lot x $%.2f move", s.lastLotTargetMove) : s.autoTarget ? "auto level " + std::to_string((s.autoTargetPercent - 160) / 2) + ": " +
                                                    std::to_string(s.autoTargetPercent) + "% of the positions' cost"
                                              : amount(s.profitTarget)},
         {"Stop loss (net)", s.stopLoss > 0 ? amount(s.stopLoss) : std::string("off")},
         {"Daily loss limit", s.dailyLossLimit > 0 ? amount(s.dailyLossLimit) : std::string("off")},
-        {"Lock & pause at loss", s.lockAtLoss > 0 ? amount(s.lockAtLoss) : std::string("off")},
+        {"Lock & pause at loss",
+         s.lockAtLoss > 0 || s.lockAtLossPercent > 0
+             ? (s.lockAtLoss > 0 ? amount(s.lockAtLoss) : std::string()) +
+                   (s.lockAtLoss > 0 && s.lockAtLossPercent > 0 ? " or " : "") +
+                   (s.lockAtLossPercent > 0 ? fmt("%.0f%% of the balance", s.lockAtLossPercent) : std::string())
+             : std::string("off")},
         {"Break-even target", s.escapeFromLevel > 0 ? "from level " + std::to_string(s.escapeFromLevel) + ", close at " +
                                                           amount(s.escapeProfit)
                                                     : std::string("off")},

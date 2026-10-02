@@ -1207,6 +1207,34 @@ TEST_CASE("Lock & pause: at the loss limit the pending order is cancelled and on
     bot.rethrow();
 }
 
+TEST_CASE("Lock & pause at a share of the balance: 25% of $2 locks at -0.50, and the first limit reached wins") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.accountBalance = 2.0;
+    cfg.connection.lockAtLossPercent = 25.0;  // -0.50
+    cfg.connection.lockAtLossMoney = 5.0;     // further away: the share of the balance comes first
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    cfg.connection.recovery.guardLockMarginLevel = 0.0;  // the guards stay out of it
+    cfg.connection.recovery.guardStopMarginLevel = 0.0;
+    Bot bot(cfg, freshStateFile("lock_percent"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sellStop = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, sellStop.getString(tag::ClOrdID));
+    sendQuote(server, 2, 4336.60, 4336.70);  // net -0.40: not yet
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 800ms), std::runtime_error);
+    sendQuote(server, 3, 4336.20, 4336.30);  // net -0.80: past -0.50
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage hedge = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(hedge.getInt(tag::Side) == 2);
+    sendFill(server, seq++, hedge.getString(tag::ClOrdID), 4336.20, 1.0, "P2");
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().locked; }));
+
+    bot.finish();
+    bot.rethrow();
+}
+
 namespace {
 // $20,000 at 1:1 on the $1 test range: after the first fill (buy 0.01 @ 4337)
 // level 2 (Sell Stop 0.02 @ 4336) would need 0.02 x 433,600 = $8,672 of

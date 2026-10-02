@@ -234,6 +234,43 @@ TEST_CASE("risk engine halts new order creation once max orders is reached") {
     REQUIRE(engine.activeOrderCount() == 1);
 }
 
+TEST_CASE("last-lot target: the deepest filled lot on a $1 move -- 0.01 lot = 1, 0.02 = 2; break-even still lowers it") {
+    const SymbolSpec spec = xauusdSpec();  // tick 0.01 worth 1.00 per lot: 100 per $1 per lot
+    StrategyConfig cfg = baseConfig(spec);
+    cfg.lotProgression = LotProgressionConfig{Volume::fromDouble(0.01, spec), Volume::fromDouble(0.01, spec), 2.0};
+    cfg.basketProfitTargetMoney = 50.0;  // replaced while the last-lot target is on
+    cfg.lastLotTarget = true;
+    cfg.lastLotTargetMove = 1.0;
+    StrategyEngine engine(cfg);
+    const CommandBatch initial = engine.start();
+    const OrderId buyId = placeCmd(initial, 0).id;   // Buy Stop 0.01
+    const OrderId sellId = placeCmd(initial, 1).id;  // Sell Stop 0.02
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{buyId, Price::fromDouble(4337.00, spec)});
+    REQUIRE(engine.effectiveTargetMoney(BasketPnlResult{}) == Catch::Approx(1.0));
+    (void)engine.onOrderConfirmed(OrderConfirmedEvent{sellId, Price::fromDouble(4336.00, spec)});
+    REQUIRE(engine.effectiveTargetMoney(BasketPnlResult{}) == Catch::Approx(2.0));
+
+    // The price falls: the 0.02 sell gains twice what the 0.01 buy loses; it closes once the net reaches 2.
+    TickEvent tick;
+    tick.bid = Price::fromDouble(4333.00, spec);
+    tick.ask = Price::fromDouble(4333.02, spec);
+    (void)engine.onTick(tick);  // buy -4.00, sell +5.96: net about +1.96 -- not yet
+    REQUIRE(engine.status() == EngineStatus::Active);
+    tick.bid = Price::fromDouble(4332.80, spec);
+    tick.ask = Price::fromDouble(4332.82, spec);
+    bool closed = false;
+    for (const auto& cmd : engine.onTick(tick)) closed = closed || std::holds_alternative<CloseBasketCommand>(cmd);
+    REQUIRE(closed);
+
+    cfg.escapeFromLevel = 2;
+    cfg.escapeProfitMoney = 0.50;
+    StrategyEngine lowered(cfg);
+    const CommandBatch again = lowered.start();
+    (void)lowered.onOrderConfirmed(OrderConfirmedEvent{placeCmd(again, 0).id, Price::fromDouble(4337.00, spec)});
+    (void)lowered.onOrderConfirmed(OrderConfirmedEvent{placeCmd(again, 1).id, Price::fromDouble(4336.00, spec)});
+    REQUIRE(lowered.effectiveTargetMoney(BasketPnlResult{}) == Catch::Approx(0.50));
+}
+
 TEST_CASE("a basket halted by a risk limit still closes at its target and its stop loss") {
     // Max orders 2: both boundary orders go out, then the next level is
     // refused. The positions already open must not be left unmanaged.

@@ -66,6 +66,11 @@ StrategyConfig parseStrategyConfig(const nlohmann::json& j) {
         cfg.autoProfitTarget = at.value("enabled", cfg.autoProfitTarget);
         cfg.autoTargetPercent = at.value("percent", cfg.autoTargetPercent);
     }
+    if (j.contains("lastLotTarget") && j.at("lastLotTarget").is_object()) {
+        const auto& lt = j.at("lastLotTarget");
+        cfg.lastLotTarget = lt.value("enabled", cfg.lastLotTarget);
+        cfg.lastLotTargetMove = lt.value("move", cfg.lastLotTargetMove);
+    }
     cfg.maxRejectRetries = j.value("maxRejectRetries", cfg.maxRejectRetries);
     cfg.reArmOnFill = j.value("reArmOnFill", cfg.reArmOnFill);
     cfg.seedOffsetPoints = j.value("seedOffsetPoints", cfg.seedOffsetPoints);

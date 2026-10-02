@@ -159,6 +159,10 @@ struct LiveConnectionConfig {
     // the net lots freezes the loss (a hedge); the bot then waits for the
     // operator. 0 = off.
     double lockAtLossMoney = 0.0;
+    // The same as a share of the account balance (MT5's own, or
+    // accountBalance on cTrader): 25 = lock once the basket's net reaches
+    // -25% of the balance. With both set, whichever is reached first. 0 = off.
+    double lockAtLossPercent = 0.0;
     // Not sent over FIX -- typed in, for the risk calculator and margin warnings.
     double accountBalance = 0.0;
     double leverage = 500.0;
@@ -203,6 +207,8 @@ struct LiveSettings {
     double stopLoss = 0.0;       // basket net loss ($) that closes the basket; 0 = off
     bool autoTarget = false;     // target = autoTargetPercent % of the open positions' cost, instead of profitTarget
     int autoTargetPercent = 100; // 20 / 40 / 60 / 80 / 100
+    bool lastLotTarget = false;     // target = the deepest filled lot x lastLotTargetMove (replaces the two above)
+    double lastLotTargetMove = 1.0; // $ price move: 1.00 lot x $1 = 100 USC on a cent account
     int cooldownSeconds = 0;     // pause after a basket is fully flat
     int manualCloseCooldownSeconds = 15;  // pause after Close range before a new range opens; 0 = don't reopen
     int entryTimeoutSeconds = 120;  // entry order not triggered by then: the range moves to the live price; 0 = off
@@ -211,6 +217,7 @@ struct LiveSettings {
     double maxBasketLoss = 0.0;  // $; 0 = no limit
     double dailyLossLimit = 0.0; // $; today's booked + floating net at minus this closes everything for the day; 0 = off
     double lockAtLoss = 0.0;     // $; basket net at minus this is locked (hedged) and the bot pauses; 0 = off
+    double lockAtLossPercent = 0.0;  // % of the balance, the same; with both, the first reached; 0 = off
     int escapeFromLevel = 0;     // from this fill on the target drops to escapeProfit; 0 = off
     double escapeProfit = 0.50;  // $ net, after every cost
     double accountBalance = 0.0; // $, for the risk calculator

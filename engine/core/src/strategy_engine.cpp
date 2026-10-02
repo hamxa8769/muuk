@@ -151,14 +151,21 @@ void StrategyEngine::updateExitRules(const StrategyConfig& config) {
     config_.basketStopLossMoney = config.basketStopLossMoney;
     config_.autoProfitTarget = config.autoProfitTarget;
     config_.autoTargetPercent = config.autoTargetPercent;
+    config_.lastLotTarget = config.lastLotTarget;
+    config_.lastLotTargetMove = config.lastLotTargetMove;
     config_.escapeFromLevel = config.escapeFromLevel;
     config_.escapeProfitMoney = config.escapeProfitMoney;
 }
 
 double StrategyEngine::effectiveTargetMoney(const BasketPnlResult& pnl) const {
-    const double normal = config_.autoProfitTarget
-                              ? autoTargetMoney(pnl.commissionMoney + 2.0 * pnl.spreadCostMoney, config_.autoTargetPercent)
-                              : config_.basketProfitTargetMoney;
+    double normal = config_.autoProfitTarget
+                        ? autoTargetMoney(pnl.commissionMoney + 2.0 * pnl.spreadCostMoney, config_.autoTargetPercent)
+                        : config_.basketProfitTargetMoney;
+    if (config_.lastLotTarget && filledLevel_ > 0 && config_.symbol.tickSize > 0.0) {
+        // The deepest filled level's lot, on a lastLotTargetMove run.
+        const double lot = computeSequenceLot(config_.lotProgression, filledLevel_, config_.symbol).toDouble(config_.symbol);
+        normal = lot * (config_.symbol.tickValue / config_.symbol.tickSize) * std::max(0.01, config_.lastLotTargetMove);
+    }
     if (!escapeActive()) return normal;
     const double escape = std::max(0.01, config_.escapeProfitMoney);
     return normal > 0.0 ? std::min(normal, escape) : escape;

@@ -484,6 +484,7 @@ void clampSettings(LiveSettings& s) {
     s.escapeFromLevel = std::clamp(s.escapeFromLevel, 0, 30);
     s.escapeProfit = std::max(0.0, s.escapeProfit);
     s.lockAtLoss = std::max(0.0, s.lockAtLoss);
+    s.lockAtLossPercent = std::clamp(s.lockAtLossPercent, 0.0, 100.0);
 }
 
 
@@ -1532,6 +1533,22 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
             settingsDirty_ = true;
         }
         ImGui::EndDisabled();
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Last-lot target");
+        ImGui::SetItemTooltip("On: the target is what the last (deepest) lot opened earns on a price move of the amount "
+                              "on the right. 1.00 lot x $1 = 100 (US cents on a cent account, $ on a standard one); "
+                              "0.01 lot = 1. It grows with every level, like the lots do. Replaces the fixed and the "
+                              "auto target; the break-even target from its level still lowers it.");
+        ImGui::TableNextColumn();
+        if (ImGui::Checkbox("On##lastlot", &s.lastLotTarget)) settingsDirty_ = true;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!s.lastLotTarget);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputDouble("##lastlotmove", &s.lastLotTargetMove, 0.25, 1.0, "x $%.2f move")) settingsDirty_ = true;
+        ImGui::EndDisabled();
+        s.lastLotTargetMove = std::clamp(s.lastLotTargetMove, 0.01, 100.0);
         settingDouble("Entry offset ($)",
                       "How far beyond the current price the first order sits. Its fill sets the range. "
                       "0 = place the first order at the range boundary instead.",
@@ -3609,7 +3626,9 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     withFont(boldFont_, [&] { ImGui::TextColored(pnlColor(net), "%s", money(net).c_str()); });
     const std::string targetText =
         "target " + money(target) +
-        (snap.escapeActive ? "  (break-even escape, level " + std::to_string(snap.filledLevel) + ")"
+        (snap.escapeActive  ? "  (break-even escape, level " + std::to_string(snap.filledLevel) + ")"
+         : s.lastLotTarget ? "  (last lot, level " + std::to_string(snap.filledLevel) + ", x $" +
+                                 price(s.lastLotTargetMove) + ")"
          : s.autoTarget    ? "  (level " + std::to_string(targetLevel(s.autoTargetPercent)) + " = " +
                               std::to_string(s.autoTargetPercent) + "%)"
                            : "");
@@ -3973,6 +3992,22 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                       "freezes the loss (a hedge). The bot then waits for you -- the loss doesn't go away, and swap "
                       "is charged every night.",
                       &s.lockAtLoss, 10.0, "%.2f", &settingsDirty_);
+        settingDouble("  or at % of the balance",
+                      "The same lock as a share of the account balance: 25 = lock once the basket's net reaches -25% "
+                      "of the balance. With an amount above too, whichever is reached first. 0 = off.",
+                      &s.lockAtLossPercent, 1.0, "%.1f", &settingsDirty_);
+        {
+            const double bal = snap && snap->brokerAccountFresh ? snap->brokerAccount.balance : s.accountBalance;
+            if (s.lockAtLossPercent > 0.0 && bal > 0.0) {
+                const double share = bal * s.lockAtLossPercent / 100.0;
+                const double eff = s.lockAtLoss > 0.0 ? std::min(s.lockAtLoss, share) : share;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("= %s of %s now; locks at %s", amount(share).c_str(), amount(bal).c_str(),
+                                    money(-eff).c_str());
+            }
+        }
         settingDouble("Max basket loss",
                       "Past this floating loss no new level is placed; the open positions stay and still close at "
                       "the target (or the stop loss).",
@@ -4162,7 +4197,12 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             } else if (guardLevel > 0 && r.level > guardLevel) {
                 note = "not reached";
             }
-            if (s.lockAtLoss > 0.0 && !lockShown && r.worstLoss >= s.lockAtLoss) {
+            double lockAt = s.lockAtLoss;
+            if (s.lockAtLossPercent > 0.0 && balance > 0.0) {
+                const double share = balance * s.lockAtLossPercent / 100.0;
+                lockAt = lockAt > 0.0 ? std::min(lockAt, share) : share;
+            }
+            if (lockAt > 0.0 && !lockShown && r.worstLoss >= lockAt) {
                 note += std::string(note.empty() ? "" : ", ") + "lock here";
                 lockShown = true;
             }

@@ -119,6 +119,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.quoteStaleSeconds = conn.value("quoteStaleSeconds", 120);
     cfg.connection.dailyLossLimitMoney = conn.value("dailyLossLimitMoney", 0.0);
     cfg.connection.lockAtLossMoney = conn.value("lockAtLossMoney", 0.0);
+    cfg.connection.lockAtLossPercent = std::clamp(conn.value("lockAtLossPercent", 0.0), 0.0, 100.0);
     cfg.connection.accountBalance = conn.value("accountBalance", 0.0);
     cfg.connection.leverage = conn.value("leverage", 500.0);
     cfg.connection.accountKind = conn.value("accountKind", std::string("standard"));
@@ -160,6 +161,8 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.stopLoss = config.strategy.basketStopLossMoney;
     s.autoTarget = config.strategy.autoProfitTarget;
     s.autoTargetPercent = static_cast<int>(std::lround(config.strategy.autoTargetPercent));
+    s.lastLotTarget = config.strategy.lastLotTarget;
+    s.lastLotTargetMove = config.strategy.lastLotTargetMove;
     s.market = config.market;
     s.cooldownSeconds = config.connection.basketCooldownSeconds;
     s.manualCloseCooldownSeconds = config.connection.manualCloseCooldownSeconds;
@@ -169,6 +172,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.maxBasketLoss = config.strategy.riskLimits.maxBasketLossMoney;
     s.dailyLossLimit = config.connection.dailyLossLimitMoney;
     s.lockAtLoss = config.connection.lockAtLossMoney;
+    s.lockAtLossPercent = config.connection.lockAtLossPercent;
     s.escapeFromLevel = config.strategy.escapeFromLevel;
     s.escapeProfit = config.strategy.escapeProfitMoney;
     s.accountBalance = config.connection.accountBalance;
@@ -198,12 +202,15 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     st.basketStopLossMoney = s.stopLoss;
     st.autoProfitTarget = s.autoTarget;
     st.autoTargetPercent = s.autoTargetPercent;
+    st.lastLotTarget = s.lastLotTarget;
+    st.lastLotTargetMove = std::clamp(s.lastLotTargetMove, 0.01, 100.0);
     config.market = s.market;
     st.riskLimits.maxOrders = s.maxOrders;
     st.riskLimits.maxLot = Volume::fromDouble(s.maxLot, spec);
     st.riskLimits.maxBasketLossMoney = s.maxBasketLoss;
     config.connection.dailyLossLimitMoney = s.dailyLossLimit;
     config.connection.lockAtLossMoney = s.lockAtLoss;
+    config.connection.lockAtLossPercent = std::clamp(s.lockAtLossPercent, 0.0, 100.0);
     config.connection.accountBalance = s.accountBalance;
     config.connection.leverage = s.leverage;
     config.connection.accountKind = s.accountKind;
@@ -390,6 +397,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["autoContinue"] = s.autoContinue;
     conn["dailyLossLimitMoney"] = s.dailyLossLimit;
     conn["lockAtLossMoney"] = s.lockAtLoss;
+    conn["lockAtLossPercent"] = s.lockAtLossPercent;
     conn["accountBalance"] = s.accountBalance;
     conn["leverage"] = s.leverage;
     conn["accountKind"] = s.accountKind;
@@ -402,6 +410,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     st["basketProfitTargetMoney"] = s.profitTarget;
     st["basketStopLossMoney"] = s.stopLoss;
     st["autoProfitTarget"] = {{"enabled", s.autoTarget}, {"percent", s.autoTargetPercent}};
+    st["lastLotTarget"] = {{"enabled", s.lastLotTarget}, {"move", s.lastLotTargetMove}};
     j["market"] = marketHoursToJson(s.market);
     st["lotProgression"]["initialLot"] = s.initialLot;
     st["lotProgression"]["lotIncrement"] = s.lotIncrement;

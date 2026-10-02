@@ -746,6 +746,9 @@ private:
     // lot / max basket loss) with positions still open -- it adds nothing
     // more but is still watched, closed at its target / stop loss, and locked.
     [[nodiscard]] bool basketRunningLocked() const;
+    // The loss that locks the basket: lockAtLossMoney, or lockAtLossPercent
+    // of the balance, whichever is smaller; 0 = no lock by loss.
+    [[nodiscard]] double lockAtLossMoneyLocked() const;
     // Lock & pause: if the running basket's net has reached -lockAtLossMoney,
     // cancel its pending orders and freeze the loss with one opposite market
     // order for the net lots. Called on every quote.
