@@ -167,6 +167,9 @@ struct LiveConnectionConfig {
     // seconds later -- the loss taken at the frozen amount instead of
     // waiting for the operator. 0 = off (it waits).
     int closeLockedAfterSeconds = 0;
+    // Lock at level N: level N is never placed; a stop order for the net
+    // lots (a lock) waits at its line instead. 0 = off.
+    int lockAtLevel = 0;
     // Not sent over FIX -- typed in, for the risk calculator and margin warnings.
     double accountBalance = 0.0;
     double leverage = 500.0;
@@ -223,6 +226,7 @@ struct LiveSettings {
     double lockAtLoss = 0.0;     // $; basket net at minus this is locked (hedged) and the bot pauses; 0 = off
     double lockAtLossPercent = 0.0;  // % of the balance, the same; with both, the first reached; 0 = off
     int closeLockedAfterSeconds = 0; // a holding lock closes the whole basket this long after; 0 = waits for you
+    int lockAtLevel = 0;             // level N isn't placed: the lock waits at its line instead; 0 = off
     int escapeFromLevel = 0;     // from this fill on the target drops to escapeProfit; 0 = off
     double escapeProfit = 0.50;  // $ net, after every cost
     double accountBalance = 0.0; // $, for the risk calculator

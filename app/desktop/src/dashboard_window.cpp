@@ -496,6 +496,7 @@ void clampSettings(LiveSettings& s) {
     s.lockAtLoss = std::max(0.0, s.lockAtLoss);
     s.lockAtLossPercent = std::clamp(s.lockAtLossPercent, 0.0, 100.0);
     s.closeLockedAfterSeconds = std::max(0, s.closeLockedAfterSeconds);
+    s.lockAtLevel = std::clamp(s.lockAtLevel, 0, 100);
 }
 
 
@@ -1045,7 +1046,7 @@ void DashboardWindow::renderPages(LiveController& controller, const std::optiona
                                              : marginLevelColor(snap->marginLevelNow,
                                                                 snap->settings.recovery.guardLockMarginLevel,
                                                                 snap->settings.recovery.guardStopMarginLevel)},
-        {Tab::News, "News", market.phase == MarketPhase::NewsPause ? "guard" : "", kRed},
+        {Tab::News, "News & hours", market.phase == MarketPhase::NewsPause ? "guard" : "", kRed},
         {Tab::Audit, "Audit", !snap ? "" : worst >= 2 ? "!" : worst == 1 ? "check" : "ok",
          worst >= 2 ? kRed : worst == 1 ? kAmber : kGreen},
         {Tab::Volume, "Volume", "", kGrey},
@@ -1616,11 +1617,9 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
-    ImGui::BeginDisabled(!settingsLoaded_);
     ImGui::Spacing();
-    ImGui::TextDisabled("Lot sizes, loss limits, balance, margin guards, lock and escape: the Risk & capital page.");
-    renderMarketSettings();
-    ImGui::EndDisabled();
+    ImGui::TextDisabled("Lot sizes, loss limits, lock, margin guards and escape: the Risk & capital page. Market "
+                        "hours and the news guard: the News & hours page.");
     renderSaveBar(controller, snap, connected);
     endPage();
 }
@@ -3260,18 +3259,15 @@ void DashboardWindow::renderMarketStrip(LiveController& controller, const std::o
         ImGui::SetItemTooltip("At %s (your time).", muuk::ctrader_fix::formatLocalDateTime(m.nextChangeUtcMs).c_str());
     }
 
-    bool guard = s.market.newsGuard;
-    row.place(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("News guard").x);
-    if (ImGui::Checkbox("News guard", &guard)) {
-        quickApply(controller, snap, connected, [guard](LiveSettings& x) { x.market.newsGuard = guard; });
-    }
-    ImGui::SetItemTooltip("On: no new range from %d min before to %d min after %s%s news for %s (ForexFactory "
-                          "calendar). Off: news is ignored.",
-                          s.market.newsMinutesBefore, s.market.newsMinutesAfter, s.market.newsHigh ? "red" : "",
-                          s.market.newsMedium ? (s.market.newsHigh ? " and orange" : "orange") : "",
-                          s.market.newsCurrencies.c_str());
+    // Status only: the news guard is set on the News & hours page (a click opens it).
+    const bool guard = s.market.newsGuard;
+    row.pill(guard ? "News guard on" : "News guard off", guard ? kGreen : kAmber);
+    if (ImGui::IsItemClicked()) selectTab_ = Tab::News;
+    ImGui::SetItemTooltip("%s Set it on the News & hours page (click).",
+                          guard ? "No new range around guarded news (ForexFactory calendar)."
+                                : "News is ignored: ranges open straight through it.");
     if (!guard) {
-        row.text("news ignored", kAmber);
+        // Nothing more to show.
     } else if (m.hasNextNews) {
         const NewsEvent& n = m.nextNews;
         const int64_t to = n.utcMs - now;
@@ -3315,11 +3311,17 @@ void DashboardWindow::renderNewsTab(LiveController& controller, const std::optio
     const MarketHoursConfig& mc = s.market;
     const int64_t now = muuk::ctrader_fix::utcNowMs();
 
-    bool guard = mc.newsGuard;
-    if (ImGui::Checkbox("News guard", &guard)) {
-        quickApply(controller, snap, connected, [guard](LiveSettings& x) { x.market.newsGuard = guard; });
+    // Every market-hours and news setting lives here (and only here).
+    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    if (ImGui::CollapsingHeader("Market hours & news settings")) {
+        ImGui::BeginDisabled(!settingsLoaded_);
+        renderMarketSettings();
+        ImGui::EndDisabled();
+        renderSaveBar(controller, snap, connected);
+        ImGui::Spacing();
     }
-    ImGui::SameLine();
+
+    const bool guard = mc.newsGuard;
     ImGui::AlignTextToFramePadding();
     if (guard) {
         ImGui::TextDisabled("No new range from %d min before to %d min after %s%s%s news for %s. A running range keeps "
@@ -3635,7 +3637,7 @@ void DashboardWindow::renderSessionStats() {
     }
 }
 
-void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnapshot& snap, bool connected) {
+void DashboardWindow::renderTargetBar(LiveController& /*controller*/, const LiveSnapshot& snap, bool /*connected*/) {
     const LiveSettings& s = snap.settings;
     const double net = floatingPnl(snap);
     const double target = snap.targetNow > 0.0 ? snap.targetNow : s.profitTarget;
@@ -3704,39 +3706,26 @@ void DashboardWindow::renderTargetBar(LiveController& controller, const LiveSnap
     ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
                                         ImVec2(FLT_MAX, std::max(200.0f, ImGui::GetIO().DisplaySize.y - 24.0f)));
     if (ImGui::BeginPopup("target_popup")) {
+        // What the target is right now and why; it is set on the Settings page only.
         withFont(boldFont_, [] { ImGui::TextUnformatted("Profit target"); });
-        const std::optional<LiveSnapshot> opt(snap);
-        bool autoOn = s.autoTarget;
-        if (ImGui::Checkbox("Auto - from what the open positions cost", &autoOn)) {
-            quickApply(controller, opt, connected, [autoOn](LiveSettings& x) { x.autoTarget = autoOn; });
-        }
-        ImGui::TextDisabled("Target = a multiple of the cost (commission open + close + spread) of every open\n"
-                            "position: small for one 0.01 lot, bigger with every fill.\n"
-                            "Level 20 = 200%% (twice the cost), 40 = 240%%, 60 = 280%%, 80 = 320%%, 100 = 360%%.");
-        ImGui::BeginDisabled(!autoOn);
-        for (int level : {20, 40, 60, 80, 100}) {
-            if (level != 20) ImGui::SameLine();
-            const std::string label = std::to_string(level);
-            const int p = levelPercent(level);
-            if (ImGui::RadioButton(label.c_str(), targetLevel(s.autoTargetPercent) == level)) {
-                quickApply(controller, opt, connected, [p](LiveSettings& x) { x.autoTargetPercent = p; });
-            }
-            ImGui::SetItemTooltip("Level %d: target = %d%% of the cost", level, p);
-        }
-        ImGui::EndDisabled();
-        const double cost = snap.live.commission + 2.0 * snap.live.spread;
-        ImGui::Separator();
-        ImGui::Text("Cost of the open positions now: %s", money(cost).c_str());
-        ImGui::TextDisabled("  commission %s + spread %s", money(snap.live.commission).c_str(),
-                            money(2.0 * snap.live.spread).c_str());
-        if (autoOn) {
-            ImGui::Text("Target now: %s  (level %d = %d%% of the cost%s)", money(target).c_str(),
-                        targetLevel(s.autoTargetPercent), s.autoTargetPercent,
-                        snap.positions.empty() ? ", set by the first fill" : "");
+        if (snap.escapeActive) {
+            ImGui::Text("Break-even target from level %d: %s", s.escapeFromLevel, money(target).c_str());
+        } else if (s.lastLotTarget) {
+            ImGui::Text("Last lot x $%.2f move: %s  (level %d)", s.lastLotTargetMove, money(target).c_str(),
+                        snap.filledLevel);
+        } else if (s.autoTarget) {
+            ImGui::Text("Auto: %d%% of the open positions' cost = %s", s.autoTargetPercent, money(target).c_str());
         } else {
-            ImGui::Text("Fixed target: %s  (Settings > Profit target)", money(s.profitTarget).c_str());
+            ImGui::Text("Fixed: %s", money(s.profitTarget).c_str());
         }
-        ImGui::TextDisabled("Applies at once, also to the running basket. Saved to your config.");
+        const double cost = snap.live.commission + 2.0 * snap.live.spread;
+        ImGui::TextDisabled("Cost of the open positions now: %s (commission %s + spread %s)", money(cost).c_str(),
+                            money(snap.live.commission).c_str(), money(2.0 * snap.live.spread).c_str());
+        ImGui::Spacing();
+        if (glass::button("Change it in Settings", kBlue)) {
+            selectTab_ = Tab::Settings;
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 }
@@ -4059,6 +4048,12 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                       "The same lock as a share of the account balance: 25 = lock once the basket's net reaches -25% "
                       "of the balance. With an amount above too, whichever is reached first. 0 = off.",
                       &s.lockAtLossPercent, 1.0, "%.1f", &settingsDirty_);
+        settingInt("Lock at level",
+                   "Level N is never placed: when the basket gets there, a stop order for its net lots (a lock) waits "
+                   "at that line instead. If the price reaches it the loss is frozen (and closed after the seconds "
+                   "below); if the price turns back first the basket closes at break-even. The table below marks the "
+                   "level. 0 = off.",
+                   &s.lockAtLevel, &settingsDirty_);
         settingInt("  close it after (s)",
                    "Once the lock holds (buys = sells), the whole locked basket is closed this many seconds later -- "
                    "the loss taken at its frozen amount -- and with Auto-open on a new range follows. 0 = off: it "
@@ -4260,9 +4255,13 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
             if (stopOut) note = "stop-out";
             else if (marginCall) note = "margin call";
             if (s.escapeFromLevel > 0 && r.level >= s.escapeFromLevel) note += std::string(note.empty() ? "" : ", ") + "escape";
-            if (guardLevel > 0 && r.level == guardLevel) {
-                note = "guard: lock stop";
-            } else if (guardLevel > 0 && r.level > guardLevel) {
+            // The first level held back -- by Lock at level, or by the margin guard.
+            const int lockLevel = s.lockAtLevel;
+            const int heldAt = lockLevel > 0 && (guardLevel == 0 || lockLevel <= guardLevel) ? lockLevel : guardLevel;
+            if (heldAt > 0 && r.level == heldAt) {
+                note = heldAt == lockLevel ? "LOCK AT LEVEL: lock stop here" : "guard: lock stop";
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(withAlpha(kAmber, 0.14f)));
+            } else if (heldAt > 0 && r.level > heldAt) {
                 note = "not reached";
             }
             double lockAt = s.lockAtLoss;
@@ -4298,6 +4297,24 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
                                money(-g.worstLoss).c_str());
             ImGui::PopStyleColor();
         }
+    }
+    if (s.lockAtLevel > 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        if (s.lockAtLevel <= static_cast<int>(rows.size())) {
+            const auto& g = rows[static_cast<std::size_t>(s.lockAtLevel - 1)];
+            ImGui::TextWrapped("Lock at level %d: that level (%.2f lot) is never placed -- a lock of %.2f lot waits at "
+                               "its line, freezing the basket near %s%s. If the price turns back first, it closes at "
+                               "break-even.",
+                               s.lockAtLevel, g.lot,
+                               std::fabs(g.netLots - (s.lockAtLevel % 2 == 1 ? g.lot : -g.lot)),
+                               money(-g.worstLoss).c_str(),
+                               s.closeLockedAfterSeconds > 0
+                                   ? (", then closed " + std::to_string(s.closeLockedAfterSeconds) + " s later").c_str()
+                                   : " until you close it");
+        } else {
+            ImGui::TextWrapped("Lock at level %d: deeper than this table (Max orders / 16 levels).", s.lockAtLevel);
+        }
+        ImGui::PopStyleColor();
     }
 
     renderReverseCalculator(snap, rows);

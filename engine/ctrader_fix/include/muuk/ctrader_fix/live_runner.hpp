@@ -764,6 +764,12 @@ private:
     // its fill would be under guardLockMarginLevel -- then a lock stop was
     // placed instead (or the lock done at market) and the level is dropped.
     bool guardNextOrderLocked(const muuk::core::PlaceOrderCommand& place);
+    // Instead of `place` (the next level): cancel the pending orders, stop
+    // the cycle and put a stop order for the net lots (a lock) at its line --
+    // or lock at market if the price is already past it. `lockLevel`: held
+    // by Lock at level N (else by the margin guard).
+    bool holdNextLevelLocked(const muuk::core::PlaceOrderCommand& place, const std::string& what, bool lockLevel);
+    bool guardLockIsLevel_ = false;  // the waiting lock stop is the lock level's, not the margin guard's
     // A fill of one of the runner's own orders (lock stop, escape, re-lock).
     void onRecoveryFillLocked(muuk::core::OrderId orderId);
     void manageEscapeLocked(double net);

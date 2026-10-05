@@ -1235,6 +1235,32 @@ TEST_CASE("Lock & pause at a share of the balance: 25% of $2 locks at -0.50, and
     bot.rethrow();
 }
 
+TEST_CASE("Lock at level 2: level 2 isn't placed -- a lock for the net lots waits at its line, and its fill locks") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.lockAtLevel = 2;
+    cfg.connection.manualCloseCooldownSeconds = 0;
+    Bot bot(cfg, freshStateFile("lock_at_level"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+
+    // Instead of level 2 (Sell Stop 0.02 @ 4336): a Sell Stop for the net 0.01 at the same line.
+    const FixMessage lock = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(lock.getInt(tag::OrdType) == 3);
+    REQUIRE(lock.getInt(tag::Side) == 2);
+    REQUIRE(lock.getDouble(tag::StopPx) == Catch::Approx(4336.00));
+    REQUIRE(lock.getDouble(tag::OrderQty) == Catch::Approx(1.0));
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().guardLockPending; }));
+
+    sendFill(server, seq++, lock.getString(tag::ClOrdID), 4336.00, 1.0, "P2");
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().locked; }));
+    REQUIRE_FALSE(bot.runner().snapshot().currentBasket->guardHeld);  // the lock level, not the margin guard
+
+    bot.finish();
+    bot.rethrow();
+}
+
 TEST_CASE("Lock, then close: a lock that holds closes the whole basket the set seconds later") {
     MockFixServer server;
     LiveConfig cfg = resumeConfig(server);

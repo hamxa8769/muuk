@@ -169,6 +169,20 @@ On a ~19,000 USC account that is a margin level near 2,000%. The broker's margin
 - **Close it after (s)**, under Lock & pause. Once a lock holds (buys = sells), the whole locked basket closes this many seconds later. The loss is taken at its frozen amount, and with Auto-open on a new range follows. 0 = off: it waits for you.
 - **Max orders / Max lot: 0 = no limit.** On MT5 the broker's own order limit and largest lot still apply, because orders past them would only be refused.
 
+### Lock at level, and one page per kind of setting (5 Oct)
+
+- **Lock at level N** (Risk & capital → Loss limits). Level N is never placed: when the basket gets there, a stop order for its net lots (a lock) waits at that line instead.
+  - If the price reaches the line, the loss freezes, and with *close it after (s)* the basket closes that many seconds later.
+  - If the price turns back first, the basket closes at break-even.
+  - The worst-case table highlights that row ("LOCK AT LEVEL") and says what it freezes.
+  - 0 = off.
+- **Every setting has one home:**
+  - **Settings:** account and strategy (range, target, entry, cooldowns, commission).
+  - **Risk & capital:** lots, loss limits, locks, guards, escape.
+  - **News & hours:** market hours and the news guard, above the news list.
+
+  The header now only *shows* the news guard (click it to go there). The target gear under the chart shows the target and links to Settings.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

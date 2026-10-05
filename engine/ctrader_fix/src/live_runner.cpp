@@ -1399,14 +1399,26 @@ void LiveRunner::resetRecoveryLocked() {
 
 bool LiveRunner::guardNextOrderLocked(const PlaceOrderCommand& place) {
     const RecoveryConfig& rc = config_.connection.recovery;
-    if (!guardsOnLocked() || rc.guardLockMarginLevel <= 0.0 || locked_ || guardLockOrderId_ != 0) return false;
-    if (openLegs_.empty() || !latestBid_ || !latestAsk_ || !engine_ || !tradeSession_) return false;
+    if (locked_ || guardLockOrderId_ != 0) return false;
+    if (openLegs_.empty() || !engine_ || !tradeSession_) return false;
     if (engine_->status() != EngineStatus::Active) return false;
     const SymbolSpec& spec = config_.strategy.symbol;
-    const BookLots book = bookLotsLocked();
     const bool buy = place.side == OrderSide::BuyStop;
     const double lot = place.volume.toDouble(spec);
     const double line = place.price.toDouble(spec);
+
+    // Lock at level N: level N is never placed -- the lock waits at its line.
+    const int lockLevel = config_.connection.lockAtLevel;
+    if (lockLevel > 0 && place.sequenceIndex >= lockLevel) {
+        return holdNextLevelLocked(place, "level " + std::to_string(place.sequenceIndex) + " (" + (buy ? "Buy" : "Sell") +
+                                              " Stop " + lotsTextOf(place.volume.steps, spec) + " lot @ " +
+                                              priceTextOf(line) + ") is the lock level (Lock at level " +
+                                              std::to_string(lockLevel) + ")",
+                                   true);
+    }
+
+    if (!guardsOnLocked() || rc.guardLockMarginLevel <= 0.0 || !latestBid_ || !latestAsk_) return false;
+    const BookLots book = bookLotsLocked();
     const double spread = *latestAsk_ - *latestBid_;
     const double newCost = roundTurnCommissionMoney(lot, line, spec, config_.strategy.costs) +
                            spread / 2.0 * spec.tickValue / spec.tickSize * lot;
@@ -1415,14 +1427,22 @@ bool LiveRunner::guardNextOrderLocked(const PlaceOrderCommand& place) {
                                      spec.contractSize, marginRuleLocked());
     const double level = marginLevelPercent(equity, margin);
     if (level >= rc.guardLockMarginLevel) return false;
+    return holdNextLevelLocked(place,
+                               "level " + std::to_string(place.sequenceIndex) + " (" + (buy ? "Buy" : "Sell") +
+                                   " Stop " + lotsTextOf(place.volume.steps, spec) + " lot @ " + priceTextOf(line) +
+                                   ") would leave the margin level at about " + pctText(std::max(0.0, level)) +
+                                   " (guard " + pctText(rc.guardLockMarginLevel) + ")",
+                               false);
+}
 
+bool LiveRunner::holdNextLevelLocked(const PlaceOrderCommand& place, const std::string& what, bool lockLevel) {
+    const RecoveryConfig& rc = config_.connection.recovery;
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const BookLots book = bookLotsLocked();
     const RangeConfig range = engine_->currentRange();
     guardRangeLow_ = range.lowerBound;
     guardRangeHigh_ = range.upperBound;
-    const std::string what = "level " + std::to_string(place.sequenceIndex) + " (" + (buy ? "Buy" : "Sell") +
-                             " Stop " + lotsTextOf(place.volume.steps, spec) + " lot @ " + priceTextOf(line) +
-                             ") would leave the margin level at about " + pctText(std::max(0.0, level)) + " (guard " +
-                             pctText(rc.guardLockMarginLevel) + ")";
+    guardLockIsLevel_ = lockLevel;
     cancelPendingLocked();
     engine_->stopCycle();
     cooldownActive_ = false;
@@ -1445,7 +1465,7 @@ bool LiveRunner::guardNextOrderLocked(const PlaceOrderCommand& place) {
     }
     sendStopOrderLocked(lk, 0);
     guardLockOrderId_ = lk.id;
-    if (currentBasket_) currentBasket_->guardHeld = true;
+    if (currentBasket_ && !lockLevel) currentBasket_->guardHeld = true;
     auditEventLocked(8, 1,
                      what + " -- not placed. A lock stop " + (lk.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
                          lotsTextOf(lk.volume.steps, spec) + " lot waits at that line instead" +
@@ -1468,7 +1488,7 @@ void LiveRunner::onRecoveryFillLocked(OrderId orderId) {
             currentBasket_->locked = true;
             currentBasket_->lockedLoss = lockedLoss_;
         }
-        setCloseReason("locked by the margin guard");
+        setCloseReason(guardLockIsLevel_ ? "locked at the lock level" : "locked by the margin guard");
         markDirty();
         auditEventLocked(8, 2,
                          "the lock stop filled: buys = sells, the loss is frozen at " + usdText(lockedLoss_) +

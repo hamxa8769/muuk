@@ -297,6 +297,8 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
                    (s.closeLockedAfterSeconds > 0 ? ", closed " + std::to_string(s.closeLockedAfterSeconds) + " s later"
                                                   : std::string())
              : std::string("off")},
+        {"Lock at level", s.lockAtLevel > 0 ? "level " + std::to_string(s.lockAtLevel) + " (a lock instead of it)"
+                                            : std::string("off")},
         {"Break-even target", s.escapeFromLevel > 0 ? "from level " + std::to_string(s.escapeFromLevel) + ", close at " +
                                                           amount(s.escapeProfit)
                                                     : std::string("off")},
