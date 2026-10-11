@@ -36,26 +36,26 @@ TEST_CASE("Sessions open on their own city's clock") {
     REQUIRE(sessionLabelAt(utc(2026, 9, 26, 12, 0)) == "Market closed");   // Saturday
 }
 
-TEST_CASE("Pause from 15 min before to 1 min after a session ends") {
-    // London closes 17:00 BST = 16:00 UTC.
-    REQUIRE(at(2026, 9, 24, 15, 44).phase == MarketPhase::Open);
-    const MarketStatus p = at(2026, 9, 24, 15, 50);
+TEST_CASE("Sessions ending don't pause anything -- only gold's own close and reopen do") {
+    // London closes 17:00 BST = 16:00 UTC, Tokyo 18:00 JST = 09:00 UTC: trading goes on.
+    REQUIRE(at(2026, 9, 24, 15, 55).phase == MarketPhase::Open);
+    REQUIRE(at(2026, 9, 23, 8, 55).phase == MarketPhase::Open);
+    // Gold closes 17:00 EDT = 21:00 UTC: no new range in the 15 min before.
+    REQUIRE(at(2026, 9, 24, 20, 44).phase == MarketPhase::Open);
+    const MarketStatus p = at(2026, 9, 24, 20, 50);
     REQUIRE(p.phase == MarketPhase::SessionPause);
-    REQUIRE(p.label == "Pause: London close");
+    REQUIRE(p.label == "Pause: market closing");
     REQUIRE_FALSE(p.canOpenRange);
-    REQUIRE(at(2026, 9, 24, 16, 0).phase == MarketPhase::SessionPause);
-    REQUIRE(at(2026, 9, 24, 16, 1).phase == MarketPhase::Open);
-    // Tokyo closes 18:00 JST = 09:00 UTC.
-    REQUIRE(at(2026, 9, 23, 8, 50).label == "Pause: Tokyo close");
-    // Unticked: no pause.
+    // Switched off: no pause before the close.
     MarketHoursConfig c;
-    c.pauseAtEndOf[static_cast<int>(Session::London)] = false;
-    REQUIRE(at(2026, 9, 24, 15, 50, c).phase == MarketPhase::Open);
+    c.pauseAroundClose = false;
+    REQUIRE(at(2026, 9, 24, 20, 50, c).phase == MarketPhase::Open);
+    REQUIRE(at(2026, 9, 24, 22, 0, c).phase == MarketPhase::Open);  // nor right after the reopen
 }
 
 TEST_CASE("Gold's daily break, the reopening minute and the weekend") {
     // New York close 17:00 EDT = 21:00 UTC: pause before, then the break.
-    REQUIRE(at(2026, 9, 24, 20, 50).label == "Pause: New York close");
+    REQUIRE(at(2026, 9, 24, 20, 50).label == "Pause: market closing");
     const MarketStatus brk = at(2026, 9, 24, 21, 30);
     REQUIRE(brk.phase == MarketPhase::DailyBreak);
     REQUIRE_FALSE(brk.marketOpen);
@@ -77,18 +77,19 @@ TEST_CASE("Gold's daily break, the reopening minute and the weekend") {
     REQUIRE(wk.canOpenRange);
 }
 
-TEST_CASE("Only the ticked sessions are traded") {
-    MarketHoursConfig c;
-    c.tradeIn = {false, false, true, false};  // London only
-    REQUIRE(at(2026, 9, 24, 3, 0, c).phase == MarketPhase::OffHours);
-    REQUIRE(at(2026, 9, 24, 10, 0, c).phase == MarketPhase::Open);
+TEST_CASE("Every session is traded, also between sessions") {
+    REQUIRE(at(2026, 9, 24, 3, 0).phase == MarketPhase::Open);    // Sydney + Tokyo
+    REQUIRE(at(2026, 9, 24, 10, 0).phase == MarketPhase::Open);   // London
+    REQUIRE(at(2026, 9, 24, 23, 30).phase == MarketPhase::Open);  // between New York and Sydney
+    // Friday: the pause before the weekend close.
+    REQUIRE(at(2026, 9, 25, 20, 50).label == "Pause: market closing");
 }
 
 TEST_CASE("The next change is found, with its reason") {
     const MarketStatus s = evaluateMarket(utc(2026, 9, 24, 15, 0), MarketHoursConfig{});
     REQUIRE(s.canOpenRange);
-    REQUIRE(s.nextChangeUtcMs == utc(2026, 9, 24, 15, 45));
-    REQUIRE(s.nextChangeLabel == "Pause: London close");
+    REQUIRE(s.nextChangeUtcMs == utc(2026, 9, 24, 20, 45));
+    REQUIRE(s.nextChangeLabel == "Pause: market closing");
     const MarketStatus w = evaluateMarket(utc(2026, 9, 26, 12, 0), MarketHoursConfig{});
     REQUIRE(w.nextChangeUtcMs == utc(2026, 9, 27, 22, 1));
     REQUIRE(w.nextChangeLabel == "Trading resumes");
@@ -134,8 +135,7 @@ TEST_CASE("ForexFactory calendar: parsed to UTC, and the news guard follows impa
 
 TEST_CASE("Market hours settings survive a save and load") {
     MarketHoursConfig c;
-    c.tradeIn = {false, true, true, true};
-    c.pauseAtEndOf = {true, false, true, true};
+    c.pauseAroundClose = false;
     c.pauseMinutesBefore = 20;
     c.newsGuard = false;
     c.newsMedium = true;
@@ -147,8 +147,7 @@ TEST_CASE("Market hours settings survive a save and load") {
     n.manual = true;
     c.news.push_back(n);
     const MarketHoursConfig back = marketHoursFromJson(marketHoursToJson(c));
-    REQUIRE(back.tradeIn == c.tradeIn);
-    REQUIRE(back.pauseAtEndOf == c.pauseAtEndOf);
+    REQUIRE_FALSE(back.pauseAroundClose);
     REQUIRE(back.pauseMinutesBefore == 20);
     REQUIRE_FALSE(back.newsGuard);
     REQUIRE(back.newsMedium);

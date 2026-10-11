@@ -183,6 +183,15 @@ On a ~19,000 USC account that is a margin level near 2,000%. The broker's margin
 
   The header now only *shows* the news guard (click it to go there). The target gear under the chart shows the target and links to Settings.
 
+### Pauses only around the market's close and reopen (12 Oct)
+
+The trading sessions (Sydney, Tokyo, London, New York) opening and closing no longer pause anything, and every session is traded. New ranges wait only:
+- **before gold closes** at 17:00 New York time (the daily one-hour break, and the weekend on Friday): *minutes before the close*, default 15;
+- **after it reopens** at 18:00 New York: *minutes after the reopen*, default 1;
+- around guarded news.
+
+These are on the News & hours page ("Pause around the close"), which also shows the close and reopen in your own time. In Pakistan that is 2:00 AM and 3:00 AM while New York is on summer time (until 1 Nov), then 3:00 AM and 4:00 AM.
+
 ### Layout
 
 - **No more cut-off text.** Every page wraps its text at the right edge, and the History rows put their facts on a second line when there is no room.

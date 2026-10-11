@@ -33,11 +33,12 @@ struct NewsEvent {
 // only new ranges wait -- unless closeRangeAt says otherwise.
 struct MarketHoursConfig {
     bool enabled = true;
-    // Only open ranges while at least one of these sessions is open.
-    std::array<bool, kSessionCount> tradeIn{true, true, true, true};
-    // Pause from pauseMinutesBefore before to pauseMinutesAfter after the
-    // end of each ticked session (spreads widen and prices jump there).
-    std::array<bool, kSessionCount> pauseAtEndOf{true, true, true, true};
+    // Pause around gold's own close and reopen only (17:00 / 18:00 New York:
+    // the daily break, and the weekend): no new range from pauseMinutesBefore
+    // before it closes, nor in the first pauseMinutesAfter after it reopens --
+    // spreads widen and prices jump there. The trading sessions (Sydney,
+    // Tokyo, London, New York) opening and closing don't pause anything.
+    bool pauseAroundClose = true;
     int pauseMinutesBefore = 15;
     int pauseMinutesAfter = 1;
     // News guard: pause newsMinutesBefore .. newsMinutesAfter around each
@@ -64,7 +65,7 @@ enum class MarketPhase {
     DailyBreak,    // XAUUSD's daily break, 17:00-18:00 New York time
     SessionPause,  // around a session's end
     NewsPause,     // around a news release
-    OffHours,      // none of the chosen sessions is open
+    OffHours,      // (no longer used: every session is traded)
 };
 [[nodiscard]] const char* phaseName(MarketPhase p);
 

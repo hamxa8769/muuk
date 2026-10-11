@@ -99,23 +99,14 @@ int minutesSinceReopen(int64_t utcMs) {
     return ny.minute - 18 * 60;
 }
 
-// The ticked session whose end (with the pause margins) contains utcMs, or -1.
-int sessionEndPause(int64_t utcMs, const MarketHoursConfig& c) {
-    for (int i = 0; i < kSessionCount; ++i) {
-        if (!c.pauseAtEndOf[i]) continue;
-        const Session s = static_cast<Session>(i);
-        const int off = sessionUtcOffsetMinutes(s, utcMs);
-        const LocalTime lt = localAt(utcMs, off);
-        for (int k = -1; k <= 1; ++k) {
-            const int64_t day = lt.day + k;
-            if (!weekdayMonFri(weekday(day))) continue;
-            const int64_t endUtc = day * kDay + kHours[i].closeHour * kHour - off * kMinute;
-            if (utcMs >= endUtc - c.pauseMinutesBefore * kMinute && utcMs < endUtc + c.pauseMinutesAfter * kMinute) {
-                return i;
-            }
-        }
-    }
-    return -1;
+// Milliseconds until gold closes -- 17:00 New York, Monday to Friday (the
+// daily break, or the weekend on Friday) -- or -1 when it's past that today.
+int64_t msUntilClose(int64_t utcMs) {
+    const int off = newYorkUtcOffsetMinutes(utcMs);
+    const LocalTime ny = localAt(utcMs, off);
+    if (!weekdayMonFri(ny.weekday) || ny.minute >= 17 * 60) return -1;
+    const int64_t closeUtc = ny.day * kDay + 17 * kHour - off * kMinute;
+    return closeUtc - utcMs;
 }
 
 std::string join(const std::vector<std::string>& parts) {
@@ -124,7 +115,6 @@ std::string join(const std::vector<std::string>& parts) {
     return out;
 }
 
-const char* kSessionKeys[kSessionCount] = {"sydney", "tokyo", "london", "newYork"};
 
 bool currencyListed(const std::string& list, const std::string& currency) {
     if (currency.empty()) return false;
@@ -278,12 +268,10 @@ MarketStatus evaluateMarket(int64_t utcMs, const MarketHoursConfig& c, const std
     } else if (!c.enabled) {
         set(MarketPhase::Open, "Open", "Market hours filter is off.");
     } else {
-        const int endPause = sessionEndPause(utcMs, c);
+        // Only the market's own close and reopen pause new ranges -- the
+        // trading sessions starting and ending don't.
+        const int64_t toClose = msUntilClose(utcMs);
         const int sinceReopen = minutesSinceReopen(utcMs);
-        bool anyChosenOpen = false;
-        for (int i = 0; i < kSessionCount; ++i) {
-            if (c.tradeIn[i] && sessionOpen(static_cast<Session>(i), utcMs)) anyChosenOpen = true;
-        }
         if (news) {
             set(MarketPhase::NewsPause,
                 "News guard: " + (news->currency.empty() ? "" : news->currency + " ") +
@@ -291,17 +279,14 @@ MarketStatus evaluateMarket(int64_t utcMs, const MarketHoursConfig& c, const std
                 "No new range from " + std::to_string(c.newsMinutesBefore) + " min before to " +
                     std::to_string(c.newsMinutesAfter) + " min after the release at " +
                     formatLocalDateTime(news->utcMs) + ".");
-        } else if (endPause >= 0) {
-            const char* name = sessionName(static_cast<Session>(endPause));
-            set(MarketPhase::SessionPause, std::string("Pause: ") + name + " close",
-                std::string("No new range from ") + std::to_string(c.pauseMinutesBefore) + " min before to " +
-                    std::to_string(c.pauseMinutesAfter) + " min after the " + name + " session ends.");
-        } else if (c.pauseAtEndOf[static_cast<int>(Session::NewYork)] && sinceReopen >= 0 &&
-                   sinceReopen < c.pauseMinutesAfter) {
+        } else if (c.pauseAroundClose && toClose >= 0 && toClose <= c.pauseMinutesBefore * kMinute) {
+            set(MarketPhase::SessionPause, "Pause: market closing",
+                "No new range in the last " + std::to_string(c.pauseMinutesBefore) +
+                    " min before gold closes (17:00 New York: the daily break, or the weekend on Friday).");
+        } else if (c.pauseAroundClose && sinceReopen >= 0 && sinceReopen < c.pauseMinutesAfter) {
             set(MarketPhase::SessionPause, "Pause: market reopening",
-                "The first " + std::to_string(c.pauseMinutesAfter) + " min after the daily reopen.");
-        } else if (!anyChosenOpen) {
-            set(MarketPhase::OffHours, "Outside trading hours", "None of the sessions ticked in Settings is open.");
+                "No new range in the first " + std::to_string(c.pauseMinutesAfter) +
+                    " min after gold reopens (18:00 New York).");
         } else {
             set(MarketPhase::Open, "Open", "New ranges may open.");
         }
@@ -326,12 +311,6 @@ MarketStatus evaluateMarket(int64_t utcMs, const MarketHoursConfig& c, const std
 }
 
 nlohmann::json marketHoursToJson(const MarketHoursConfig& c) {
-    nlohmann::json tradeIn = nlohmann::json::object();
-    nlohmann::json pauseAt = nlohmann::json::object();
-    for (int i = 0; i < kSessionCount; ++i) {
-        tradeIn[kSessionKeys[i]] = c.tradeIn[i];
-        pauseAt[kSessionKeys[i]] = c.pauseAtEndOf[i];
-    }
     nlohmann::json news = nlohmann::json::array();
     for (const auto& n : c.news) news.push_back({{"utcMs", n.utcMs}, {"title", n.title}, {"currency", n.currency}});
     return {{"enabled", c.enabled},
@@ -339,8 +318,7 @@ nlohmann::json marketHoursToJson(const MarketHoursConfig& c) {
             {"newsHigh", c.newsHigh},
             {"newsMedium", c.newsMedium},
             {"newsCurrencies", c.newsCurrencies},
-            {"tradeIn", tradeIn},
-            {"pauseAtEndOf", pauseAt},
+            {"pauseAroundClose", c.pauseAroundClose},
             {"pauseMinutesBefore", c.pauseMinutesBefore},
             {"pauseMinutesAfter", c.pauseMinutesAfter},
             {"news", news},
@@ -357,10 +335,9 @@ MarketHoursConfig marketHoursFromJson(const nlohmann::json& j) {
     c.newsHigh = j.value("newsHigh", c.newsHigh);
     c.newsMedium = j.value("newsMedium", c.newsMedium);
     c.newsCurrencies = j.value("newsCurrencies", c.newsCurrencies);
-    for (int i = 0; i < kSessionCount; ++i) {
-        if (j.contains("tradeIn")) c.tradeIn[i] = j["tradeIn"].value(kSessionKeys[i], true);
-        if (j.contains("pauseAtEndOf")) c.pauseAtEndOf[i] = j["pauseAtEndOf"].value(kSessionKeys[i], true);
-    }
+    // Older files had per-session "tradeIn" / "pauseAtEndOf": no longer used
+    // (every session is traded; only the market's close and reopen pause).
+    c.pauseAroundClose = j.value("pauseAroundClose", c.pauseAroundClose);
     c.pauseMinutesBefore = std::max(0, j.value("pauseMinutesBefore", c.pauseMinutesBefore));
     c.pauseMinutesAfter = std::max(0, j.value("pauseMinutesAfter", c.pauseMinutesAfter));
     c.newsMinutesBefore = std::max(0, j.value("newsMinutesBefore", c.newsMinutesBefore));

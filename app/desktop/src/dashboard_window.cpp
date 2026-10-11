@@ -3488,37 +3488,41 @@ void DashboardWindow::renderMarketSettings() {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Market hours & news");
     });
-    ImGui::TextDisabled("When new ranges may open. A running range is always managed: target and stop loss keep "
-                        "working through any pause.");
+    ImGui::TextDisabled("When new ranges may open. Every trading session is traded; only gold's own close and "
+                        "reopen pause it (and the news guard). A running range is always managed: its target and "
+                        "stop loss keep working through any pause.");
     if (ImGui::Checkbox("Market hours filter", &mc.enabled)) settingsDirty_ = true;
-    ImGui::SetItemTooltip("Off: the bot opens ranges at any time the broker has prices (as before).");
+    ImGui::SetItemTooltip("Off: the bot opens ranges at any time the broker has prices -- also right before the "
+                          "close and during news.");
 
     ImGui::BeginDisabled(!mc.enabled);
     if (ImGui::BeginTable("market_settings", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.1f);
         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.6f);
-        auto sessionBoxes = [&](const char* label, const char* help, std::array<bool, 4>& flags, const char* idSuffix) {
+        settingCheck("Pause around the close",
+                     "Gold closes every day at 17:00 New York time (a one-hour break, and the weekend on Friday) and "
+                     "reopens at 18:00. Spreads widen and prices jump there, so no new range opens shortly before "
+                     "the close and right after the reopen.",
+                     &mc.pauseAroundClose, &settingsDirty_);
+        ImGui::BeginDisabled(!mc.pauseAroundClose);
+        settingInt("  minutes before the close", "No new range from this long before gold closes.",
+                   &mc.pauseMinutesBefore, &settingsDirty_);
+        settingInt("  minutes after the reopen", "No new range for this long after gold reopens.",
+                   &mc.pauseMinutesAfter, &settingsDirty_);
+        ImGui::EndDisabled();
+        {
+            // When that is, in the operator's own time.
+            const int64_t now = muuk::ctrader_fix::utcNowMs();
+            const auto ny = muuk::ctrader_fix::sessionWindow(Session::NewYork, now);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::SetItemTooltip("%s", help);
             ImGui::TableNextColumn();
-            for (int i = 0; i < muuk::ctrader_fix::kSessionCount; ++i) {
-                if (i > 0) ImGui::SameLine();
-                const std::string id =
-                    std::string(muuk::ctrader_fix::sessionName(static_cast<Session>(i))) + "##" + idSuffix;
-                if (ImGui::Checkbox(id.c_str(), &flags[i])) settingsDirty_ = true;
+            if (ny.closeUtcMs > 0) {
+                ImGui::TextDisabled("Close %s, reopen %s (your time)",
+                                    muuk::ctrader_fix::formatLocalDateTime(ny.closeUtcMs).substr(11).c_str(),
+                                    muuk::ctrader_fix::formatLocalDateTime(ny.closeUtcMs + 3'600'000).substr(11).c_str());
             }
-        };
-        sessionBoxes("Trade in", "New ranges only while at least one ticked session is open.", mc.tradeIn, "trade");
-        sessionBoxes("Pause at the end of",
-                     "Around the end of each ticked session (spreads widen, prices jump): no new range.",
-                     mc.pauseAtEndOf, "pause");
-        settingInt("  minutes before it ends", "Pause starts this long before the session ends.",
-                   &mc.pauseMinutesBefore, &settingsDirty_);
-        settingInt("  minutes after it ends", "Pause lasts this long after the session ends (and after the daily reopen).",
-                   &mc.pauseMinutesAfter, &settingsDirty_);
+        }
 
         ImGui::TableNextRow();
         ImGui::TableNextColumn();

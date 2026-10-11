@@ -2853,8 +2853,8 @@ void LiveRunner::updateMarket() {
             // closeRangeAt: close a running range as the pause starts.
             const bool weekendAhead =
                 st.phase == MarketPhase::Weekend ||
-                (st.phase == MarketPhase::SessionPause && st.label.find("New York") != std::string::npos &&
-                 newYorkWeekday(now) == 5);
+                (st.phase == MarketPhase::SessionPause && st.label.find("closing") != std::string::npos &&
+                 newYorkWeekday(now) == 5);  // the pause before Friday's close
             const bool wanted = cfg.closeRangeAt == "every" || (cfg.closeRangeAt == "weekend" && weekendAhead);
             const bool somethingOpen = engine_->status() == EngineStatus::Active || !openLegs_.empty() ||
                                        !placedOrderInfo_.empty() || !waitingOrders_.empty();
