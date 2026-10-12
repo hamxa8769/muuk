@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 
@@ -425,4 +426,29 @@ TEST_CASE("MT5 launcher: the bridge EA is built into Muuk, and installed MT5s ar
         REQUIRE(std::filesystem::is_regular_file(i.terminal));
         if (!i.dataDir.empty()) REQUIRE(std::filesystem::is_directory(i.dataDir / "MQL5"));
     }
+}
+
+TEST_CASE("MT5 launcher: the bridge chart is the account's own gold symbol (XAUUSD.c), not a plain XAUUSD it can't trade") {
+    namespace fs = std::filesystem;
+    const fs::path data = fs::temp_directory_path() / "muuk_known_gold_test";
+    fs::remove_all(data);
+    auto touch = [](const fs::path& f, const std::string& text = "x") {
+        fs::create_directories(f.parent_path());
+        std::ofstream(f, std::ios::binary) << text;
+    };
+    using muuk::mt5_bridge::knownGoldSymbol;
+    REQUIRE(knownGoldSymbol(data, "5550004", "JustMarkets-Demo6").empty());  // nothing known yet
+    // The server sent ticks only for XAUUSD.c (a failed XAUUSD chart leaves history, never ticks).
+    touch(data / "bases" / "JustMarkets-DEMO6" / "history" / "XAUUSD" / "2026.hcc");
+    touch(data / "bases" / "JustMarkets-DEMO6" / "ticks" / "XAUUSD.c" / "202610.tkc");
+    touch(data / "bases" / "JustMarkets-DEMO6" / "ticks" / "EURUSD.c" / "202610.tkc");
+    touch(data / "bases" / "Exness-MT5Real3" / "ticks" / "XAUUSDm" / "202610.tkc");
+    REQUIRE(knownGoldSymbol(data, "5550004", "JustMarkets-Demo6") == "XAUUSD.c");  // server name in any case
+    REQUIRE(knownGoldSymbol(data, "", "Exness-MT5Real3") == "XAUUSDm");
+    REQUIRE(knownGoldSymbol(data, "", "").empty());
+    // What the bridge itself traded on this login wins.
+    touch(data / "MQL5" / "Files" / "MuukBridge_5550004.symbol", "XAUUSD.cx\r\n");
+    REQUIRE(knownGoldSymbol(data, "5550004", "JustMarkets-Demo6") == "XAUUSD.cx");
+    REQUIRE(knownGoldSymbol(data, "42", "JustMarkets-Demo6") == "XAUUSD.c");  // another login
+    fs::remove_all(data);
 }

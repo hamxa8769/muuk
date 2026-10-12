@@ -43,6 +43,19 @@ void WriteStatus(const string text)
    FileClose(h);
 }
 
+// MQL5\Files\MuukBridge_<login>.symbol: this account's gold symbol, so the app
+// starts MT5 with the bridge on that chart next time (a chart of a symbol the
+// account can't trade never finishes loading, and the bridge never starts).
+void RememberSymbol()
+{
+   const long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   if(login <= 0 || g_sym == "") return;
+   const int h = FileOpen("MuukBridge_" + IntegerToString(login) + ".symbol", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+   FileWriteString(h, g_sym);
+   FileClose(h);
+}
+
 //+------------------------------------------------------------------+
 bool IsGold(const string name)
 {
@@ -142,6 +155,7 @@ void Connect()
    }
    g_lastOpenError = -1;
    WriteStatus("connected to pipe " + PipeName + ", symbol " + g_sym);
+   RememberSymbol();
    ArrayResize(g_out, 0);
    g_lastBid = 0.0;
    g_lastAsk = 0.0;

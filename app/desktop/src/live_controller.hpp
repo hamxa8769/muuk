@@ -73,6 +73,11 @@ public:
     void startMt5(const std::string& configPath, bool restart = false);
     // MT5 was open already but its bridge never connected.
     [[nodiscard]] bool mt5OpenWithoutBridge() const;
+    // Call every frame while the bot is connecting to MT5: when the bridge
+    // hasn't connected for a minute since MT5 was last started, starts MT5
+    // again with it (closing it the way its X button does if it's open), up
+    // to 3 times until the bridge connects.
+    void healMt5(const std::string& configPath);
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
@@ -189,6 +194,7 @@ private:
     void launchMt5(const muuk::ctrader_fix::LiveConfig& config, bool restart = false);
     std::atomic<bool> mt5WasAlreadyRunning_{false};
     std::chrono::steady_clock::time_point mt5LaunchAt_{};
+    int mt5Heals_ = 0;
     std::thread mt5Thread_;
     std::atomic<bool> mt5Starting_{false};
     bool mt5LaunchedThisStart_ = false;

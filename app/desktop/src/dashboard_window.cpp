@@ -760,6 +760,11 @@ void DashboardWindow::render(LiveController& controller) {
         mt5PreparedFor_ = configPathBuffer_.data();
         controller.startMt5(configPathBuffer_.data());
     }
+    // Connecting but the bridge never came: MT5 is closed, or the bridge
+    // didn't start on its chart -- start MT5 again with it, by itself.
+    if (!controller.demo() && account_.loaded && account_.platform == 1 && running && !connected) {
+        controller.healMt5(configPathBuffer_.data());
+    }
 
     // Basket history: (re)load it from the file next to the config when the
     // path changes (while connected, start() already loaded it), and copy

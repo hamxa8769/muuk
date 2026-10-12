@@ -54,6 +54,12 @@ struct Mt5StartResult {
 [[nodiscard]] Mt5StartResult restartMt5WithBridge(const Mt5StartOptions& options,
                                                   const std::function<void(const std::string&)>& log);
 
+// This account's gold symbol as MT5 already knows it, or empty: the one the
+// bridge traded on this login before (MQL5\Files\MuukBridge_<login>.symbol),
+// else the gold symbol this server last sent ticks for (bases\<server>\ticks).
+[[nodiscard]] std::string knownGoldSymbol(const std::filesystem::path& dataDir, const std::string& login,
+                                          const std::string& server);
+
 // The MuukBridge.mq5 source built into this program.
 [[nodiscard]] std::string bridgeEaSource();
 

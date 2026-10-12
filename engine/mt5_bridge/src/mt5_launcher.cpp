@@ -116,7 +116,43 @@ fs::path appDataTerminals() {
     return {};
 }
 
+std::string trimmed(std::string s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\0')) s.pop_back();
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\xEF' || s[i] == '\xBB' || s[i] == '\xBF')) ++i;  // UTF-8 BOM
+    return s.substr(i);
+}
+
 }  // namespace
+
+std::string knownGoldSymbol(const fs::path& dataDir, const std::string& login, const std::string& server) {
+    std::error_code ec;
+    // 1. What the bridge traded on this account before (it writes this file once connected).
+    if (!login.empty()) {
+        const std::string sym = trimmed(readFile(dataDir / "MQL5" / "Files" / ("MuukBridge_" + login + ".symbol")));
+        if (isGoldName(sym)) return sym;
+    }
+    // 2. The gold symbol this broker server has sent prices for (bases\<server>\ticks\<symbol>);
+    //    a symbol the account can't trade has no ticks.
+    if (server.empty()) return {};
+    const std::wstring want = lower(fs::path(server).wstring());
+    std::string best;
+    fs::file_time_type newest{};
+    for (const auto& srv : fs::directory_iterator(dataDir / "bases", ec)) {
+        if (!srv.is_directory() || lower(srv.path().filename().wstring()) != want) continue;
+        for (const auto& sym : fs::directory_iterator(srv.path() / "ticks", ec)) {
+            if (!sym.is_directory() || !isGoldName(sym.path().filename().string())) continue;
+            for (const auto& f : fs::directory_iterator(sym.path(), ec)) {
+                const auto t = f.last_write_time(ec);
+                if (!ec && (best.empty() || t > newest)) {
+                    newest = t;
+                    best = sym.path().filename().string();
+                }
+            }
+        }
+    }
+    return best;
+}
 
 std::string bridgeEaSource() { return std::string(reinterpret_cast<const char*>(kEaSource), sizeof(kEaSource)); }
 
@@ -272,28 +308,34 @@ Mt5StartResult startMt5WithBridge(const Mt5StartOptions& o, const std::function<
         return r;
     }
 
-    // 3. The chart: the gold symbol of a chart MT5 already has (its real name
-    //    on this broker), and no leftover bridge charts from earlier starts
+    // 3. The chart: this account's gold symbol under its real name on this
+    //    broker (XAUUSD.c, XAUUSDm...). A chart of a gold symbol the account
+    //    can't trade never finishes loading ("symbol synchronization timeout")
+    //    and the bridge never starts. Known from the bridge's last run on this
+    //    account, else the gold symbol the server sent prices for, else a gold
+    //    chart MT5 already has. Leftover bridge charts from earlier starts go
     //    (MT5 is closed now, so its profile files can be changed).
     std::string chartSymbol = o.chartSymbol;
     const bool autoChart = chartSymbol.empty() || chartSymbol == "XAUUSD" || chartSymbol == "auto";
+    const std::string known = autoChart ? knownGoldSymbol(*data, o.login, o.server) : std::string{};
     fs::file_time_type newest{};
+    std::string fromCharts;
     for (const auto& entry : fs::recursive_directory_iterator(*data / "MQL5" / "Profiles" / "Charts", ec)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".chr") continue;
         const std::string text = chartText(entry.path());
-        if (text.find("MuukBridge") != std::string::npos) {
-            fs::remove(entry.path(), ec);  // a bridge chart from an earlier start: the startup file adds a fresh one
-            continue;
-        }
         const std::string sym = chartSymbolOf(text);
         if (autoChart && isGoldName(sym)) {
             const auto t = entry.last_write_time(ec);
-            if (t > newest) {
+            if (fromCharts.empty() || t > newest) {
                 newest = t;
-                chartSymbol = sym;
+                fromCharts = sym;
             }
         }
+        if (text.find("MuukBridge") != std::string::npos) {
+            fs::remove(entry.path(), ec);  // a bridge chart from an earlier start: the startup file adds a fresh one
+        }
     }
+    if (autoChart) chartSymbol = !known.empty() ? known : fromCharts;
     if (chartSymbol.empty() || chartSymbol == "auto") chartSymbol = "XAUUSD";
     say("bridge chart: " + chartSymbol);
 

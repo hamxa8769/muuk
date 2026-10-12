@@ -36,6 +36,21 @@ MT5 keeps that chart, so the next time MT5 opens (by Muuk or by you) the
 bridge runs by itself. With MT5 already open and no bridge on a chart, close
 MT5 and press Connect (or "Start MT5" in the header).
 
+While the bot is connecting, Muuk heals this by itself: when the bridge hasn't
+connected for a minute after MT5 was started, Muuk closes MT5 (as its X button
+does) and starts it again with the bridge -- up to 3 times, counted again once
+the bridge connects.
+
+The bridge's chart is the account's **own** gold symbol (`XAUUSD.c` on a
+JustMarkets cent account, `XAUUSDm` on Exness...): the one the bridge traded on
+that login before (`MQL5\Files\MuukBridge_<login>.symbol`), else the gold
+symbol the broker server sent prices for (`bases\<server>\ticks`), else a gold
+chart MT5 already has. A chart of a gold symbol the account can't trade (a
+plain `XAUUSD` on a cent account) never loads -- MT5's journal says
+"initializing of MuukBridge failed ... (symbol synchronization timeout /
+execution canceled)" -- and the bridge never starts. `chartSymbol` in the
+config can still name one by hand.
+
 The account must be **hedging** (a netting account would close a position
 instead of locking it) -- the bridge refuses netting accounts.
 

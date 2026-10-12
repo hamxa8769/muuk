@@ -74,6 +74,22 @@ bool LiveController::mt5OpenWithoutBridge() const {
            std::chrono::steady_clock::now() - mt5LaunchAt_ > std::chrono::seconds(4);
 }
 
+void LiveController::healMt5(const std::string& configPath) {
+    if (!bridge_ || mt5Starting_.load()) return;
+    if (bridge_->status().connected) {
+        mt5Heals_ = 0;
+        return;
+    }
+    if (mt5Heals_ >= 3 || mt5LaunchAt_ == std::chrono::steady_clock::time_point{} ||
+        std::chrono::steady_clock::now() - mt5LaunchAt_ < std::chrono::seconds(60)) {
+        return;
+    }
+    ++mt5Heals_;
+    appendLog("[mt5] the bridge hasn't connected for a minute -- starting MetaTrader 5 again with it (try " +
+              std::to_string(mt5Heals_) + " of 3)");
+    startMt5(configPath, true);
+}
+
 void LiveController::startMt5(const std::string& configPath, bool restart) {
     try {
         const LiveConfig config = muuk::ctrader_fix::loadLiveConfig(configPath);
