@@ -35,6 +35,29 @@ MT5 sends its last 240 one-minute bars on every connect, so the ATR and the EMAs
 
 **How it was tested.** MT5's own one-minute history was replayed through a simulator of the bot's rules: the entry $0.05 beyond the price, lots x2, the last-lot target, break-even from level 8, and a lock at level 10 closed 30 s later. The history was JustMarkets XAUUSD.c, 2 January – 12 October 2026, 275,000 bars. The results are under "Backtest" below.
 
+**Backtest** (Jan–Oct 2026, a 0.26 spread on every broker's bars, USC from 0.01 x2):
+
+| Bars | Fixed $2 (before) | ATR x3, at least $3, target = half the range |
+|---|---|---|
+| JustMarkets XAUUSD.c | −63,046 | +17,823 |
+| BluVox XAUUSD.ecn | −73,338 | +19,652 |
+| Exness XAUUSD | −64,904 | +27,875 |
+| Exness XAUUSDm | −59,426 | −4,336 |
+
+**Suggested for the demo test:**
+- Range width 3.00;
+- Range from ATR on, 3.0 x ATR, widest range 15;
+- Target move = half the range on;
+- Trend filter and First order with the trend off.
+
+These are the suggestion because they are profitable on 3 of the 4 brokers' bars, while the fixed $2 range loses on all four. The trend filter and the trend side didn't help in this test.
+
+**Risks:**
+- The worst drawdown was 10,000–17,000 USC, and the worst basket about −5,300 USC (a wide range makes the level-10 lock dearer).
+- A one-minute bar hides the small swings inside it, so real results may be weaker.
+
+Test on demo first.
+
 ### Safety: lost fills, another trader on the account, this PC (16 October 2026)
 
 - **A fill that MT5 never reported is now recognised.** This happens when MT5 was offline at the moment it filled.
