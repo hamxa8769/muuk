@@ -124,6 +124,10 @@ void OnTimer()
    }
    if(g_pipe == INVALID_HANDLE)
    {
+      // Not before MT5 knows what a price move is worth (it says 0 until the
+      // symbol's first price after a start): the app would count P/L wrong.
+      if(SymbolInfoDouble(g_sym, SYMBOL_TRADE_TICK_VALUE) <= 0.0 || SymbolInfoDouble(g_sym, SYMBOL_TRADE_TICK_SIZE) <= 0.0)
+         return;
       if(GetTickCount64() - g_lastConnectTryMs > 1000) Connect();
       if(g_pipe == INVALID_HANDLE) return;
    }

@@ -452,3 +452,51 @@ TEST_CASE("MT5 launcher: the bridge chart is the account's own gold symbol (XAUU
     REQUIRE(knownGoldSymbol(data, "42", "JustMarkets-Demo6") == "XAUUSD.c");  // another login
     fs::remove_all(data);
 }
+
+TEST_CASE("MT5 bridge: a freshly started MT5 that doesn't know the tick value yet -- nothing trades until it does") {
+    GatewayConfig gc;
+    gc.pipeName = uniquePipe();
+    gc.fixPort = 0;
+    Mt5Gateway gateway(gc, [](const std::string&) {});
+    gateway.start();
+    FakeEa ea(gateway.pipeName());
+    // Exness XAUUSDc: 3 digits, 0.1 USC per 0.001 per lot -- but MT5 says 0 until its first price.
+    ea.send({{"t", "hello"},      {"login", "5550003"}, {"server", "Exness-MT5Real50"}, {"company", "Exness"},
+             {"currency", "USC"}, {"leverage", 2000},     {"hedging", true},              {"symbol", "XAUUSDc"},
+             {"digits", 3},       {"contract", 1},        {"volMin", 0.01},               {"volStep", 0.01},
+             {"volMax", 200},     {"hedgedMargin", 0},    {"magic", 770077},              {"tickSize", 0.001},
+             {"tickValue", 0.0},  {"marginPerLot", 0.0},  {"tradeMode", "demo"}});
+    ea.send({{"t", "account"}, {"balance", 18000.0}, {"equity", 18000.0}, {"margin", 0.0}, {"free", 18000.0},
+             {"costs", nlohmann::json::array()}});
+    REQUIRE(waitUntil([&] { return gateway.status().accountKnown; }));
+
+    LiveConfig cfg = mt5Config(gateway.fixPort());  // the config file's spec: 2 digits, 1.0 per 0.01
+    LiveRunner runner(cfg);
+    runner.setLogHandler([](const std::string&) {});
+    runner.setStateFile(freshState("mt5_tick_value_late"));
+    RunnerThread thread(runner);
+    const auto posReq = ea.waitFor("positions");
+    ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", nlohmann::json::array()}});
+    const auto ordReq = ea.waitFor("orders");
+    ea.send({{"t", "orders"}, {"req", ordReq.at("req")}, {"list", nlohmann::json::array()}});
+    ea.send({{"t", "tick"}, {"bid", 4336.400}, {"ask", 4336.450}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    REQUIRE(runner.snapshot().pendingOrders.empty());  // waiting for the tick value
+
+    // The first price arrives and with it the tick value.
+    ea.send({{"t", "account"}, {"balance", 18000.0}, {"equity", 18000.0}, {"margin", 0.0}, {"free", 18000.0},
+             {"tickValue", 0.1}, {"costs", nlohmann::json::array()}});
+    ea.send({{"t", "tick"}, {"bid", 4336.400}, {"ask", 4336.450}});
+    const auto buy = ea.waitFor("stop");
+    REQUIRE(buy.at("volume").get<double>() == Catch::Approx(0.01));
+    REQUIRE(runner.snapshot().moneyPerPointPerLot == Catch::Approx(100.0));  // 0.1 per 0.001, not 1.0 per 0.001
+    // A fill $2.465 lower than the close: 0.01 lot = 2.465 USC.
+    ea.send({{"t", "fill"}, {"id", buy.at("id")}, {"price", 4337.000}, {"volume", 0.01}, {"pos", "94000001"}, {"buy", true}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().positions.size() == 1; }));
+    runner.closeRange(false);
+    (void)ea.waitFor("cancel");
+    const auto close = ea.waitFor("market");
+    ea.send({{"t", "fill"}, {"id", close.at("id")}, {"price", 4339.465}, {"volume", 0.01}, {"pos", "94000001"}, {"buy", false}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
+    REQUIRE(runner.snapshot().baskets[0].gross == Catch::Approx(2.465).margin(0.001));
+}

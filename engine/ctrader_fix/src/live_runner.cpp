@@ -478,6 +478,24 @@ void LiveRunner::run() {
             }
         }
 
+        // MT5: nothing is traded before its symbol is known -- what a price
+        // move is worth comes with its first price after MT5 starts.
+        if (config_.connection.isMt5()) {
+            bool known = false;
+            for (int i = 0; i < 100 && running_.load(); ++i) {
+                {
+                    std::scoped_lock lock(engineMutex_);
+                    known = brokerSpecChecked_;
+                }
+                if (known) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (!known) {
+                throw std::runtime_error("MT5 hasn't said yet what a price move on " + config_.connection.symbolName +
+                                         " is worth (it does after its first price) -- connecting again");
+            }
+        }
+
         bool started = false;
         updateMarket();
         {
@@ -1283,9 +1301,23 @@ void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
             usdText(a.balance).substr(a.balance < 0.0 ? 2 : 1) + ", 1:" + std::to_string(static_cast<int>(a.leverage)) +
             (a.cent() ? " -- a cent account (every amount is in US cents)" : "") + ", symbol " + a.symbol);
     }
-    if (!brokerSpecChecked_ && a.known && a.volumeMin > 0.0) {
+    // The symbol is taken over once MT5 knows what a price move is worth:
+    // a freshly started MT5 says 0 until its first price, and the money per
+    // tick from the config file (another broker's) would then miscount every
+    // P/L -- on a 3-digit XAUUSDc ten times over.
+    if (!brokerSpecChecked_ && a.known && a.volumeMin > 0.0 && a.tickValue > 0.0 && a.tickSize > 0.0) {
         brokerSpecChecked_ = true;
         if (!engine_) adoptBrokerSymbolLocked(a);
+    } else if (brokerSpecChecked_ && engine_ && a.tickValue > 0.0 && a.tickSize > 0.0 && !tickValueWarned_) {
+        const SymbolSpec& spec = config_.strategy.symbol;
+        const double ours = spec.tickValue / spec.tickSize;
+        const double theirs = a.tickValue / a.tickSize;
+        if (std::fabs(ours - theirs) > 0.01 * theirs) {
+            tickValueWarned_ = true;
+            auditEventLocked(4, 2, "MT5 says 1.00 of price per lot is worth " + priceTextOf(theirs) + " " + a.currency +
+                                       ", the bot counts " + priceTextOf(ours) +
+                                       " -- every P/L is off: Disconnect and Connect again");
+        }
     }
 }
 

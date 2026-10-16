@@ -827,6 +827,7 @@ private:
     std::chrono::steady_clock::time_point brokerAccountAt_{};
     std::unordered_map<std::string, double> positionSwap_;  // position id -> swap so far (+ = credited)
     bool brokerSpecChecked_ = false;
+    bool tickValueWarned_ = false;  // MT5's money per tick no longer matches the one in use (said once)
     [[nodiscard]] bool brokerAccountFreshLocked() const;
     void onAccountInfoLocked(const FixMessage& msg);
     // MT5: takes the symbol exactly as the broker has it -- price step and
