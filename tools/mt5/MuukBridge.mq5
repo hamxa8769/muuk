@@ -29,6 +29,7 @@ double g_lastBid = 0.0;
 double g_lastAsk = 0.0;
 ulong  g_lastAccountMs = 0;
 ulong  g_lastConnectTryMs = 0;
+ulong  g_cancelling = 0;   // the order this bridge was last asked to cancel
 
 // Order ticket -> the bot's ClOrdID (also kept in the order comment).
 ulong  g_mapTicket[];
@@ -335,6 +336,24 @@ void QueueHello()
    if(!hedging) Print("MuukBridge: this is a NETTING account -- Muuk needs a hedging account.");
 }
 
+// The last 240 finished one-minute bars, so the app's market reading (ATR,
+// EMAs) is ready at once instead of after building them from prices.
+void QueueBars()
+{
+   MqlRates r[];
+   ArraySetAsSeries(r, false);
+   const int n = CopyRates(g_sym, PERIOD_M1, 1, 240, r);  // from 1: bar 0 is still forming
+   if(n <= 0) return;
+   string list = "";
+   for(int i = 0; i < n; i++)
+   {
+      if(list != "") list += ",";
+      list += "[" + IntegerToString((long)r[i].time) + "," + Num(r[i].open, g_digits) + "," + Num(r[i].high, g_digits) +
+              "," + Num(r[i].low, g_digits) + "," + Num(r[i].close, g_digits) + "]";
+   }
+   Send("{\"t\":\"bars\",\"gmtOffset\":" + IntegerToString((long)(TimeTradeServer() - TimeGMT())) + ",\"list\":[" + list + "]}");
+}
+
 void QueueTick()
 {
    MqlTick t;
@@ -447,6 +466,7 @@ void HandleCommand(const string line)
    else if(c == "cancel")    CancelOrder(line);
    else if(c == "positions") ListPositions(JsonStr(line, "req"));
    else if(c == "orders")    ListOrders(JsonStr(line, "req"));
+   else if(c == "bars")      QueueBars();
 }
 
 void PlaceStop(const string line)
@@ -549,6 +569,7 @@ void CancelOrder(const string line)
    ZeroMemory(res);
    req.action = TRADE_ACTION_REMOVE;
    req.order = ticket;
+   g_cancelling = ticket;
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE)
    {
       Send("{\"t\":\"cancel_reject\",\"id\":\"" + Esc(id) + "\",\"orig\":\"" + Esc(orig) + "\",\"text\":\"MT5 " +
@@ -565,8 +586,16 @@ void ListPositions(const string reqId)
    {
       const ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !IsOurPosition()) continue;
+      // The id of the bot's order that opened it (the position's identifier is
+      // that order's ticket): a fill the app missed while MT5 was offline is
+      // still recognised as its own order.
+      const long ident = PositionGetInteger(POSITION_IDENTIFIER);
+      string id = PositionGetString(POSITION_COMMENT);
+      const string mapped = IdForOrder((ulong)ident);
+      if(mapped != "") id = mapped;
+      PositionSelectByTicket(ticket);  // IdForOrder may have selected an order
       if(list != "") list += ",";
-      list += "{\"pos\":\"" + IntegerToString(PositionGetInteger(POSITION_IDENTIFIER)) + "\",\"buy\":" +
+      list += "{\"pos\":\"" + IntegerToString(ident) + "\",\"id\":\"" + Esc(id) + "\",\"buy\":" +
               (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "true" : "false") + ",\"volume\":" +
               Num(PositionGetDouble(POSITION_VOLUME), 4) + ",\"price\":" + Num(PositionGetDouble(POSITION_PRICE_OPEN), g_digits) + "}";
    }
@@ -621,6 +650,22 @@ void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest&
          if(OrderSendAsync(again, res)) return;
       }
       SendReject(id, "MT5 " + IntegerToString(result.retcode) + ": " + result.comment);
+      return;
+   }
+   // A pending order of the bot's that went away without a fill and without
+   // the bot asking: written to the Experts log -- the broker, or another
+   // program on this account (another Muuk, a phone) removed it.
+   if(trans.type == TRADE_TRANSACTION_HISTORY_ADD && trans.order != 0 && trans.order != g_cancelling &&
+      HistoryOrderSelect(trans.order) && HistoryOrderGetInteger(trans.order, ORDER_MAGIC) == MagicNumber)
+   {
+      const long state = HistoryOrderGetInteger(trans.order, ORDER_STATE);
+      const long type = HistoryOrderGetInteger(trans.order, ORDER_TYPE);
+      if((type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP) &&
+         (state == ORDER_STATE_CANCELED || state == ORDER_STATE_EXPIRED || state == ORDER_STATE_REJECTED))
+      {
+         Print("MuukBridge: pending order #", trans.order, " (", HistoryOrderGetString(trans.order, ORDER_COMMENT), ") was ",
+               EnumToString((ENUM_ORDER_STATE)state), " -- not by this bridge: by the broker or another program on this account");
+      }
       return;
    }
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) return;

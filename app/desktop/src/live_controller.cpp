@@ -244,6 +244,14 @@ void LiveController::tick() {
     }
     // A connection that has stayed up for a minute resets the back-off.
     const auto snap = running_ ? snapshot() : std::nullopt;
+    // MT5's own one-minute history (sent on every connect): the market
+    // reading (ATR, EMAs) is ready at once.
+    if (snap && snap->connected && bridge_ && runner_) {
+        if (auto bars = bridge_->takeHistoryBars(); !bars.empty()) {
+            runner_->addHistoryBars(bars);
+            appendLog("[market] " + std::to_string(bars.size()) + " one-minute bars of history from MT5 loaded");
+        }
+    }
     if (snap && snap->connected) {
         if (!stableSet_) {
             stableSet_ = true;

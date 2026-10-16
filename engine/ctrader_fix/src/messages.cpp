@@ -260,6 +260,7 @@ PositionReportInfo parsePositionReport(const FixMessage& msg) {
     info.longQty = optionalDouble(msg.getOptionalString(tag::LongQty)).value_or(0.0);
     info.shortQty = optionalDouble(msg.getOptionalString(tag::ShortQty)).value_or(0.0);
     info.settlPrice = optionalDouble(msg.getOptionalString(tag::SettlPrice));
+    info.clOrdId = msg.getOptionalString(tag::ClOrdID);
     return info;
 }
 

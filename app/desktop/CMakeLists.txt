@@ -7,6 +7,7 @@ add_executable(muuk-desktop
     src/open_path.cpp
     src/app_prefs.cpp
     src/system_monitor.cpp
+    src/windows_startup.cpp
 )
 
 target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix muuk_mt5_bridge imgui)

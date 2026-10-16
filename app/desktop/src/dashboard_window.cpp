@@ -14,6 +14,7 @@
 #include "config_discovery.hpp"
 #include "glass_ui.hpp"
 #include "open_path.hpp"
+#include "windows_startup.hpp"
 #include "muuk/core/risk_table.hpp"
 #include "muuk/ctrader_fix/basket_history.hpp"
 
@@ -1303,6 +1304,14 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                               money(snap->equityNow).c_str(), money(snap->marginNow).c_str(),
                               rc.guardLockMarginLevel, rc.guardStopMarginLevel);
     }
+    if (snap && !snap->anotherTrader.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::TextWrapped("Something else trades this account: %s. Another Muuk on another PC/VPS (or an EA) with "
+                           "this account cancels and closes this bot's orders. Stop it. No new range opens until you "
+                           "press Open range.",
+                           snap->anotherTrader.c_str());
+        ImGui::PopStyleColor();
+    }
     if (snap && snap->guardLockPending) {
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::TextWrapped("Margin guard: the next level was not placed (it would have left the margin level under "
@@ -1494,6 +1503,8 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                                           bool connected) {
     beginPage("settings_scroll");
     renderAccountSection(controller.isRunning());
+    ImGui::Spacing();
+    renderThisPcSection();
     ImGui::Spacing();
     withFont(boldFont_, [] {
         ImGui::AlignTextToFramePadding();
@@ -3018,6 +3029,32 @@ void DashboardWindow::renderMt5AccountFields() {
         }
         ImGui::TreePop();
     }
+}
+
+void DashboardWindow::renderThisPcSection() {
+    withFont(boldFont_, [] {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("This PC");
+    });
+    ImGui::TextDisabled("For a bot that runs on this PC without you: it comes back by itself after a restart, a power "
+                        "cut or a lost connection.");
+    static int startState = -1;  // read from Windows once, then kept in step with the checkbox
+    if (startState < 0) startState = startsWithWindows() ? 1 : 0;
+    bool start = startState == 1;
+    if (ImGui::Checkbox("Start Muuk with Windows", &start)) {
+        if (setStartWithWindows(start)) startState = start ? 1 : 0;
+    }
+    ImGui::SetItemTooltip("Opens Muuk when you sign in to Windows (only for this Windows user, no admin rights). With "
+                          "Auto-connect on, it then connects and picks up the running basket by itself.");
+    ImGui::SameLine(0.0f, 24.0f);
+    if (ImGui::Checkbox("Auto-connect##thispc", &prefs_.autoConnect)) savePrefs(prefs_);
+    ImGui::SetItemTooltip("Connect when the app opens (the same switch as in the header).");
+    if (start && !prefs_.autoConnect) {
+        ImGui::TextColored(kAmber, "Turn Auto-connect on too, or Muuk opens after a restart but doesn't trade.");
+    }
+    ImGui::TextDisabled("While the bot runs, Windows doesn't put this PC to sleep (the screen may still turn off). "
+                        "MT5 is started again by itself if its bridge stays away for a minute. Also set Windows "
+                        "Update's active hours so it doesn't restart the PC during trading.");
 }
 
 void DashboardWindow::renderAccountSection(bool running) {

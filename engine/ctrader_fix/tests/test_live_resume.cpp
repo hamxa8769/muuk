@@ -30,6 +30,7 @@ struct BrokerPosition {
     bool buy;
     double lots;
     double price;
+    std::string clOrdId = {};  // the order that opened it (the MT5 bridge sends it)
 };
 
 struct BrokerOrder {
@@ -721,6 +722,7 @@ int answerPositions(MockFixServer& server, int seq, const FixMessage& request,
         r.set(tag::LongQty, p.buy ? p.lots * 100.0 : 0.0, 2);
         r.set(tag::ShortQty, p.buy ? 0.0 : p.lots * 100.0, 2);
         r.set(tag::SettlPrice, p.price, 2);
+        if (!p.clOrdId.empty()) r.set(tag::ClOrdID, p.clOrdId);
         server.sendToClient(kTradeConn, r);
     }
     return seq;
@@ -810,6 +812,57 @@ TEST_CASE("Broker check: an order the broker does not have is placed again, and 
     REQUIRE(snap.brokerIssuesRecent >= 1);
     REQUIRE(snap.brokerIssues.back().find("MISSED") != std::string::npos);
     REQUIRE(snap.currentBasket->ordersMissed == 1);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Broker check: a fill whose report was lost (MT5 offline) is booked as the basket's own, not sent again") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.verifySeconds = 1;
+    Bot bot(cfg, freshStateFile("lost_fill"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendFill(server, seq++, buy.getString(tag::ClOrdID), 4337.00, 1.0, "P1");
+    const FixMessage sell = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(sell.getInt(tag::Side) == 2);
+    sendNewAck(server, seq++, sell.getString(tag::ClOrdID));
+
+    // The Sell Stop filled while MT5 was offline: no fill report ever comes,
+    // the broker just has a second position, opened by that order.
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq,
+                          {{"P1", true, 0.01, 4337.00}, {"P2", false, 0.02, 4335.90, sell.getString(tag::ClOrdID)}});
+    const FixMessage ordReq = server.waitForMessage(msgtype::OrderMassStatusRequest, kTradeConn, 4s);
+    seq = answerOrders(server, seq, ordReq, {});
+
+    // The next level goes out (a Buy Stop), not the Sell Stop again.
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(next.getInt(tag::Side) == 1);
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().positions.size() == 2; }));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    for (const auto& p : snap.positions) REQUIRE_FALSE(p.adopted);
+    REQUIRE(snap.anotherTrader.empty());
+    REQUIRE(snap.currentBasket->ordersFilled == 2);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Broker check: a position nobody of this bot opened warns of another trader and stops new ranges") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.verifySeconds = 1;
+    Bot bot(cfg, freshStateFile("another_trader"));
+    int seq = handshake(server, {}, {});
+    const FixMessage buy = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    sendNewAck(server, seq++, buy.getString(tag::ClOrdID));
+
+    const FixMessage posReq = server.waitForMessage(msgtype::RequestForPositions, kTradeConn, 4s);
+    seq = answerPositions(server, seq, posReq, {{"P9", false, 0.08, 4335.00, "1792043083999"}});
+    REQUIRE(waitUntil([&] { return !bot.runner().snapshot().anotherTrader.empty(); }));
+    REQUIRE(bot.runner().snapshot().anotherTrader.find("P9") != std::string::npos);
 
     bot.finish();
     bot.rethrow();

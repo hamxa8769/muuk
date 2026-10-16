@@ -139,6 +139,11 @@ EaStatus Mt5Gateway::status() const {
     return status_;
 }
 
+std::vector<muuk::core::Bar> Mt5Gateway::takeHistoryBars() {
+    std::scoped_lock lock(mutex_);
+    return std::exchange(historyBars_, {});
+}
+
 // ---------------------------------------------------------------------------
 // EA side: a named pipe. The EA polls: every ~25 ms it sends one frame with
 // what happened (hello, prices, account, fills...) and gets one frame back
@@ -400,6 +405,24 @@ void Mt5Gateway::onEaLine(const std::string& line) {
         sendFix(tc, r);
         return;
     }
+    if (t == "bars") {
+        // Server-time bar opens -> UTC (the server's offset from GMT, to the quarter hour).
+        const int64_t offset = static_cast<int64_t>(std::llround(j.value("gmtOffset", 0.0) / 900.0)) * 900;
+        std::vector<muuk::core::Bar> bars;
+        for (const auto& b : j.value("list", nlohmann::json::array())) {
+            if (!b.is_array() || b.size() < 5) continue;
+            muuk::core::Bar bar;
+            bar.startMs = (b[0].get<int64_t>() - offset) * 1000;
+            bar.open = b[1].get<double>();
+            bar.high = b[2].get<double>();
+            bar.low = b[3].get<double>();
+            bar.close = b[4].get<double>();
+            bars.push_back(bar);
+        }
+        std::scoped_lock lock(mutex_);
+        historyBars_ = std::move(bars);
+        return;
+    }
     if (t == "positions") {
         const std::string req = jsonString(j, "req");
         FixConnPtr to;
@@ -433,6 +456,9 @@ void Mt5Gateway::onEaLine(const std::string& line) {
             r.set(tag::LongQty, buy ? qty : 0.0, 2);
             r.set(tag::ShortQty, buy ? 0.0 : qty, 2);
             r.set(tag::SettlPrice, jsonNumber(p, "price"), 5);
+            // The bot's ClOrdID of the order that opened it: a fill the bot
+            // never heard of (MT5 was offline) is still known as its own.
+            if (const std::string id = jsonString(p, "id"); !id.empty()) r.set(tag::ClOrdID, id);
             sendFix(to, r);
         }
         return;
@@ -683,6 +709,7 @@ void Mt5Gateway::onFixMessage(const FixConnPtr& conn, const FixMessage& msg) {
         ack.set(tag::EncryptMethod, int64_t{0});
         ack.set(tag::HeartBtInt, msg.getOptionalString(tag::HeartBtInt).value_or("30"));
         sendFix(conn, ack);
+        if (conn->ourSubId == "QUOTE") (void)sendEa({{"c", "bars"}});  // fresh chart history for this connection
         if (conn->ourSubId != "QUOTE") {
             nlohmann::json costs;
             {

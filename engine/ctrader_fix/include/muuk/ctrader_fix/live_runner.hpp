@@ -235,6 +235,10 @@ struct LiveSnapshot {
     bool escapeTrailing = false;
     int escapeTries = 0;
     std::string escapePhase;              // "reading the market, 3 min left", "waiting for an UP breakout above ..."
+    // Something else trades this account with the bot's own magic (another
+    // Muuk on another PC/VPS): why it's thought so; no new range opens
+    // until the operator presses Open range. Empty = nothing seen.
+    std::string anotherTrader;
     bool escapeAwaitingDecision = false;  // a try failed: Retry escape / Close range / Keep locked
     bool escapeHeld = false;              // Keep locked was chosen
     std::string marketRead;               // the market read in one line (trend, structure, ATR)
@@ -632,6 +636,14 @@ private:
     // market is already past their price -- see PendingOrderInfo::waiting.
     std::unordered_map<muuk::core::OrderId, OpenLeg> waitingOrders_;
     int healthRearms_ = 0;
+    // A pending order sent again because it vanished from the broker: the
+    // lost id -> its copy (a fill of the lost one found later cancels the
+    // copy), and how often the same order (side @ price) vanished in a row.
+    std::unordered_map<muuk::core::OrderId, muuk::core::OrderId> replacedOrders_;
+    std::unordered_map<std::string, int> missedRepeats_;
+    // See LiveSnapshot::anotherTrader.
+    std::string anotherTrader_;
+    void flagAnotherTraderLocked(const std::string& why);
     // Broker check.
     std::chrono::steady_clock::time_point orderStatusRequestedAt_;
     std::string brokerCheckedAt_;

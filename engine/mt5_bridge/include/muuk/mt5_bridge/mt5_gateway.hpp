@@ -13,6 +13,7 @@
 #include <asio.hpp>
 #include <nlohmann/json.hpp>
 
+#include "muuk/core/market_read.hpp"
 #include "muuk/ctrader_fix/fix_message.hpp"
 
 namespace muuk::mt5_bridge {
@@ -100,6 +101,10 @@ public:
     [[nodiscard]] const std::string& pipeName() const { return config_.pipeName; }
     [[nodiscard]] uint16_t fixPort() const { return fixPort_; }
     [[nodiscard]] EaStatus status() const;
+    // The finished one-minute bars the EA sent when it connected (UTC,
+    // oldest first), handed out once: the bot seeds its market reading
+    // (ATR, EMAs) with them instead of waiting for its own.
+    [[nodiscard]] std::vector<muuk::core::Bar> takeHistoryBars();
 
 private:
     struct FixConn {
@@ -171,6 +176,7 @@ private:
     std::map<std::string, FixConnPtr> positionReqs_;   // PosReqID -> who asked
     std::map<std::string, FixConnPtr> orderReqs_;      // MassStatusReqID -> who asked
     nlohmann::json lastCosts_ = nlohmann::json::array();
+    std::vector<muuk::core::Bar> historyBars_;
 };
 
 }  // namespace muuk::mt5_bridge

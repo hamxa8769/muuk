@@ -433,6 +433,18 @@ int main(int argc, char** argv) {
         glfwPollEvents();
         lastFrameAt = glfwGetTime();
         ++framesTotal;
+#ifdef _WIN32
+        // While the bot runs, Windows must not put the PC to sleep (the
+        // screen may still turn off): a sleeping PC leaves a basket unwatched.
+        {
+            static bool awake = false;
+            const bool want = controller.isRunning() && !demo;
+            if (want != awake) {
+                SetThreadExecutionState(want ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) : ES_CONTINUOUS);
+                awake = want;
+            }
+        }
+#endif
 
         // Exit guard: the close button (or Alt+F4) only *asks* to exit; with
         // trades still open the dashboard shows a dialog first.

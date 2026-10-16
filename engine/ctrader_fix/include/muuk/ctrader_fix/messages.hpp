@@ -93,6 +93,7 @@ struct PositionReportInfo {
     double longQty = 0.0;               // wire units, same as OrderQty
     double shortQty = 0.0;
     std::optional<double> settlPrice;   // average open price
+    std::optional<std::string> clOrdId; // the order that opened it (MT5 bridge only)
 };
 
 [[nodiscard]] PositionReportInfo parsePositionReport(const FixMessage& msg);

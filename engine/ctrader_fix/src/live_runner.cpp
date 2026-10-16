@@ -222,6 +222,7 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.escapeTrailing = escape_.trailing;
     snap.escapeTries = escapeTries_;
     snap.escapePhase = escapePhase_;
+    snap.anotherTrader = anotherTrader_;
     snap.escapeAwaitingDecision = escapeAwaitingDecision_;
     snap.escapeHeld = escapeHeld_;
     snap.marketRead = marketRead_.why;
@@ -973,6 +974,7 @@ void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::st
         recordLegOpened(filled);
         if (currentBasket_) ++currentBasket_->ordersFilled;
         healthRearms_ = 0;
+        missedRepeats_.clear();
         {
             const SymbolSpec& spec = config_.strategy.symbol;
             const bool buy = filled.side == OrderSide::BuyStop;
@@ -1998,8 +2000,19 @@ void LiveRunner::finishRuntimeOrderCheckLocked(const std::vector<ExecutionReport
                               std::to_string(order.price.toDouble(spec)).substr(0, 7) + " (ClOrdID " +
                               std::to_string(id) + ") is not at the broker -- placing it again");
         markDirty();
+        const std::string key = std::to_string(static_cast<int>(order.side)) + "@" + std::to_string(order.price.ticks);
+        if (++missedRepeats_[key] == 3) {
+            flagAnotherTraderLocked("the same " + std::string(order.side == OrderSide::BuyStop ? "Buy" : "Sell") +
+                                    " Stop vanished from the broker 3 times in a row");
+        }
         if (engine_ && engine_->status() == EngineStatus::Active) {
-            for (const auto& cmd : engine_->replaceOrder(id)) handleCommand(cmd);
+            for (const auto& cmd : engine_->replaceOrder(id)) {
+                if (const auto* place = std::get_if<muuk::core::PlaceOrderCommand>(&cmd)) {
+                    if (replacedOrders_.size() > 200) replacedOrders_.clear();
+                    replacedOrders_[id] = place->id;
+                }
+                handleCommand(cmd);
+            }
         }
     }
 
@@ -2019,6 +2032,9 @@ void LiveRunner::finishRuntimeOrderCheckLocked(const std::vector<ExecutionReport
         if (reportedForeignOrders_.insert(id).second) {
             noteBrokerIssueLocked("a working order this bot didn't place is at the broker (ClOrdID " + std::to_string(id) +
                                   ") -- is Muuk also running on another PC/VPS with this account? Listed as \"old\".");
+            if (engine_ && engine_->status() == EngineStatus::Active) {
+                flagAnotherTraderLocked("a pending order this bot didn't place appeared (ClOrdID " + std::to_string(id) + ")");
+            }
         }
     }
     awaitingAck_.clear();
@@ -2480,6 +2496,33 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
         const bool buy = r.longQty > 0.0;
         const double qty = buy ? r.longQty : r.shortQty;
         if (qty <= 0.0) continue;
+        // Opened by one of this bot's own pending orders whose fill report never
+        // came (MT5 or the link was offline when it filled): that is the
+        // basket's next level, not a stranger's trade -- book it as the fill.
+        if (const auto own = tryParseOrderId(r.clOrdId)) {
+            const OrderId orderId = *own;
+            OrderId fillAs = 0;
+            if (const auto it = placedOrderInfo_.find(orderId); it != placedOrderInfo_.end() && !it->second.adopted) {
+                fillAs = orderId;
+            } else if (const auto re = replacedOrders_.find(orderId); re != replacedOrders_.end() &&
+                                                                       placedOrderInfo_.count(re->second) > 0) {
+                // Already sent again as "missed": the copy must go, the fill is booked under its id.
+                fillAs = re->second;
+                const std::string cancelClOrdId = "c" + std::to_string(nextCancelReqId_++);
+                log("[sync] cancelling the copy " + std::to_string(fillAs) + " of order " + std::to_string(orderId) +
+                    ", which had filled already");
+                tradeSession_->send(buildOrderCancelRequest(cancelClOrdId, std::to_string(fillAs)));
+            }
+            if (fillAs != 0 && r.settlPrice) {
+                log("[sync] position " + *r.positionId + " is this bot's order " + std::to_string(orderId) +
+                    ", filled while the fill report was lost (MT5 offline?) -- booked as the basket's fill");
+                auditEventLocked(1, 1, "a fill the broker never reported (position " + *r.positionId +
+                                           ") was found and booked to the running basket");
+                applyFillLocked(fillAs, Price::fromDouble(*r.settlPrice, spec), *r.positionId, std::nullopt);
+                tracked.insert(*r.positionId);
+                continue;
+            }
+        }
         OpenLeg leg;
         leg.id = nextAdoptedId_++;
         leg.side = buy ? OrderSide::BuyStop : OrderSide::SellStop;
@@ -2494,6 +2537,7 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
         if (engine_ && engine_->status() == EngineStatus::Active) {
             noteBrokerIssueLocked("position " + leg.positionId + " appeared that this bot didn't open -- a manual trade, "
                                   "or Muuk running elsewhere on this account? Listed as \"old\".");
+            flagAnotherTraderLocked("position " + leg.positionId + " appeared that this bot didn't open");
         }
         log("[sync] found open " + std::string(buy ? "BUY" : "SELL") + " " + std::to_string(qty / kWireQtyPerLot) +
             " lot @ " + std::to_string(leg.price.toDouble(spec)) + " (position " + leg.positionId + ")");
@@ -2556,6 +2600,12 @@ bool LiveRunner::openRange() {
     if (basketRunningLocked()) {
         log("[manual] a range is already running -- close it before opening another");
         return false;
+    }
+    if (!anotherTrader_.empty()) {
+        log("[manual] Open range: the warning about another trader on this account is cleared (" + anotherTrader_ + ")");
+        anotherTrader_.clear();
+        missedRepeats_.clear();
+        marketWaitLogged_ = false;
     }
     if (basketCloseFailed_) {
         log("[manual] can't open a range: an earlier closing trade was rejected. Close any leftover "
@@ -2871,7 +2921,23 @@ void LiveRunner::updateMarket() {
     }
 }
 
+void LiveRunner::flagAnotherTraderLocked(const std::string& why) {
+    if (!anotherTrader_.empty()) return;
+    anotherTrader_ = why;
+    auditEventLocked(1, 2, "something else is trading this account (" + why +
+                               ") -- another Muuk on another PC/VPS, or an EA/phone with this account? Stop it: two "
+                               "bots cancel and close each other's orders. No new range opens until you press Open range.");
+}
+
 bool LiveRunner::marketBlocksLocked() {
+    if (!anotherTrader_.empty()) {
+        if (!marketWaitLogged_) {
+            log("[risk] no new range: something else trades this account (" + anotherTrader_ +
+                ") -- stop it, then press Open range");
+            marketWaitLogged_ = true;
+        }
+        return true;
+    }
     if (locked_) {
         if (!marketWaitLogged_) {
             log("[risk] no new range: a basket is locked -- close it (Close range) to go on");

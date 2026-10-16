@@ -102,6 +102,8 @@ private:
     // `price` = the live mid (0 when not connected), for the commission example.
     void renderLotPreview(const muuk::ctrader_fix::LiveSettings& settings, double price);
     void renderAccountSection(bool running);
+    // Settings > This PC: start with Windows, auto-connect, no sleep while running.
+    void renderThisPcSection();
     void loadAccountForm(const std::string& configPath);
     [[nodiscard]] muuk::ctrader_fix::AccountSettings accountFromForm() const;
     void renderPerformanceTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
