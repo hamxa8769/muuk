@@ -16,6 +16,41 @@ On a cent account, 0.01 lot earns or loses **1¢ per $1 move** of gold. On a sta
 
 ## 1. Recent changes
 
+### Smart entry: a range that fits the market (16 October 2026)
+
+**Why.** In 2026 gold's median one-minute candle is **$1.95** high to low, about the same as a $2 range. So the price crosses the range again and again, and the lots double each time. Real results from 12–16 October (Exness cent):
+- 301 baskets won **+1,425 USC** (+4.7 each);
+- 7 baskets lost **−2,868 USC** (three locks at level 10 at about −800 each).
+
+**What's new** (Settings, under Range width; all off by default):
+
+| Setting | What it does |
+|---|---|
+| **Range from ATR** (x ATR) | Each new range is this many times the average one-minute move (ATR 14) wide. It is never narrower than *Range width* and never wider than *widest range*. |
+| **Target move = half the range** | With the last-lot target, the price move it asks for is half the range width, not the fixed move. |
+| **Trend filter** (x ATR) | A new range opens only while EMA 8 is at least this many ATRs away from EMA 21 (the price is going somewhere). |
+| **First order with the trend** | A Buy Stop first when EMA 8 is above EMA 21, a Sell Stop first when it's below. |
+
+MT5 sends its last 240 one-minute bars on every connect, so the ATR and the EMAs are ready at once. The range status line shows why a range is waiting, or how wide the current range is.
+
+**How it was tested.** MT5's own one-minute history was replayed through a simulator of the bot's rules: the entry $0.05 beyond the price, lots x2, the last-lot target, break-even from level 8, and a lock at level 10 closed 30 s later. The history was JustMarkets XAUUSD.c, 2 January – 12 October 2026, 275,000 bars. The results are under "Backtest" below.
+
+### Safety: lost fills, another trader on the account, this PC (16 October 2026)
+
+- **A fill that MT5 never reported is now recognised.** This happens when MT5 was offline at the moment it filled.
+  - MT5 positions now carry the order they came from.
+  - Such a position is booked as the basket's own level. Before, it was listed as "old" (someone else's), and the order was sent again and again.
+  - That bug turned basket #80 (15 Oct) into a "profit target" close at **−358**.
+- **Another trader on the account** is now caught. The signs are:
+  - a position or pending order this bot didn't place;
+  - or the same order vanishing 3 times.
+
+  The range status turns red and no new range opens until you press **Open range**. On 15 October a second program on the Exness account placed and closed this bot's basket and removed its orders. **Only one Muuk per account.**
+- **Settings → This PC:**
+  - **Start Muuk with Windows** (with Auto-connect, it trades again after a restart or power cut);
+  - Windows doesn't sleep while the bot runs;
+  - MT5 is restarted by itself if its bridge stays away for a minute.
+
 ### MetaTrader 5 (for JustMarkets, RoboForex and other MT5 brokers)
 
 - **Muuk controls MT5 itself.** Pick *MetaTrader 5* in Settings → Account. Muuk then:

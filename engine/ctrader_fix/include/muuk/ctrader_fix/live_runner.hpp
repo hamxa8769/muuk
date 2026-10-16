@@ -239,6 +239,12 @@ struct LiveSnapshot {
     // Muuk on another PC/VPS): why it's thought so; no new range opens
     // until the operator presses Open range. Empty = nothing seen.
     std::string anotherTrader;
+    // Smart entry (connection.entry): why no new range opens right now
+    // ("no trend: ..."), empty when it may; and the current range's width
+    // and target move as the filters set them.
+    std::string entryWait;
+    double rangeWidthNow = 0.0;
+    double targetMoveNow = 0.0;
     bool escapeAwaitingDecision = false;  // a try failed: Retry escape / Close range / Keep locked
     bool escapeHeld = false;              // Keep locked was chosen
     std::string marketRead;               // the market read in one line (trend, structure, ATR)
@@ -644,6 +650,20 @@ private:
     // See LiveSnapshot::anotherTrader.
     std::string anotherTrader_;
     void flagAnotherTraderLocked(const std::string& why);
+
+    // Smart entry (connection.entry). The width a new range gets now (ATR x
+    // rangeAtr, clamped), whether the trend filter holds new ranges back
+    // (logs once per change, sets entryWait_), and config_.strategy with this
+    // range's own first side and target move -- what the engine runs on.
+    [[nodiscard]] double rangeWidthNowLocked();
+    bool entryFilterBlocksLocked();
+    [[nodiscard]] muuk::core::StrategyConfig engineConfigLocked() const;
+    void pickRangeShapeLocked();
+    std::string entryWait_;
+    bool entryWaitLogged_ = false;
+    muuk::core::StartSide rangeStartSide_ = muuk::core::StartSide::BuyOnly;
+    bool rangeSideSet_ = false;
+    double rangeTargetMove_ = 0.0;  // 0 = the configured lastLotTargetMove
     // Broker check.
     std::chrono::steady_clock::time_point orderStatusRequestedAt_;
     std::string brokerCheckedAt_;

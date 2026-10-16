@@ -332,6 +332,13 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
         {"Entry timeout", s.entryTimeoutSeconds > 0 ? std::to_string(s.entryTimeoutSeconds) + " s, then a new range"
                                                     : std::string("off")},
+        {"Range from ATR", s.entry.rangeAtr > 0 ? fmt("%.2f x ATR, ", s.entry.rangeAtr) + fmt("$%.2f", s.rangeWidth) +
+                                                      fmt(" to $%.2f", s.entry.rangeMaxWidth)
+                                                : std::string("off (fixed width)")},
+        {"Target move", s.entry.targetHalfRange ? std::string("half the range") : fmt("$%.2f", s.lastLotTargetMove)},
+        {"Trend filter", s.entry.trendMin > 0 ? fmt("EMA8-EMA21 at least %.1f x ATR", s.entry.trendMin)
+                                              : std::string("off")},
+        {"First order with the trend", s.entry.startWithTrend ? "on" : "off"},
         {"Max orders / max lot", (s.maxOrders > 0 ? std::to_string(s.maxOrders) : std::string("no limit")) + " / " +
                                      (s.maxLot > 0 ? fmt("%.2f", s.maxLot) : std::string("no limit"))},
         {"Max basket loss", s.maxBasketLoss > 0 ? amount(s.maxBasketLoss) : "off"},

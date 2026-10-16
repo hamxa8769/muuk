@@ -1304,6 +1304,12 @@ void DashboardWindow::renderRangePanel(LiveController& controller, const std::op
                               money(snap->equityNow).c_str(), money(snap->marginNow).c_str(),
                               rc.guardLockMarginLevel, rc.guardStopMarginLevel);
     }
+    if (snap && connected && !snap->entryWait.empty() && snap->status != EngineStatus::Active) {
+        ImGui::TextColored(kAmber, "Next range waits -- %s", snap->entryWait.c_str());
+    } else if (snap && connected && snap->settings.entry.anyOn() && snap->rangeWidthNow > 0.0) {
+        ImGui::TextDisabled("Smart entry: this range is $%.2f wide, target move $%.2f", snap->rangeWidthNow,
+                            snap->targetMoveNow);
+    }
     if (snap && !snap->anotherTrader.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kRed);
         ImGui::TextWrapped("Something else trades this account: %s. Another Muuk on another PC/VPS (or an EA) with "
@@ -1538,8 +1544,70 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
             settingsDirty_ = true;
         }
 
-        settingDouble("Range width ($)", "Distance between the Buy Stop (top) and Sell Stop (bottom) of a range.",
+        settingDouble("Range width ($)", "Distance between the Buy Stop (top) and Sell Stop (bottom) of a range. "
+                      "With 'Range from ATR' on, the smallest width a range gets.",
                       &s.rangeWidth, 0.10, "%.2f", &settingsDirty_);
+
+        // Smart entry: fit the range to the market, skip the sideways stretches.
+        auto toggleWithValue = [&](const char* name, const char* tip, const char* id, bool* on, double* value,
+                                   double offValue, double onValue, double step, const char* fmt) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(name);
+            ImGui::SetItemTooltip("%s", tip);
+            ImGui::TableNextColumn();
+            if (ImGui::Checkbox((std::string("On##") + id).c_str(), on)) {
+                *value = *on ? (*value > 0.0 ? *value : onValue) : offValue;
+                settingsDirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!*on);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::InputDouble((std::string("##v") + id).c_str(), value, step, step * 5, fmt)) settingsDirty_ = true;
+            ImGui::EndDisabled();
+        };
+        {
+            muuk::ctrader_fix::EntryFilterConfig& e = s.entry;
+            bool atrOn = e.rangeAtr > 0.0;
+            double atrK = atrOn ? e.rangeAtr : 2.0;
+            toggleWithValue("Range from ATR",
+                            "On: each new range is this many times the average one-minute move (ATR 14) wide -- wide "
+                            "when gold swings hard, the 'Range width' above when it's quiet. A $2 range is about one "
+                            "minute's move: the price crosses it again and again and the lots double each time. Tested "
+                            "on 2026's bars: x2 cut the loss of a fixed $2 range by over 90%.",
+                            "rangeatr", &atrOn, &atrK, 0.0, 2.0, 0.25, "%.2f x ATR");
+            e.rangeAtr = atrOn ? std::clamp(atrK, 0.25, 20.0) : 0.0;
+            if (atrOn) {
+                settingDouble("  widest range ($)", "A range never gets wider than this, even in a wild market.",
+                              &e.rangeMaxWidth, 0.5, "%.2f", &settingsDirty_);
+                e.rangeMaxWidth = std::clamp(e.rangeMaxWidth, std::max(0.1, s.rangeWidth), 1000.0);
+            }
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Target move = half the range");
+            ImGui::SetItemTooltip("With the last-lot target: the price move it asks for is half the range width (a "
+                                  "wider range, a bigger target) instead of the fixed move.");
+            ImGui::TableNextColumn();
+            if (ImGui::Checkbox("On##halfrange", &e.targetHalfRange)) settingsDirty_ = true;
+            bool trendOn = e.trendMin > 0.0;
+            double trendK = trendOn ? e.trendMin : 1.0;
+            toggleWithValue("Trend filter",
+                            "On: a new range opens only while the price is going somewhere -- the fast average (EMA 8) "
+                            "is at least this many ATRs away from the slow one (EMA 21) -- not while it chops sideways, "
+                            "where baskets climb to deep levels. Fewer ranges, far fewer deep ones.",
+                            "trendmin", &trendOn, &trendK, 0.0, 1.0, 0.1, "%.1f x ATR");
+            e.trendMin = trendOn ? std::clamp(trendK, 0.1, 10.0) : 0.0;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("First order with the trend");
+            ImGui::SetItemTooltip("On: a Buy Stop first when EMA 8 is above EMA 21, a Sell Stop first when below -- "
+                                  "instead of the fixed 'First order' side.");
+            ImGui::TableNextColumn();
+            if (ImGui::Checkbox("On##withtrend", &e.startWithTrend)) settingsDirty_ = true;
+        }
         ImGui::BeginDisabled(s.autoTarget);
         settingDouble("Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
                       &s.profitTarget, 0.25, "%.2f", &settingsDirty_);

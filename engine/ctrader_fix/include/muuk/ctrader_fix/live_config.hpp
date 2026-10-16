@@ -66,6 +66,27 @@ struct RecoveryConfig {
 // one address. The account identity (SenderCompID/Username/Password) is
 // the same for both; only the endpoint and TargetSubID/SenderSubID differ
 // (handled by LiveRunner, not part of this config).
+// Gold's one-minute swings are often as big as a $2 range: the price crosses
+// it again and again and the lots double each time. These make the range fit
+// the market and skip the choppy stretches (tested on 2026's bars; see
+// docs/risk-and-settings.md).
+struct EntryFilterConfig {
+    // >0: range width = this x ATR(14) of the one-minute bars, never under
+    // autoRangeWidthPoints and never over rangeMaxWidth. 0 = fixed width.
+    double rangeAtr = 0.0;
+    double rangeMaxWidth = 15.0;
+    // The last-lot target's price move = half the range width (it grows with
+    // a wider range) instead of the fixed lastLotTargetMove.
+    bool targetHalfRange = false;
+    // >0: a new range opens only while |EMA8 - EMA21| >= this x ATR -- the
+    // price is going somewhere, not chopping sideways. 0 = off.
+    double trendMin = 0.0;
+    // The first order goes with the trend: a Buy Stop when EMA8 > EMA21, a
+    // Sell Stop when below (instead of the fixed "First order" side).
+    bool startWithTrend = false;
+    [[nodiscard]] bool anyOn() const { return rangeAtr > 0.0 || targetHalfRange || trendMin > 0.0 || startWithTrend; }
+};
+
 struct LiveConnectionConfig {
     // "ctrader" (default): the broker's cTrader FIX API.
     // "mt5": MetaTrader 5 through the Muuk bridge -- MuukBridge.mq5 runs in
@@ -113,6 +134,11 @@ struct LiveConnectionConfig {
     // look up the current price by hand" possible; see
     // LiveRunner::waitForFirstQuoteAndCenterRange in live_runner.cpp.
     double autoRangeWidthPoints = 0.0;
+
+    // Smart entry: how wide a new range is and when it may open, read from
+    // the last one-minute bars (ATR 14, EMA 8 / 21; MT5 sends its history on
+    // connect). All off = the plain fixed range. See EntryFilterConfig.
+    EntryFilterConfig entry;
 
     // How long LiveRunner waits, after a basket has fully closed (every
     // filled leg confirmed flattened at the broker), before starting the
@@ -239,6 +265,7 @@ struct LiveSettings {
     double commissionPerMillion = 0.0;
     bool autoContinue = true;
     muuk::core::StartSide startSide = muuk::core::StartSide::Both;  // first order(s) of each range
+    EntryFilterConfig entry;  // smart entry: ATR width, trend filter, start with the trend
     MarketHoursConfig market;
 };
 

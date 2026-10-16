@@ -223,6 +223,10 @@ LiveSnapshot LiveRunner::snapshot() const {
     snap.escapeTries = escapeTries_;
     snap.escapePhase = escapePhase_;
     snap.anotherTrader = anotherTrader_;
+    snap.entryWait = entryWait_;
+    snap.rangeWidthNow =
+        (config_.strategy.range.upperBound - config_.strategy.range.lowerBound).toDouble(config_.strategy.symbol);
+    snap.targetMoveNow = rangeTargetMove_ > 0.0 ? rangeTargetMove_ : config_.strategy.lastLotTargetMove;
     snap.escapeAwaitingDecision = escapeAwaitingDecision_;
     snap.escapeHeld = escapeHeld_;
     snap.marketRead = marketRead_.why;
@@ -479,7 +483,7 @@ void LiveRunner::run() {
         {
             std::scoped_lock lock(engineMutex_);
             if (autoRange) centerRangeOnLatestQuote();
-            engine_ = std::make_unique<StrategyEngine>(config_.strategy);
+            engine_ = std::make_unique<StrategyEngine>(engineConfigLocked());
             // Hand the engine the live quote before start(): it's Idle, so
             // this only records the tick -- but seed orders are placed off
             // that tick's bid/ask, and without it they'd fall back to the
@@ -2117,11 +2121,92 @@ void LiveRunner::prepareNextCycle(bool recenter) {
     if (recenter && latestBid_ && latestAsk_) {
         const SymbolSpec& spec = config_.strategy.symbol;
         RangeConfig& range = config_.strategy.range;
-        const int64_t halfWidth = std::max<int64_t>(1, (range.upperBound.ticks - range.lowerBound.ticks) / 2);
+        const double width = rangeWidthNowLocked();
+        const int64_t halfWidth = std::max<int64_t>(1, Price::fromDouble(width, spec).ticks / 2);
         const int64_t mid = Price::fromDouble((*latestBid_ + *latestAsk_) / 2.0, spec).ticks;
         range = RangeConfig{Price{mid - halfWidth}, Price{mid + halfWidth}};
     }
-    engine_->reconfigure(config_.strategy);
+    pickRangeShapeLocked();
+    engine_->reconfigure(engineConfigLocked());
+}
+
+double LiveRunner::rangeWidthNowLocked() {
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const double fixed = config_.connection.autoRangeWidthPoints > 0.0
+                             ? config_.connection.autoRangeWidthPoints
+                             : (config_.strategy.range.upperBound - config_.strategy.range.lowerBound).toDouble(spec);
+    const EntryFilterConfig& e = config_.connection.entry;
+    if (e.rangeAtr <= 0.0) return fixed;
+    readMarketLocked();
+    if (!marketRead_.enoughData || !(marketRead_.atr > 0.0)) return fixed;  // no bars yet: the fixed width
+    return std::clamp(e.rangeAtr * marketRead_.atr, fixed, std::max(fixed, e.rangeMaxWidth));
+}
+
+void LiveRunner::pickRangeShapeLocked() {
+    const EntryFilterConfig& e = config_.connection.entry;
+    const SymbolSpec& spec = config_.strategy.symbol;
+    const double width = (config_.strategy.range.upperBound - config_.strategy.range.lowerBound).toDouble(spec);
+    rangeTargetMove_ = e.targetHalfRange ? std::max(0.01, width / 2.0) : 0.0;
+    rangeSideSet_ = false;
+    std::string side;
+    if (e.startWithTrend) {
+        readMarketLocked();
+        if (marketRead_.enoughData && marketRead_.emaFast != marketRead_.emaSlow) {
+            const bool up = marketRead_.emaFast > marketRead_.emaSlow;
+            rangeStartSide_ = up ? StartSide::BuyOnly : StartSide::SellOnly;
+            rangeSideSet_ = true;
+            side = up ? ", first order Buy Stop (EMA8 over EMA21)" : ", first order Sell Stop (EMA8 under EMA21)";
+        }
+    }
+    if (e.anyOn()) {
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(2);
+        oss << "[entry] range width " << width;
+        if (e.rangeAtr > 0.0) oss << " (ATR " << marketRead_.atr << " x " << e.rangeAtr << ")";
+        if (rangeTargetMove_ > 0.0) oss << ", target move " << rangeTargetMove_;
+        oss << side;
+        log(oss.str());
+    }
+}
+
+muuk::core::StrategyConfig LiveRunner::engineConfigLocked() const {
+    muuk::core::StrategyConfig sc = config_.strategy;
+    if (rangeSideSet_) sc.startSide = rangeStartSide_;
+    if (rangeTargetMove_ > 0.0) sc.lastLotTargetMove = rangeTargetMove_;
+    return sc;
+}
+
+bool LiveRunner::entryFilterBlocksLocked() {
+    const EntryFilterConfig& e = config_.connection.entry;
+    if (e.trendMin <= 0.0) {
+        entryWait_.clear();
+        entryWaitLogged_ = false;
+        return false;
+    }
+    readMarketLocked();
+    const auto& m = marketRead_;
+    std::string why;
+    if (!m.enoughData) {
+        why = "waiting for one-minute bars to read the trend";
+    } else if (std::fabs(m.emaFast - m.emaSlow) < e.trendMin * m.atr) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "no trend: EMA8 - EMA21 = %.2f, needs %.2f (%.1f x ATR %.2f)",
+                      std::fabs(m.emaFast - m.emaSlow), e.trendMin * m.atr, e.trendMin, m.atr);
+        why = buf;
+    }
+    if (why.empty()) {
+        if (entryWaitLogged_) log("[entry] the price is trending again -- a new range may open");
+        entryWait_.clear();
+        entryWaitLogged_ = false;
+        return false;
+    }
+    entryWait_ = why;
+    if (!entryWaitLogged_) {
+        log("[entry] no new range: " + why + " (trend filter, Settings)");
+        entryWaitLogged_ = true;
+    }
+    return true;
 }
 
 void LiveRunner::maybeRestartAfterBasketClose() {
@@ -2226,12 +2311,13 @@ void LiveRunner::waitForFirstQuote() {
 
 void LiveRunner::centerRangeOnLatestQuote() {
     const SymbolSpec& spec = config_.strategy.symbol;
-    const double half = config_.connection.autoRangeWidthPoints / 2.0;
+    const double half = rangeWidthNowLocked() / 2.0;
     const double mid = (*latestBid_ + *latestAsk_) / 2.0;
     const RangeConfig newRange{Price::fromDouble(mid - half, spec), Price::fromDouble(mid + half, spec)};
     config_.strategy.range = newRange;
     log("auto-centered range: [" + std::to_string(newRange.lowerBound.toDouble(spec)) + ", " +
         std::to_string(newRange.upperBound.toDouble(spec)) + "]");
+    pickRangeShapeLocked();
 }
 
 void LiveRunner::handleCommand(const Command& cmd) {
@@ -2842,7 +2928,7 @@ void LiveRunner::applySettings(const LiveSettings& settings) {
     std::scoped_lock lock(engineMutex_);
     applySettingsToConfig(config_, settings);
     // Target, stop loss and auto target act at once, also on a running basket.
-    if (engine_) engine_->updateExitRules(config_.strategy);
+    if (engine_) engine_->updateExitRules(engineConfigLocked());
     marketDirty_ = true;
     marketWaitLogged_ = false;
     log("[settings] updated -- range width " + std::to_string(settings.rangeWidth) + ", lots " +
@@ -2954,7 +3040,7 @@ bool LiveRunner::marketBlocksLocked() {
     }
     if (!marketKnown_ || marketStatus_.canOpenRange) {
         marketWaitLogged_ = false;
-        return false;
+        return entryFilterBlocksLocked();
     }
     if (!marketWaitLogged_) {
         log("[market] no new range now: " + marketStatus_.label + " -- " + marketStatus_.detail);

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -13,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "live_test_helpers.hpp"
+#include "muuk/core/market_read.hpp"
 #include "muuk/ctrader_fix/live_runner.hpp"
 #include "muuk/ctrader_fix/live_state.hpp"
 #include "muuk/ctrader_fix/messages.hpp"
@@ -1644,6 +1646,70 @@ TEST_CASE("Escape: in a down market only a Sell Stop, below the recent low") {
     // Below the last 15 minutes' low (4336.05) by 0.30, and 0.30 under the bid (4336.40).
     REQUIRE(down.getDouble(tag::StopPx) == Catch::Approx(4335.75));
     REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 800ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Smart entry: the range is ATR x rangeAtr wide (never under the fixed width)") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.entryTimeoutSeconds = 1;
+    cfg.connection.entry.rangeAtr = 3.0;
+    cfg.connection.entry.targetHalfRange = true;
+    Bot bot(cfg, freshStateFile("entry_atr"));
+    (void)handshake(server, {}, {});
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);  // no bars yet: the fixed width
+
+    const std::vector<Bar> bars = historyBars(0);
+    bot.runner().addHistoryBars(bars);
+    const double atr = muuk::core::readMarket(std::deque<Bar>(bars.begin(), bars.end()), 15).atr;
+    REQUIRE(atr > 0.5);
+    // The entry times out and the range opens again around 4345.05 -- now ATR wide.
+    std::this_thread::sleep_for(1200ms);
+    sendQuote(server, 2, 4345.00, 4345.10);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const double width = std::clamp(3.0 * atr, cfg.connection.autoRangeWidthPoints, 15.0);
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(4345.05 + width / 2.0).margin(0.02));
+    const LiveSnapshot snap = bot.runner().snapshot();
+    REQUIRE(snap.rangeWidthNow == Catch::Approx(width).margin(0.02));
+    REQUIRE(snap.targetMoveNow == Catch::Approx(width / 2.0).margin(0.02));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Smart entry: the trend filter holds new ranges in a sideways market") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.entry.trendMin = 1.0;
+    Bot bot(cfg, freshStateFile("entry_chop"));
+    (void)handshake(server, {}, {});
+    // No bars yet: it waits for them.
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().entryWait.find("waiting") != std::string::npos; }));
+    bot.runner().addHistoryBars(historyBars(0));
+    sendQuote(server, 2, 4336.20, 4336.30);
+    REQUIRE(waitUntil([&] { return bot.runner().snapshot().entryWait.find("no trend") != std::string::npos; }));
+    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 800ms), std::runtime_error);
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Smart entry: in a down trend the range opens with a Sell Stop first") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);  // configured: Buy Stop first
+    cfg.connection.entry.trendMin = 1.0;
+    cfg.connection.entry.startWithTrend = true;
+    Bot bot(cfg, freshStateFile("entry_trend"));
+    (void)handshake(server, {}, {});
+    REQUIRE(waitUntil([&] { return !bot.runner().snapshot().entryWait.empty(); }));
+    bot.runner().addHistoryBars(historyBars(-1));
+    sendQuote(server, 2, 4336.20, 4336.30);
+    const FixMessage first = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(first.getInt(tag::Side) == 2);
+    REQUIRE(bot.runner().snapshot().entryWait.empty());
 
     bot.finish();
     bot.rethrow();

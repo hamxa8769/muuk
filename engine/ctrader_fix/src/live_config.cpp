@@ -67,6 +67,24 @@ nlohmann::json recoveryToJson(const RecoveryConfig& r) {
             {"escapeAutoRetry", r.escapeAutoRetry}};
 }
 
+EntryFilterConfig entryFromJson(const nlohmann::json& j) {
+    EntryFilterConfig e;
+    e.rangeAtr = std::clamp(j.value("rangeAtr", e.rangeAtr), 0.0, 20.0);
+    e.rangeMaxWidth = std::clamp(j.value("rangeMaxWidth", e.rangeMaxWidth), 0.1, 1000.0);
+    e.targetHalfRange = j.value("targetHalfRange", e.targetHalfRange);
+    e.trendMin = std::clamp(j.value("trendMin", e.trendMin), 0.0, 10.0);
+    e.startWithTrend = j.value("startWithTrend", e.startWithTrend);
+    return e;
+}
+
+nlohmann::json entryToJson(const EntryFilterConfig& e) {
+    return {{"rangeAtr", e.rangeAtr},
+            {"rangeMaxWidth", e.rangeMaxWidth},
+            {"targetHalfRange", e.targetHalfRange},
+            {"trendMin", e.trendMin},
+            {"startWithTrend", e.startWithTrend}};
+}
+
 }  // namespace
 
 LiveConfig loadLiveConfig(const std::filesystem::path& path) {
@@ -126,6 +144,7 @@ LiveConfig loadLiveConfig(const std::filesystem::path& path) {
     cfg.connection.leverage = conn.value("leverage", 500.0);
     cfg.connection.accountKind = conn.value("accountKind", std::string("standard"));
     if (conn.contains("recovery")) cfg.connection.recovery = recoveryFromJson(conn.at("recovery"));
+    if (conn.contains("entry")) cfg.connection.entry = entryFromJson(conn.at("entry"));
     cfg.connection.autoContinue = conn.value("autoContinue", true);
     cfg.connection.syncPositionsOnConnect = conn.value("syncPositionsOnConnect", true);
 
@@ -183,6 +202,7 @@ LiveSettings settingsFromConfig(const LiveConfig& config) {
     s.leverage = config.connection.leverage;
     s.accountKind = config.connection.accountKind;
     s.recovery = config.connection.recovery;
+    s.entry = config.connection.entry;
     s.commissionPerLot = config.strategy.costs.commissionPerLotRoundTurn;
     s.commissionPerMillion = config.strategy.costs.commissionPerMillionPerSide;
     s.autoContinue = config.connection.autoContinue;
@@ -221,6 +241,7 @@ void applySettingsToConfig(LiveConfig& config, const LiveSettings& s) {
     config.connection.leverage = s.leverage;
     config.connection.accountKind = s.accountKind;
     config.connection.recovery = s.recovery;
+    config.connection.entry = s.entry;
     st.escapeFromLevel = s.escapeFromLevel;
     st.escapeProfitMoney = s.escapeProfit;
     st.costs.commissionPerLotRoundTurn = s.commissionPerLot;
@@ -410,6 +431,7 @@ void saveLiveSettings(const std::filesystem::path& path, const LiveSettings& s) 
     conn["leverage"] = s.leverage;
     conn["accountKind"] = s.accountKind;
     conn["recovery"] = recoveryToJson(s.recovery);
+    conn["entry"] = entryToJson(s.entry);
     j["strategy"]["breakEvenEscape"] = {{"fromLevel", s.escapeFromLevel}, {"profit", s.escapeProfit}};
 
     auto& st = j["strategy"];
