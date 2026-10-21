@@ -8,7 +8,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <objbase.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 
+#include <filesystem>
 #include <string>
 #endif
 
@@ -53,9 +57,50 @@ bool setStartWithWindows(bool on) {
     RegCloseKey(key);
     return rc == ERROR_SUCCESS;
 }
+namespace {
+std::filesystem::path shortcutPath(ShortcutPlace where) {
+    PWSTR dir = nullptr;
+    const KNOWNFOLDERID& id = where == ShortcutPlace::Desktop ? FOLDERID_Desktop : FOLDERID_Programs;
+    if (FAILED(SHGetKnownFolderPath(id, 0, nullptr, &dir))) return {};
+    std::filesystem::path p = std::filesystem::path(dir) / L"Muuk.lnk";
+    CoTaskMemFree(dir);
+    return p;
+}
+}  // namespace
+
+bool hasShortcut(ShortcutPlace where) {
+    const auto p = shortcutPath(where);
+    std::error_code ec;
+    return !p.empty() && std::filesystem::exists(p, ec);
+}
+
+bool createShortcut(ShortcutPlace where) {
+    const auto path = shortcutPath(where);
+    if (path.empty()) return false;
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ok = false;
+    IShellLinkW* link = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) {
+        const std::wstring exe = thisExe();
+        link->SetPath(exe.c_str());
+        link->SetWorkingDirectory(std::filesystem::path(exe).parent_path().c_str());
+        link->SetIconLocation(exe.c_str(), 0);
+        link->SetDescription(L"Muuk -- XAUUSD range bot");
+        IPersistFile* file = nullptr;
+        if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+            ok = SUCCEEDED(file->Save(path.c_str(), TRUE));
+            file->Release();
+        }
+        link->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return ok;
+}
 #else
 bool startsWithWindows() { return false; }
 bool setStartWithWindows(bool) { return false; }
+bool hasShortcut(ShortcutPlace) { return false; }
+bool createShortcut(ShortcutPlace) { return false; }
 #endif
 
 }  // namespace muuk::desktop

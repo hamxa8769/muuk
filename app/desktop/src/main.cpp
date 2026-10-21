@@ -299,9 +299,26 @@ LRESULT CALLBACK guardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return CallWindowProcW(g_prevWndProc, hwnd, msg, wParam, lParam);
 }
 #endif
+// A desktop app has no console: what can't start is told in a message box
+// (and on the terminal too when started from one).
+void fatal(const char* what) {
+    std::fprintf(stderr, "%s\n", what);
+#ifdef _WIN32
+    MessageBoxA(nullptr, what, "Muuk", MB_OK | MB_ICONERROR);
+#endif
+}
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Built as a Windows app (no console window of its own); started from a
+    // terminal, its messages still go there.
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+#endif
     // Optional: --config <file> picks the config; --connect connects on
     // launch (for an unattended VPS that restarts the app on boot).
     std::string configArg;
@@ -323,6 +340,7 @@ int main(int argc, char** argv) {
 
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
+        fatal("Muuk couldn't start its window system (GLFW).");
         return 1;
     }
 
@@ -331,6 +349,7 @@ int main(int argc, char** argv) {
 
     GLFWwindow* window = glfwCreateWindow(1360, 860, "Muuk \xe2\x80\x94 XAUUSD Range Bot", nullptr, nullptr);
     if (!window) {
+        fatal("Muuk couldn't open its window.");
         glfwTerminate();
         return 1;
     }
@@ -344,7 +363,7 @@ int main(int argc, char** argv) {
     installInputWatch(window);  // before the backend, so it chains to these
     Renderer renderer;
     if (!renderer.init(window)) {
-        std::fprintf(stderr, "could not start the graphics renderer\n");
+        fatal("Muuk could not start the graphics renderer.");
         ImGui::DestroyContext();
         glfwDestroyWindow(window);
         glfwTerminate();

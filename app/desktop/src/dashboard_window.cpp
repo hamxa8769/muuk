@@ -3311,6 +3311,16 @@ void DashboardWindow::renderThisPcSection() {
     if (start && !prefs_.autoConnect) {
         ImGui::TextColored(kAmber, "Turn Auto-connect on too, or Muuk opens after a restart but doesn't trade.");
     }
+    // Shortcuts, so Muuk opens like any other app.
+    for (const auto place : {ShortcutPlace::Desktop, ShortcutPlace::StartMenu}) {
+        const bool desktop = place == ShortcutPlace::Desktop;
+        if (place == ShortcutPlace::StartMenu) ImGui::SameLine(0.0f, 12.0f);
+        if (hasShortcut(place)) {
+            ImGui::TextColored(kGreen, desktop ? "Desktop shortcut: yes" : "Start menu: yes");
+        } else if (glass::button(desktop ? "Add a desktop shortcut" : "Add to the Start menu", kBlue)) {
+            (void)createShortcut(place);
+        }
+    }
     ImGui::TextDisabled("While the bot runs, Windows doesn't put this PC to sleep (the screen may still turn off). "
                         "MT5 is started again by itself if its bridge stays away for a minute. Also set Windows "
                         "Update's active hours so it doesn't restart the PC during trading.");

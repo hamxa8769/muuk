@@ -9,4 +9,10 @@ namespace muuk::desktop {
 [[nodiscard]] bool startsWithWindows();
 bool setStartWithWindows(bool on);
 
+// A "Muuk" shortcut to this program on the desktop or in the Start menu
+// (this user's), opening in its own folder; true when it's there.
+enum class ShortcutPlace { Desktop, StartMenu };
+[[nodiscard]] bool hasShortcut(ShortcutPlace where);
+bool createShortcut(ShortcutPlace where);
+
 }  // namespace muuk::desktop
