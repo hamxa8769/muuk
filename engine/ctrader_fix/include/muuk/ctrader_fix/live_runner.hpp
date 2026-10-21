@@ -729,7 +729,6 @@ private:
     uint64_t lastWrittenSeq_ = 0;  // guarded by stateWriteMutex_
     std::string statsSince_;
     std::string resumeNote_;
-    bool holdAutoStart_ = false;
 
     // Connection health (see LiveSnapshot). infoMutex_ rather than
     // engineMutex_: disconnect handlers can run while a send holds the latter.
@@ -830,7 +829,13 @@ private:
     bool tickValueWarned_ = false;
     // MT5: positions found closed before the bot's close filled whose closing
     // deal was asked from MT5's history (once each; see finishPositionSync).
-    std::unordered_set<std::string> closeHistoryAsked_;  // MT5's money per tick no longer matches the one in use (said once)
+    std::unordered_set<std::string> closeHistoryAsked_;
+    // A basket position that is gone from the broker without a fill report
+    // (closed by hand, a phone, another program, while disconnected): on MT5
+    // its closing deal is asked from MT5's history (a close the bridge answers
+    // with that deal), so the basket books the real result; elsewhere, or if
+    // MT5 has no deal, it is booked without a price.
+    void bookClosedElsewhereLocked(const OpenLeg& leg, const std::string& note);  // MT5's money per tick no longer matches the one in use (said once)
     [[nodiscard]] bool brokerAccountFreshLocked() const;
     void onAccountInfoLocked(const FixMessage& msg);
     // MT5: takes the symbol exactly as the broker has it -- price step and

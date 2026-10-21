@@ -289,7 +289,7 @@ TEST_CASE("Resume: a pending order that filled while disconnected is processed a
     bot.rethrow();
 }
 
-TEST_CASE("Resume: refused when a position was closed outside the bot -- orders cancelled, nothing new opens") {
+TEST_CASE("Resume: refused when a position was closed outside the bot -- orders cancelled, then a new range (Auto-open)") {
     const auto stateFile = freshStateFile("resume_broken");
     const FirstRun first = runFirstSession(stateFile);
 
@@ -301,11 +301,11 @@ TEST_CASE("Resume: refused when a position was closed outside the bot -- orders 
 
     const FixMessage cancel = server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
     REQUIRE(cancel.getString(tag::OrigClOrdID) == first.sellId);
-    // autoContinue is on, but after an interrupted basket nothing opens by itself.
-    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 600ms), std::runtime_error);
+    // autoContinue is on: once the account is flat a new range opens by itself.
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(next.getInt(tag::Side) == 1);
 
     const LiveSnapshot snap = bot.runner().snapshot();
-    REQUIRE(snap.status == EngineStatus::Idle);
     REQUIRE(snap.positions.empty());
     REQUIRE(snap.resumeNote.find("Could not safely resume") != std::string::npos);
     // The interrupted basket is recorded, with the position marked as closed outside the bot.
@@ -895,8 +895,10 @@ TEST_CASE("Broker check: a basket position closed outside the bot stops the bask
     REQUIRE(snap.positions.empty());
     REQUIRE(snap.baskets[0].outcome == "interrupted");
     REQUIRE(snap.baskets[0].legs[0].note == "closed outside the bot");
-    // Nothing new opens by itself after that.
-    REQUIRE_THROWS_AS(server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 1500ms), std::runtime_error);
+    // Auto-open is on: with the account flat again, the next range opens by itself (around the live price).
+    sendQuote(server, 2, 4336.50, 4336.60);
+    const FixMessage next = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    REQUIRE(next.getInt(tag::Side) == 1);
 
     bot.finish();
     bot.rethrow();

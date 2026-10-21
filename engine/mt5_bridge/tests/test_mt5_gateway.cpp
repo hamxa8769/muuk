@@ -557,3 +557,45 @@ TEST_CASE("MT5 bridge: a position closed elsewhere just before the bot's close i
     REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
     REQUIRE(runner.snapshot().baskets[0].net == Catch::Approx(2.50));  // 0.01 lot x $2.50, not 0
 }
+
+TEST_CASE("MT5 bridge: a basket position closed by hand / another program is booked at its real price, not 0") {
+    GatewayConfig gc;
+    gc.pipeName = uniquePipe();
+    gc.fixPort = 0;
+    Mt5Gateway gateway(gc, [](const std::string&) {});
+    gateway.start();
+    FakeEa ea(gateway.pipeName());
+    ea.hello();
+    REQUIRE(waitUntil([&] { return gateway.status().ready; }));
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+
+    LiveConfig cfg = mt5Config(gateway.fixPort());
+    cfg.connection.verifySeconds = 1;
+    LiveRunner runner(cfg);
+    runner.setLogHandler([](const std::string&) {});
+    runner.setStateFile(freshState("mt5_closed_by_hand"));
+    RunnerThread thread(runner);
+    const auto posReq = ea.waitFor("positions");
+    ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", nlohmann::json::array()}});
+    const auto ordReq = ea.waitFor("orders");
+    ea.send({{"t", "orders"}, {"req", ordReq.at("req")}, {"list", nlohmann::json::array()}});
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+    const auto buy = ea.waitFor("stop");
+    ea.send({{"t", "fill"}, {"id", buy.at("id")}, {"price", 4337.00}, {"volume", 0.01}, {"pos", "70001"}, {"buy", true}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().positions.size() == 1; }));
+
+    // The periodic check: MT5 doesn't have the position any more (closed by hand).
+    std::optional<nlohmann::json> close;
+    for (int i = 0; i < 6 && !close; ++i) {
+        const auto req = ea.waitFor("positions");
+        ea.send({{"t", "positions"}, {"req", req.at("req")}, {"list", nlohmann::json::array()}});
+        close = ea.tryWaitFor("market", std::chrono::milliseconds(800));
+    }
+    REQUIRE(close);
+    REQUIRE(close->at("pos") == "70001");
+    // The bridge answers with the closing deal from MT5's history.
+    ea.send({{"t", "fill"}, {"id", close->at("id")}, {"price", 4335.20}, {"volume", 0.01}, {"pos", "70001"}, {"buy", false}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
+    REQUIRE(runner.snapshot().baskets[0].net == Catch::Approx(-1.80));  // 0.01 lot x -$1.80
+    REQUIRE(runner.snapshot().baskets[0].outcome == "interrupted");
+}

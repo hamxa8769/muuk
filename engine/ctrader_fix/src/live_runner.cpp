@@ -517,12 +517,22 @@ void LiveRunner::run() {
             if (engine_->status() != EngineStatus::Idle) {
                 started = true;  // the saved basket carries on
             } else if (!accountFlat()) {
-                log("[sync] " + std::to_string(openLegs_.size()) + " position(s) and " +
-                    std::to_string(placedOrderInfo_.size()) +
-                    " pending order(s) already at the broker -- no range will open until they're closed "
-                    "(Close all positions / Cancel all pending)");
-            } else if (holdAutoStart_) {
-                log("[resume] not opening a range by itself after an interrupted basket -- press Open range");
+                // Leftovers first (positions, pending orders, closes on their
+                // way): with Auto-open on, the first range opens by itself once
+                // the account is flat -- after the same checks as always
+                // (cooldown, spread, market pauses, news, smart entry).
+                const bool onlyCloses = openLegs_.empty() && placedOrderInfo_.empty() && waitingOrders_.empty();
+                if (!onlyCloses) {
+                    log("[sync] " + std::to_string(openLegs_.size()) + " position(s) and " +
+                        std::to_string(placedOrderInfo_.size()) +
+                        " pending order(s) already at the broker -- no range opens until they're closed "
+                        "(Close all positions / Cancel all pending)" +
+                        std::string(config_.connection.autoContinue ? "; then one opens by itself" : ""));
+                }
+                if (config_.connection.autoContinue) {
+                    reopenAfterManualClose_ = true;
+                    reopenCooldownSeconds_ = config_.connection.basketCooldownSeconds;
+                }
             } else if (config_.connection.autoContinue) {
                 if (spreadTooWideLocked() || marketBlocksLocked()) {
                     reopenAfterManualClose_ = true;  // starts as soon as the spread / market allows
@@ -534,7 +544,9 @@ void LiveRunner::run() {
                 }
             }
         }
-        log(started ? "engine is now active" : "connected -- waiting for Open range");
+        log(started ? "engine is now active"
+                    : reopenAfterManualClose_ ? "connected -- the first range opens by itself as soon as it may"
+                                              : "connected -- waiting for Open range");
 
         flushState();
         int loops = 0;
@@ -2405,6 +2417,16 @@ void LiveRunner::handleCommand(const Command& cmd) {
     }
 }
 
+void LiveRunner::bookClosedElsewhereLocked(const OpenLeg& leg, const std::string& note) {
+    if (config_.connection.isMt5() && tradeSession_ && !leg.positionId.empty() &&
+        closeHistoryAsked_.insert(leg.positionId).second) {
+        log("[sync] position " + leg.positionId + " " + note + " -- asking MT5 for its closing deal");
+        closeLegs({leg});
+        return;
+    }
+    recordLegClosed(leg, 0.0, 0.0, 0.0, note);
+}
+
 void LiveRunner::closeLegs(const std::vector<OpenLeg>& legs) {
     // Closes every leg individually: an opposite-direction Market order of
     // exactly that leg's volume, aimed at that leg's own position via
@@ -2537,7 +2559,7 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
         noteBrokerIssueLocked("position " + leg.positionId + " (" + (leg.side == OrderSide::BuyStop ? "BUY " : "SELL ") +
                               std::to_string(leg.volume.toDouble(spec)).substr(0, 4) +
                               " lot) is no longer at the broker -- closed outside the bot");
-        recordLegClosed(leg, 0.0, 0.0, 0.0, "closed outside the bot");
+        bookClosedElsewhereLocked(leg, "closed outside the bot");
         basketLegGone = basketLegGone || !leg.adopted;
     }
     for (auto& leg : openLegs_) {
@@ -2554,7 +2576,10 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
         cancelPendingLocked();
         engine_->stopCycle();
         cooldownActive_ = false;
-        reopenAfterManualClose_ = false;
+        // With Auto-open on, a new range opens by itself once the rest of the
+        // basket is closed too (the usual cooldown and checks first).
+        reopenAfterManualClose_ = config_.connection.autoContinue;
+        reopenCooldownSeconds_ = config_.connection.basketCooldownSeconds;
     }
 
     // Closing orders the broker never confirmed (rejected, lost, no answer):
@@ -3358,7 +3383,7 @@ void LiveRunner::reconcileOnConnectLocked() {
                 consistent = false;
                 problems.push_back("position " + leg.positionId + " was closed outside the bot");
                 closedPositionIds_.insert(leg.positionId);
-                recordLegClosed(leg, 0.0, 0.0, 0.0, "closed outside the bot while it was disconnected");
+                bookClosedElsewhereLocked(leg, "closed outside the bot while it was disconnected");
             }
         }
         for (const auto& p : saved->pendingCloses) {
@@ -3370,7 +3395,7 @@ void LiveRunner::reconcileOnConnectLocked() {
                 reclose.push_back(leg);  // the close never happened: do it now
             } else {
                 closedPositionIds_.insert(leg.positionId);
-                recordLegClosed(leg, 0.0, 0.0, 0.0, "closed while the bot was disconnected (exit price not reported)");
+                bookClosedElsewhereLocked(leg, "closed while the bot was disconnected (exit price not reported)");
             }
         }
         for (const auto& p : saved->pendingOrders) {
@@ -3524,7 +3549,6 @@ void LiveRunner::reconcileOnConnectLocked() {
                       "start a new range.";
         log("[resume] " + resumeNote_);
         setCloseReason("interrupted: " + problems.front());
-        holdAutoStart_ = true;
         if (!placedOrderInfo_.empty()) cancelPendingLocked();
     } else if (std::string why; !openLegs_.empty() && engine_->status() == EngineStatus::Idle &&
                                 pendingCloses_.empty() && waitingOrders_.empty() &&
