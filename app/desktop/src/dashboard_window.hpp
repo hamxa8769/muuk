@@ -104,6 +104,17 @@ private:
     void renderAccountSection(bool running);
     // Settings > This PC: start with Windows, auto-connect, no sleep while running.
     void renderThisPcSection();
+    // MT5 accounts: every account the bridge has been on is remembered (no
+    // passwords); the list lets the operator pick the one to trade, and MT5
+    // is switched to it.
+    void rememberMt5Account(LiveController& controller);
+    void pushMt5ServerHints(LiveController& controller);
+    void renderMt5AccountsPopup(LiveController& controller);
+    // Saves `login`/`server` (and the account type for a known mode) as this
+    // config's MT5 account and switches MT5 to it; a password typed here goes
+    // with it, else MT5's own saved one is used.
+    void useMt5Account(LiveController& controller, const std::string& login, const std::string& server,
+                       const std::string& mode, const std::string& password);
     void loadAccountForm(const std::string& configPath);
     [[nodiscard]] muuk::ctrader_fix::AccountSettings accountFromForm() const;
     void renderPerformanceTab(LiveController& controller, const std::optional<muuk::ctrader_fix::LiveSnapshot>& snap);
@@ -259,6 +270,16 @@ private:
     std::string accountLoadedFor_;
     bool accountDirty_ = false;
     std::string accountMessage_;
+    std::string savedMt5Login_;   // the config file's MT5 account (not the form being edited)
+    std::string savedMt5Server_;
+    std::string lastSeenMt5_;     // login@server last remembered
+    bool mt5HintsPushed_ = false;
+    bool mt5AccountsOpen_ = false;
+    std::string mt5PopupShownFor_;  // the mismatch the list already opened for by itself
+    std::array<char, 32> newMt5Login_{};
+    std::array<char, 128> newMt5Password_{};
+    std::array<char, 96> newMt5Server_{};
+    std::string mt5AccountsMessage_;
     bool openConfirmRequested_ = false;
 
     std::string flashMessage_;

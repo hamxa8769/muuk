@@ -599,3 +599,37 @@ TEST_CASE("MT5 bridge: a basket position closed by hand / another program is boo
     REQUIRE(runner.snapshot().baskets[0].net == Catch::Approx(-1.80));  // 0.01 lot x -$1.80
     REQUIRE(runner.snapshot().baskets[0].outcome == "interrupted");
 }
+
+TEST_CASE("MT5 bridge: MT5 logged in to another account than the config's -- nothing is traded on it") {
+    GatewayConfig gc;
+    gc.pipeName = uniquePipe();
+    gc.fixPort = 0;
+    Mt5Gateway gateway(gc, [](const std::string&) {});
+    gateway.start();
+    FakeEa ea(gateway.pipeName());
+    ea.hello();  // MT5 is on 5550001
+    REQUIRE(waitUntil([&] { return gateway.status().ready; }));
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+
+    LiveConfig cfg = mt5Config(gateway.fixPort());
+    cfg.connection.mt5Login = "5550002";  // this config trades another account
+    LiveRunner runner(cfg);
+    runner.setLogHandler([](const std::string&) {});
+    runner.setStateFile(freshState("mt5_other_account"));
+    std::string error;
+    std::thread t([&] {
+        try {
+            runner.run();
+        } catch (const std::exception& ex) {
+            error = ex.what();
+        }
+    });
+    const auto posReq = ea.waitFor("positions");
+    ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", nlohmann::json::array()}});
+    const auto ordReq = ea.waitFor("orders");
+    ea.send({{"t", "orders"}, {"req", ordReq.at("req")}, {"list", nlohmann::json::array()}});
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+    t.join();
+    REQUIRE(error.find("not to this config's account 5550002") != std::string::npos);
+    REQUIRE_FALSE(ea.tryWaitFor("stop", std::chrono::milliseconds(300)));
+}

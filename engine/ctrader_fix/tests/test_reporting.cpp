@@ -363,3 +363,37 @@ TEST_CASE("History is kept per account file; the old shared file moves to the fi
     REQUIRE_FALSE(fs::exists(second));                             // a new account starts empty
     fs::remove_all(dir);
 }
+
+TEST_CASE("MT5 account settings: a saved password stays with its own login, never another account") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "muuk_mt5_account_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path file = dir / "mt5.local.json";
+    {
+        std::ofstream out(file);
+        out << R"({"connection":{"platform":"mt5","environment":"live","traderLogin":"5550002",
+                  "mt5":{"login":"5550002","password":"livepass","server":"JustMarkets-Live6"}},
+                  "strategy":{"symbol":{"name":"XAUUSD","digits":2,"tickSize":0.01,"tickValue":1.0,"contractSize":100.0,
+                  "volumeStep":0.01,"volumeMin":0.01,"volumeMax":100.0},"range":{"lower":4336.0,"upper":4337.0},
+                  "lotProgression":{"initialLot":0.01,"lotIncrement":0.01},"riskLimits":{"maxOrders":20,"maxLot":1.0},
+                  "costs":{"commissionPerLotRoundTurn":0.0},"basketProfitTargetMoney":3.5}})";
+    }
+    // The same login, saved again with an empty password: the password stays.
+    muuk::ctrader_fix::AccountSettings a = muuk::ctrader_fix::accountFromConfigFile(file);
+    REQUIRE(a.mt5Login == "5550002");
+    muuk::ctrader_fix::saveAccountSettings(file, a);
+    REQUIRE(muuk::ctrader_fix::loadLiveConfig(file).connection.mt5Password == "livepass");
+    // Another login without a password: it doesn't inherit the first account's.
+    a.mt5Login = "5550004";
+    a.mt5Server = "JustMarkets-Demo6";
+    muuk::ctrader_fix::saveAccountSettings(file, a);
+    const auto cfg = muuk::ctrader_fix::loadLiveConfig(file);
+    REQUIRE(cfg.connection.mt5Login == "5550004");
+    REQUIRE(cfg.connection.mt5Password.empty());
+    // With its own password typed in, that one is saved.
+    a.mt5Password = "demopass";
+    muuk::ctrader_fix::saveAccountSettings(file, a);
+    REQUIRE(muuk::ctrader_fix::loadLiveConfig(file).connection.mt5Password == "demopass");
+    fs::remove_all(dir);
+}

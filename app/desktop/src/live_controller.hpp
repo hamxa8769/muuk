@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -78,6 +79,21 @@ public:
     // again with it (closing it the way its X button does if it's open), up
     // to 3 times until the bridge connects.
     void healMt5(const std::string& configPath);
+    // MT5 accounts. Switch MetaTrader 5 to `login` (on `server`; empty = the
+    // config's, else the one it was last seen on): closes MT5 the way its X
+    // button does and starts it logged in to that account -- with the
+    // config's password for the config's account, MT5's own saved one for
+    // any other.
+    void switchMt5Account(const std::string& configPath, const std::string& login, const std::string& server);
+    // login -> server of the accounts the bridge has been on (a config that
+    // gives only the login still logs in).
+    void setMt5ServerHints(std::map<std::string, std::string> hints);
+    // Every frame: MT5 logged in to another account than the config's
+    // (`want`) is switched to it -- with autoSwitch, at most twice in a row
+    // (then the MT5 accounts list asks; mt5SwitchTriesUsed()).
+    void keepMt5OnAccount(const std::string& configPath, const std::string& want, bool autoSwitch);
+    [[nodiscard]] int mt5SwitchTriesUsed() const { return mt5SwitchTries_; }
+    void resetMt5SwitchTries() { mt5SwitchTries_ = 0; }
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.
@@ -191,10 +207,13 @@ private:
     int bridgeFixPort_ = 0;
     // Starts (or keeps) the bridge for an MT5 config; false (with the error set) if it can't listen.
     bool ensureBridge(const muuk::ctrader_fix::LiveConfig& config);
-    void launchMt5(const muuk::ctrader_fix::LiveConfig& config, bool restart = false);
+    void launchMt5(const muuk::ctrader_fix::LiveConfig& config, bool restart = false, const std::string& login = {},
+                   const std::string& server = {});
     std::atomic<bool> mt5WasAlreadyRunning_{false};
     std::chrono::steady_clock::time_point mt5LaunchAt_{};
     int mt5Heals_ = 0;
+    int mt5SwitchTries_ = 0;
+    std::map<std::string, std::string> mt5ServerHints_;  // guarded by mt5Mutex_
     std::thread mt5Thread_;
     std::atomic<bool> mt5Starting_{false};
     bool mt5LaunchedThisStart_ = false;

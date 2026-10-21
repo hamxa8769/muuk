@@ -36,6 +36,30 @@ MT5 keeps that chart, so the next time MT5 opens (by Muuk or by you) the
 bridge runs by itself. With MT5 already open and no bridge on a chart, close
 MT5 and press Connect (or "Start MT5" in the header).
 
+### The MT5 account
+
+**The bot trades only the config's account.** Settings > Account > Login names it. If MT5 is logged in to any other account, the bot refuses to connect, so a live account under a demo config, or someone else's account, is never traded.
+
+**Muuk switches MT5 by itself.** When MT5 opens on another account:
+- Muuk closes MT5 (as its X button does) and opens it again, logged in to the config's account;
+- it tries this twice;
+- then the **MT5 accounts** list opens.
+
+The switch can be turned off in that list.
+
+**The MT5 accounts list** (the *Accounts* button next to the MT5 pill in the header):
+- Every account MT5 has been logged in to on this PC is remembered with its server, company and demo/real. Passwords are never remembered.
+- Click one to trade it:
+  - the config's login and server are set to it;
+  - the Account type follows its demo/real;
+  - MT5 is switched to it.
+- *Add or fix an account* takes a login, password and server for one MT5 can't log in to by itself. The password goes into this config file only.
+
+**Logging in:**
+- A config that gives only the login still logs in, on the server that account was last seen on.
+- The config's saved password belongs to its own login: changing the login never sends one account's password to another.
+- An account without a password in the config logs in with the one MT5 saved for it.
+
 While the bot is connecting, Muuk heals this by itself: when the bridge hasn't
 connected for a minute after MT5 was started, Muuk closes MT5 (as its X button
 does) and starts it again with the bridge -- up to 3 times, counted again once

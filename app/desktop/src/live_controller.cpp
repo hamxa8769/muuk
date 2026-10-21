@@ -40,15 +40,23 @@ LiveController::~LiveController() {
     if (bridge_) bridge_->stop();
 }
 
-void LiveController::launchMt5(const LiveConfig& config, bool restart) {
+void LiveController::launchMt5(const LiveConfig& config, bool restart, const std::string& login,
+                               const std::string& server) {
     if (mt5Starting_.exchange(true)) return;
     mt5LaunchAt_ = std::chrono::steady_clock::now();
     if (mt5Thread_.joinable()) mt5Thread_.join();
     muuk::mt5_bridge::Mt5StartOptions o;
     o.terminal = config.connection.mt5Terminal;
-    o.login = config.connection.mt5Login;
-    o.password = config.connection.mt5Password;
-    o.server = config.connection.mt5Server;
+    o.login = login.empty() ? config.connection.mt5Login : login;
+    // The config's password is for the config's account only; another one
+    // logs in with the password MT5 saved for it.
+    o.password = o.login == config.connection.mt5Login ? config.connection.mt5Password : std::string();
+    o.server = !server.empty() ? server : (o.login == config.connection.mt5Login ? config.connection.mt5Server : "");
+    if (o.server.empty() && !o.login.empty()) {
+        // A config with just the login: the server MT5 was seen on for it.
+        std::scoped_lock lock(mt5Mutex_);
+        if (const auto it = mt5ServerHints_.find(o.login); it != mt5ServerHints_.end()) o.server = it->second;
+    }
     o.chartSymbol = config.connection.mt5ChartSymbol;
     o.pipeName = "MuukBridge_" + std::to_string(config.connection.mt5EaPort);
     {
@@ -88,6 +96,44 @@ void LiveController::healMt5(const std::string& configPath) {
     appendLog("[mt5] the bridge hasn't connected for a minute -- starting MetaTrader 5 again with it (try " +
               std::to_string(mt5Heals_) + " of 3)");
     startMt5(configPath, true);
+}
+
+void LiveController::setMt5ServerHints(std::map<std::string, std::string> hints) {
+    std::scoped_lock lock(mt5Mutex_);
+    mt5ServerHints_ = std::move(hints);
+}
+
+void LiveController::switchMt5Account(const std::string& configPath, const std::string& login, const std::string& server) {
+    try {
+        const LiveConfig config = muuk::ctrader_fix::loadLiveConfig(configPath);
+        if (!config.connection.isMt5() || login.empty()) return;
+        if (!ensureBridge(config)) return;
+        appendLog("[mt5] switching MetaTrader 5 to account " + login + (server.empty() ? "" : " on " + server));
+        mt5Heals_ = 0;
+        launchMt5(config, true, login, server);
+    } catch (const std::exception& ex) {
+        setError(ex.what());
+    }
+}
+
+void LiveController::keepMt5OnAccount(const std::string& configPath, const std::string& want, bool autoSwitch) {
+    if (!bridge_ || mt5Starting_.load() || want.empty()) return;
+    const auto st = bridge_->status();
+    if (!st.ready || st.login.empty()) return;
+    if (st.login == want) {
+        mt5SwitchTries_ = 0;
+        return;
+    }
+    if (!autoSwitch || mt5SwitchTries_ >= 2) return;
+    // A freshly (re)started MT5 needs a moment to log in to the account it was told.
+    if (mt5LaunchAt_ != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() - mt5LaunchAt_ < std::chrono::seconds(40)) {
+        return;
+    }
+    ++mt5SwitchTries_;
+    appendLog("[mt5] MT5 is logged in to account " + st.login + " (" + st.server + "), this config trades " + want +
+              " -- switching MT5 to it (try " + std::to_string(mt5SwitchTries_) + " of 2)");
+    switchMt5Account(configPath, want, "");
 }
 
 void LiveController::startMt5(const std::string& configPath, bool restart) {

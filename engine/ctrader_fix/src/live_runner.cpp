@@ -494,6 +494,22 @@ void LiveRunner::run() {
                 throw std::runtime_error("MT5 hasn't said yet what a price move on " + config_.connection.symbolName +
                                          " is worth (it does after its first price) -- connecting again");
             }
+            // The account this config is for, or nothing: never another one
+            // that happens to be logged in to MT5 (a live one under a demo
+            // config, a friend's...).
+            std::string at;
+            std::string atServer;
+            {
+                std::scoped_lock lock(engineMutex_);
+                at = brokerAccount_.login;
+                atServer = brokerAccount_.server;
+            }
+            const std::string& want = config_.connection.mt5Login;
+            if (!want.empty() && !at.empty() && at != want) {
+                throw std::runtime_error("MT5 is logged in to account " + at + " (" + atServer +
+                                         "), not to this config's account " + want +
+                                         " -- Muuk switches MT5 to it, or pick the account in the MT5 accounts list");
+            }
         }
 
         bool started = false;

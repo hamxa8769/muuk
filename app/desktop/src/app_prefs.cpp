@@ -34,6 +34,18 @@ AppPrefs loadPrefs() {
         prefs.liteMode = j.value("liteMode", false);
         prefs.userName = j.value("userName", std::string());
         prefs.role = j.value("role", std::string("admin"));
+        prefs.mt5AutoSwitch = j.value("mt5AutoSwitch", true);
+        for (const auto& a : j.value("mt5Accounts", nlohmann::json::array())) {
+            if (!a.is_object()) continue;
+            Mt5KnownAccount k;
+            k.login = a.value("login", std::string());
+            k.server = a.value("server", std::string());
+            k.company = a.value("company", std::string());
+            k.currency = a.value("currency", std::string());
+            k.mode = a.value("mode", std::string());
+            k.lastSeen = a.value("lastSeen", std::string());
+            if (!k.login.empty()) prefs.mt5Accounts.push_back(k);
+        }
     } catch (const std::exception&) {
         return AppPrefs{};
     }
@@ -46,7 +58,14 @@ void savePrefs(const AppPrefs& prefs) {
         std::error_code ec;
         std::filesystem::create_directories(file.parent_path(), ec);
         std::ofstream out(file, std::ios::trunc);
+        nlohmann::json accounts = nlohmann::json::array();
+        for (const auto& a : prefs.mt5Accounts) {
+            accounts.push_back({{"login", a.login},       {"server", a.server}, {"company", a.company},
+                                {"currency", a.currency}, {"mode", a.mode},     {"lastSeen", a.lastSeen}});
+        }
         out << nlohmann::json{{"configPath", prefs.configPath},
+                              {"mt5Accounts", accounts},
+                              {"mt5AutoSwitch", prefs.mt5AutoSwitch},
                               {"darkMode", prefs.darkMode},
                               {"autoConnect", prefs.autoConnect},
                               {"autoReconnect", prefs.autoReconnect},

@@ -766,6 +766,22 @@ void DashboardWindow::render(LiveController& controller) {
     if (!controller.demo() && account_.loaded && account_.platform == 1 && running && !connected) {
         controller.healMt5(configPathBuffer_.data());
     }
+    // MT5 accounts: remember the one MT5 is on; on another than the config's,
+    // switch MT5 to the config's (twice at most), then ask with the list.
+    if (!controller.demo() && account_.loaded && account_.platform == 1) {
+        if (!mt5HintsPushed_) pushMt5ServerHints(controller);
+        rememberMt5Account(controller);
+        controller.keepMt5OnAccount(configPathBuffer_.data(), savedMt5Login_, prefs_.mt5AutoSwitch);
+        if (const auto b = controller.bridgeStatus(); b && b->ready && !savedMt5Login_.empty() &&
+                                                      b->login != savedMt5Login_ && !controller.mt5Starting() &&
+                                                      (!prefs_.mt5AutoSwitch || controller.mt5SwitchTriesUsed() >= 2)) {
+            const std::string key = b->login + ">" + savedMt5Login_;
+            if (mt5PopupShownFor_ != key) {
+                mt5PopupShownFor_ = key;
+                mt5AccountsOpen_ = true;
+            }
+        }
+    }
 
     // Basket history: (re)load it from the file next to the config when the
     // path changes (while connected, start() already loaded it), and copy
@@ -808,6 +824,7 @@ void DashboardWindow::render(LiveController& controller) {
         openConfirmRequested_ = false;
     }
     renderConfirmPopup(controller);
+    if (account_.platform == 1 && !controller.demo()) renderMt5AccountsPopup(controller);
 
     if (openExitRequested_) {
         ImGui::OpenPopup("Exit guard");
@@ -898,6 +915,16 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
                                   bridge->company.c_str(), bridge->server.c_str(), bridge->login.c_str(),
                                   bridge->currency.c_str(), bridge->leverage, bridge->hedging ? ", hedging" : ", NETTING (not usable)",
                                   bridge->symbol.c_str(), bridge->volumeMin, bridge->balance, bridge->equity, bridge->margin);
+            if (!savedMt5Login_.empty() && bridge->login != savedMt5Login_) {
+                ImGui::SameLine(0.0f, 6.0f);
+                glass::pill(("not this config's account " + savedMt5Login_).c_str(), kRed, controller.mt5Starting());
+                ImGui::SetItemTooltip("MT5 is logged in to %s, this config trades %s. The bot doesn't trade until they "
+                                      "match: Muuk switches MT5 by itself (Settings: MT5 accounts), or pick one in the list.",
+                                      bridge->login.c_str(), savedMt5Login_.c_str());
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            if (glass::button("Accounts", kViolet)) mt5AccountsOpen_ = true;
+            ImGui::SetItemTooltip("The MT5 accounts used on this PC: pick the one to trade, or add one.");
             if (bridge->tradeMode == "real" && !account_.live) {
                 ImGui::SameLine(0.0f, 6.0f);
                 glass::pill("REAL account: not traded", kRed);
@@ -919,6 +946,9 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
                 ImGui::SameLine(0.0f, 6.0f);
                 if (glass::button("Open MT5", kBlue)) controller.startMt5(configPathBuffer_.data());
                 ImGui::SetItemTooltip("Starts MetaTrader 5 (minimized) with the bridge on a chart.");
+                ImGui::SameLine(0.0f, 6.0f);
+                if (glass::button("Accounts", kViolet)) mt5AccountsOpen_ = true;
+                ImGui::SetItemTooltip("The MT5 accounts used on this PC: pick the one to trade, or add one.");
             }
         }
         ImGui::SameLine(0.0f, 10.0f);
@@ -2938,6 +2968,8 @@ void DashboardWindow::loadAccountForm(const std::string& configPath) {
         copyTo(f.mt5Server, a.mt5Server);
         copyTo(f.mt5ChartSymbol, a.mt5ChartSymbol.empty() ? std::string("XAUUSD") : a.mt5ChartSymbol);
         bridgeEaPortHint_ = a.mt5EaPort;
+        savedMt5Login_ = a.mt5Login;
+        savedMt5Server_ = a.mt5Server;
         f.loaded = true;
     } catch (const std::exception&) {
         f.loaded = false;  // no such file yet / not a config -- the form stays empty
@@ -3097,6 +3129,165 @@ void DashboardWindow::renderMt5AccountFields() {
         }
         ImGui::TreePop();
     }
+}
+
+void DashboardWindow::pushMt5ServerHints(LiveController& controller) {
+    std::map<std::string, std::string> hints;
+    for (auto it = prefs_.mt5Accounts.rbegin(); it != prefs_.mt5Accounts.rend(); ++it) {
+        if (!it->server.empty()) hints[it->login] = it->server;  // newest wins
+    }
+    controller.setMt5ServerHints(std::move(hints));
+    mt5HintsPushed_ = true;
+}
+
+void DashboardWindow::rememberMt5Account(LiveController& controller) {
+    const auto b = controller.bridgeStatus();
+    if (!b || !b->ready || b->login.empty()) return;
+    const std::string key = b->login + "@" + b->server;
+    if (key == lastSeenMt5_) return;  // once per account change
+    lastSeenMt5_ = key;
+    auto& list = prefs_.mt5Accounts;
+    std::erase_if(list, [&](const Mt5KnownAccount& a) { return a.login == b->login && a.server == b->server; });
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char when[24];
+    std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &local);
+    list.insert(list.begin(), Mt5KnownAccount{b->login, b->server, b->company, b->currency, b->tradeMode, when});
+    if (list.size() > 20) list.resize(20);
+    savePrefs(prefs_);
+    pushMt5ServerHints(controller);
+}
+
+void DashboardWindow::useMt5Account(LiveController& controller, const std::string& login, const std::string& server,
+                                    const std::string& mode, const std::string& password) {
+    const std::string configPath(configPathBuffer_.data());
+    if (configPath.empty() || login.empty()) return;
+    copyTo(account_.mt5Login, login);
+    copyTo(account_.traderLogin, login);
+    copyTo(account_.mt5Server, server);
+    copyTo(account_.mt5Password, password);
+    if (mode == "real") account_.live = true;
+    if (mode == "demo" || mode == "contest") account_.live = false;
+    try {
+        muuk::ctrader_fix::saveAccountSettings(configPath, accountFromForm());
+        loadAccountForm(configPath);
+        settingsLoaded_ = false;
+        mt5AccountsMessage_ = "This config now trades " + login + (server.empty() ? "" : " on " + server) + ".";
+    } catch (const std::exception& ex) {
+        mt5AccountsMessage_ = ex.what();
+        return;
+    }
+    newMt5Password_.fill('\0');
+    controller.resetMt5SwitchTries();
+    mt5PopupShownFor_.clear();
+    const auto b = controller.bridgeStatus();
+    if (!b || !b->ready || b->login != login) {
+        controller.switchMt5Account(configPath, login, server);
+        mt5AccountsMessage_ += " MT5 is being switched to it (it closes and opens again, minimized).";
+    }
+}
+
+void DashboardWindow::renderMt5AccountsPopup(LiveController& controller) {
+    if (mt5AccountsOpen_) {
+        ImGui::OpenPopup("MT5 accounts");
+        mt5AccountsOpen_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(std::min(760.0f, ImGui::GetMainViewport()->Size.x - 40.0f), 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("MT5 accounts", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    const auto b = controller.bridgeStatus();
+    const bool mtReady = b && b->ready;
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+    if (mtReady) {
+        ImGui::Text("MT5 is logged in to %s on %s (%s)%s", b->login.c_str(), b->server.c_str(), b->company.c_str(),
+                    b->tradeMode == "real" ? "  --  REAL money" : "");
+    } else {
+        ImGui::TextDisabled(controller.mt5Starting() ? "MT5 is starting..." : "MT5 isn't connected right now.");
+    }
+    ImGui::Text("This config trades: %s%s", savedMt5Login_.empty() ? "whatever account MT5 is on" : savedMt5Login_.c_str(),
+                savedMt5Server_.empty() ? "" : (" on " + savedMt5Server_).c_str());
+    if (mtReady && !savedMt5Login_.empty() && b->login != savedMt5Login_) {
+        ImGui::TextColored(kRed, "They differ: the bot doesn't trade until they match.");
+        if (controller.mt5SwitchTriesUsed() >= 2) {
+            ImGui::TextColored(kAmber, "MT5 didn't stay on %s after %d switches -- most likely MT5 has no saved password "
+                                       "for it. Type it under 'Add or fix an account' below.",
+                               savedMt5Login_.c_str(), controller.mt5SwitchTriesUsed());
+        }
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Accounts used on this PC (click one to trade it):");
+    if (prefs_.mt5Accounts.empty()) ImGui::TextDisabled("None yet -- each account MT5 logs in to is added here.");
+    std::optional<Mt5KnownAccount> pick;
+    if (ImGui::BeginTable("mt5accounts", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        for (std::size_t i = 0; i < prefs_.mt5Accounts.size(); ++i) {
+            const Mt5KnownAccount& a = prefs_.mt5Accounts[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(a.login.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted((a.server + (a.company.empty() ? "" : "  (" + a.company + ")")).c_str());
+            ImGui::TableNextColumn();
+            if (a.mode == "real") {
+                ImGui::TextColored(kRed, "REAL%s", a.currency == "USC" ? " cent" : "");
+            } else {
+                ImGui::TextColored(kGreen, "%s%s", a.mode.empty() ? "?" : (a.mode == "demo" ? "demo" : a.mode.c_str()),
+                                   a.currency == "USC" ? " cent" : "");
+            }
+            ImGui::TableNextColumn();
+            const bool onIt = mtReady && b->login == a.login;
+            const bool config = a.login == savedMt5Login_;
+            ImGui::TextDisabled("%s%s%s", onIt ? "MT5 is on it" : "", onIt && config ? ", " : "", config ? "this config" : "");
+            ImGui::TableNextColumn();
+            if (!(onIt && config) && glass::button(config ? "Switch MT5 to it" : "Trade this one", kBlue)) pick = a;
+            if (a.mode == "real") ImGui::SetItemTooltip("A REAL money account: the config's Account type becomes LIVE.");
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (pick) useMt5Account(controller, pick->login, pick->server, pick->mode, "");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Add or fix an account (the password is saved in this config file only):");
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputTextWithHint("##newlogin", "login", newMt5Login_.data(), newMt5Login_.size(), ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(170.0f);
+    ImGui::InputTextWithHint("##newpass", "password", newMt5Password_.data(), newMt5Password_.size(),
+                             ImGuiInputTextFlags_Password);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::InputTextWithHint("##newserver", "server, e.g. JustMarkets-Live6", newMt5Server_.data(), newMt5Server_.size());
+    ImGui::SameLine();
+    ImGui::BeginDisabled(newMt5Login_[0] == '\0');
+    if (glass::button("Save and switch", kGreen)) {
+        std::string server = newMt5Server_.data();
+        for (const auto& a : prefs_.mt5Accounts) {
+            if (server.empty() && a.login == newMt5Login_.data()) server = a.server;
+        }
+        useMt5Account(controller, newMt5Login_.data(), server, "", newMt5Password_.data());
+        newMt5Login_.fill('\0');
+        newMt5Server_.fill('\0');
+    }
+    ImGui::EndDisabled();
+    if (!mt5AccountsMessage_.empty()) ImGui::TextColored(kBlue, "%s", mt5AccountsMessage_.c_str());
+
+    ImGui::Separator();
+    if (ImGui::Checkbox("Switch MT5 to this config's account by itself", &prefs_.mt5AutoSwitch)) savePrefs(prefs_);
+    ImGui::SetItemTooltip("When MT5 opens on another account, Muuk closes it and opens it again on this config's account "
+                          "(twice at most -- then this list opens).");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (glass::button("Close", glass::palette().neutral, ImVec2(120, 0))) {
+        mt5AccountsMessage_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void DashboardWindow::renderThisPcSection() {

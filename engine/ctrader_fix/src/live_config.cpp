@@ -346,8 +346,11 @@ void saveAccountSettings(const std::filesystem::path& path, const AccountSetting
         nlohmann::json j = readJsonFile(copyFrom ? *copyFrom : path);
         auto& c = j["connection"];
         c["platform"] = "mt5";
+        const std::string oldLogin = c.contains("mt5") && c.at("mt5").is_object() ? jsonString(c.at("mt5"), "login") : "";
+        // The saved password belongs to the saved login: another account never gets it.
         const std::string oldPassword =
-            !copyFrom && c.contains("mt5") && c.at("mt5").contains("password") && c.at("mt5").at("password").is_string()
+            !copyFrom && oldLogin == a.mt5Login && c.contains("mt5") && c.at("mt5").contains("password") &&
+                    c.at("mt5").at("password").is_string()
                 ? c.at("mt5").at("password").get<std::string>()
                 : std::string();
         c["mt5"] = {{"eaPort", a.mt5EaPort},       {"fixPort", a.mt5FixPort}, {"autoStart", a.mt5AutoStart},

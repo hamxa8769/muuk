@@ -2,12 +2,23 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace muuk::desktop {
 
 // The app's own preferences -- how it looked and what it was pointed at
 // last time -- so it opens the way it was left. Trading settings live in
 // the config file itself (see LiveController::saveSettings), not here.
+// An MT5 account the bridge has been logged in to on this PC (never a password).
+struct Mt5KnownAccount {
+    std::string login;
+    std::string server;
+    std::string company;
+    std::string currency;  // "USC" = cent
+    std::string mode;      // "demo", "real", "contest"
+    std::string lastSeen;  // local time
+};
+
 struct AppPrefs {
     std::string configPath;    // last config used
     bool darkMode = true;
@@ -18,6 +29,11 @@ struct AppPrefs {
     // the role is kept so other users (with their own accounts) can come later.
     std::string userName;      // empty = this computer's user name
     std::string role = "admin";
+    // MT5 accounts seen through the bridge, newest first: the MT5 accounts
+    // list, and the server for a config that names only the login.
+    std::vector<Mt5KnownAccount> mt5Accounts;
+    // MT5 logged in to another account than the config's: Muuk switches it.
+    bool mt5AutoSwitch = true;
 };
 
 // The name shown for the user: prefs.userName, else this computer's user name.
