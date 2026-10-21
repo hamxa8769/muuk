@@ -105,6 +105,11 @@ public:
     // oldest first), handed out once: the bot seeds its market reading
     // (ATR, EMAs) with them instead of waiting for its own.
     [[nodiscard]] std::vector<muuk::core::Bar> takeHistoryBars();
+    // Asks the EA to write the one-minute history of `symbols` (comma
+    // separated, broker names found by prefix: "XAGUSD" -> "XAGUSD.c") to
+    // MQL5\Files\MuukHistory\<symbol>.csv, for backtests. Nothing is traded.
+    // false when MT5 isn't connected.
+    bool requestHistoryExport(const std::string& symbols, int bars = 200000);
 
 private:
     struct FixConn {

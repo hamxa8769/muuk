@@ -133,6 +133,7 @@ void OnTimer()
    }
    QueueTick();
    if(GetTickCount64() - g_lastAccountMs >= 1000) QueueAccount();
+   ExportStep();
    Exchange();
 }
 
@@ -471,6 +472,7 @@ void HandleCommand(const string line)
    else if(c == "positions") ListPositions(JsonStr(line, "req"));
    else if(c == "orders")    ListOrders(JsonStr(line, "req"));
    else if(c == "bars")      QueueBars();
+   else if(c == "export")    StartExport(line);
 }
 
 void PlaceStop(const string line)
@@ -557,6 +559,115 @@ void PlaceMarket(const string line)
       return;
    }
    MapPut(res.order, id);  // the fill itself arrives through OnTradeTransaction (the deal comment carries the id too)
+}
+
+//+------------------------------------------------------------------+
+//| History export for backtests: one-minute bars of other symbols   |
+//+------------------------------------------------------------------+
+// MQL5\Files\MuukHistory\<symbol>.csv: a "# ..." line with what the symbol
+// is (digits, point, contract, tick size/value in the account's money,
+// currency, description), then time,open,high,low,close,tickvol,spread
+// (spread in points) per bar, oldest first. Read only -- nothing is traded.
+// One symbol per timer pass, so the bridge keeps running meanwhile.
+string g_exportList[];
+int    g_exportIdx = 0;
+int    g_exportTries = 0;
+int    g_exportBars = 200000;
+ulong  g_exportLastMs = 0;
+
+// The broker's name for `want` ("XAGUSD" -> "XAGUSD.c", "US30" -> "US30Cash"...): the
+// name itself, else the shortest tradable symbol starting with it.
+string ResolveSymbol(string want)
+{
+   StringTrimLeft(want);
+   StringTrimRight(want);
+   if(want == "") return "";
+   if(Exists(want)) return want;
+   string up = want;
+   StringToUpper(up);
+   string best = "";
+   for(int i = 0; i < SymbolsTotal(false); i++)
+   {
+      const string name = SymbolName(i, false);
+      string u = name;
+      StringToUpper(u);
+      if(StringFind(u, up) != 0) continue;
+      if(SymbolInfoInteger(name, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) continue;
+      if(best == "" || StringLen(name) < StringLen(best)) best = name;
+   }
+   return best;
+}
+
+void StartExport(const string line)
+{
+   string parts[];
+   const int n = StringSplit(JsonStr(line, "symbols"), ',', parts);
+   const double bars = JsonNum(line, "bars");
+   g_exportBars = bars > 0 ? (int)bars : 200000;
+   ArrayResize(g_exportList, 0);
+   for(int i = 0; i < n; i++)
+   {
+      const string sym = ResolveSymbol(parts[i]);
+      if(sym == "")
+      {
+         Send("{\"t\":\"exported\",\"want\":\"" + Esc(parts[i]) + "\",\"symbol\":\"\",\"bars\":0,\"text\":\"no such symbol at this broker\"}");
+         continue;
+      }
+      bool dup = false;
+      for(int k = 0; k < ArraySize(g_exportList); k++) if(g_exportList[k] == sym) dup = true;
+      if(dup) continue;
+      const int m = ArraySize(g_exportList);
+      ArrayResize(g_exportList, m + 1);
+      g_exportList[m] = sym;
+      SymbolSelect(sym, true);  // MT5 downloads the history of selected symbols
+   }
+   g_exportIdx = 0;
+   g_exportTries = 0;
+   Print("MuukBridge: exporting one-minute history of ", ArraySize(g_exportList), " symbol(s) for backtests");
+}
+
+void ExportStep()
+{
+   if(g_exportIdx >= ArraySize(g_exportList)) return;
+   if(GetTickCount64() - g_exportLastMs < 1000) return;
+   g_exportLastMs = GetTickCount64();
+   const string sym = g_exportList[g_exportIdx];
+   MqlRates r[];
+   ArraySetAsSeries(r, false);
+   const int n = CopyRates(sym, PERIOD_M1, 0, g_exportBars, r);
+   if(n <= 0)
+   {
+      if(++g_exportTries < 30) return;  // still downloading: try again (up to 30 s)
+      Send("{\"t\":\"exported\",\"symbol\":\"" + Esc(sym) + "\",\"bars\":0,\"text\":\"no history from the broker\"}");
+      g_exportIdx++;
+      g_exportTries = 0;
+      return;
+   }
+   const int h = FileOpen("MuukHistory\\" + sym + ".csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h != INVALID_HANDLE)
+   {
+      const int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+      FileWriteString(h, "# symbol=" + sym + ",digits=" + IntegerToString(digits) +
+                         ",point=" + DoubleToString(SymbolInfoDouble(sym, SYMBOL_POINT), 10) +
+                         ",contract=" + DoubleToString(SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE), 4) +
+                         ",tickSize=" + DoubleToString(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE), 10) +
+                         ",tickValue=" + DoubleToString(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE), 10) +
+                         ",volMin=" + DoubleToString(SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN), 4) +
+                         ",currency=" + AccountInfoString(ACCOUNT_CURRENCY) +
+                         ",gmtOffset=" + IntegerToString((long)(TimeTradeServer() - TimeGMT())) +
+                         ",description=" + SymbolInfoString(sym, SYMBOL_DESCRIPTION) + "\r\n");
+      for(int i = 0; i < n; i++)
+      {
+         FileWriteString(h, IntegerToString((long)r[i].time) + "," + DoubleToString(r[i].open, digits) + "," +
+                            DoubleToString(r[i].high, digits) + "," + DoubleToString(r[i].low, digits) + "," +
+                            DoubleToString(r[i].close, digits) + "," + IntegerToString(r[i].tick_volume) + "," +
+                            IntegerToString(r[i].spread) + "\r\n");
+      }
+      FileClose(h);
+   }
+   Send("{\"t\":\"exported\",\"symbol\":\"" + Esc(sym) + "\",\"bars\":" + IntegerToString(n) + "}");
+   g_exportIdx++;
+   g_exportTries = 0;
 }
 
 // A position that is no longer open: its closing deal(s) from MT5's history,

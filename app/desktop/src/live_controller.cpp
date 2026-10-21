@@ -98,6 +98,12 @@ void LiveController::healMt5(const std::string& configPath) {
     startMt5(configPath, true);
 }
 
+bool LiveController::exportMt5History(const std::string& symbols) {
+    if (!bridge_ || !bridge_->status().ready) return false;
+    appendLog("[mt5] asking MT5 for the one-minute history of " + symbols + " (for backtests; nothing is traded)");
+    return bridge_->requestHistoryExport(symbols);
+}
+
 void LiveController::setMt5ServerHints(std::map<std::string, std::string> hints) {
     std::scoped_lock lock(mt5Mutex_);
     mt5ServerHints_ = std::move(hints);

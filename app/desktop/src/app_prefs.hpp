@@ -34,6 +34,9 @@ struct AppPrefs {
     std::vector<Mt5KnownAccount> mt5Accounts;
     // MT5 logged in to another account than the config's: Muuk switches it.
     bool mt5AutoSwitch = true;
+    // Backtest data: the symbols MT5 exports once a day (MQL5\Files\MuukHistory).
+    std::string historySymbols = "XAUUSD,XAGUSD,US30,NAS100,USTEC,GER40,DE40,BTCUSD,ETHUSD,EURUSD,GBPUSD,USDJPY";
+    std::string historyExportedOn;  // local date of the last export
 };
 
 // The name shown for the user: prefs.userName, else this computer's user name.

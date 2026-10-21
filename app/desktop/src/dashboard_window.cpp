@@ -771,6 +771,22 @@ void DashboardWindow::render(LiveController& controller) {
     if (!controller.demo() && account_.loaded && account_.platform == 1) {
         if (!mt5HintsPushed_) pushMt5ServerHints(controller);
         rememberMt5Account(controller);
+        // Backtest data, once a day: MT5 writes the history of the research symbols.
+        if (const auto b = controller.bridgeStatus(); b && b->ready && !prefs_.historySymbols.empty()) {
+            const std::time_t t = std::time(nullptr);
+            std::tm lt{};
+#ifdef _WIN32
+            localtime_s(&lt, &t);
+#else
+            localtime_r(&t, &lt);
+#endif
+            char day[16];
+            std::strftime(day, sizeof(day), "%Y-%m-%d", &lt);
+            if (prefs_.historyExportedOn != day && controller.exportMt5History(prefs_.historySymbols)) {
+                prefs_.historyExportedOn = day;
+                savePrefs(prefs_);
+            }
+        }
         controller.keepMt5OnAccount(configPathBuffer_.data(), savedMt5Login_, prefs_.mt5AutoSwitch);
         if (const auto b = controller.bridgeStatus(); b && b->ready && !savedMt5Login_.empty() &&
                                                       b->login != savedMt5Login_ && !controller.mt5Starting() &&
@@ -3310,6 +3326,24 @@ void DashboardWindow::renderThisPcSection() {
     ImGui::SetItemTooltip("Connect when the app opens (the same switch as in the header).");
     if (start && !prefs_.autoConnect) {
         ImGui::TextColored(kAmber, "Turn Auto-connect on too, or Muuk opens after a restart but doesn't trade.");
+    }
+    // Backtest data from MT5.
+    if (account_.platform == 1) {
+        static std::array<char, 256> symbols{};
+        if (symbols[0] == '\0') copyTo(symbols, prefs_.historySymbols);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("History for backtests");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(std::max(200.0f, ImGui::GetContentRegionAvail().x - 150.0f));
+        if (ImGui::InputText("##histsyms", symbols.data(), symbols.size())) {
+            prefs_.historySymbols = symbols.data();
+            savePrefs(prefs_);
+        }
+        ImGui::SetItemTooltip("Symbols (comma separated, the broker's own names are found: XAGUSD -> XAGUSD.c). MT5 "
+                              "writes their one-minute history to MQL5\\Files\\MuukHistory once a day, so new "
+                              "symbols can be tested before they are traded. Read only: nothing is traded.");
+        ImGui::SameLine();
+        if (glass::button("Export now", kBlue) && controller_) (void)controller_->exportMt5History(prefs_.historySymbols);
     }
     // Shortcuts, so Muuk opens like any other app.
     for (const auto place : {ShortcutPlace::Desktop, ShortcutPlace::StartMenu}) {

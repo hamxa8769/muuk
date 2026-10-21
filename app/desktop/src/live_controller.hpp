@@ -94,6 +94,9 @@ public:
     void keepMt5OnAccount(const std::string& configPath, const std::string& want, bool autoSwitch);
     [[nodiscard]] int mt5SwitchTriesUsed() const { return mt5SwitchTries_; }
     void resetMt5SwitchTries() { mt5SwitchTries_ = 0; }
+    // Backtest data: MT5 writes the one-minute history of `symbols` to
+    // MQL5\Files\MuukHistory (see Mt5Gateway::requestHistoryExport).
+    bool exportMt5History(const std::string& symbols);
 
     // Range / position controls -- forwarded straight to LiveRunner (see
     // its comments for exactly what each does). No-ops if not running.

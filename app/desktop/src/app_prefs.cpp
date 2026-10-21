@@ -35,6 +35,8 @@ AppPrefs loadPrefs() {
         prefs.userName = j.value("userName", std::string());
         prefs.role = j.value("role", std::string("admin"));
         prefs.mt5AutoSwitch = j.value("mt5AutoSwitch", true);
+        prefs.historySymbols = j.value("historySymbols", prefs.historySymbols);
+        prefs.historyExportedOn = j.value("historyExportedOn", std::string());
         for (const auto& a : j.value("mt5Accounts", nlohmann::json::array())) {
             if (!a.is_object()) continue;
             Mt5KnownAccount k;
@@ -66,6 +68,8 @@ void savePrefs(const AppPrefs& prefs) {
         out << nlohmann::json{{"configPath", prefs.configPath},
                               {"mt5Accounts", accounts},
                               {"mt5AutoSwitch", prefs.mt5AutoSwitch},
+                              {"historySymbols", prefs.historySymbols},
+                              {"historyExportedOn", prefs.historyExportedOn},
                               {"darkMode", prefs.darkMode},
                               {"autoConnect", prefs.autoConnect},
                               {"autoReconnect", prefs.autoReconnect},

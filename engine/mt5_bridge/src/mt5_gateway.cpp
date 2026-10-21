@@ -139,6 +139,10 @@ EaStatus Mt5Gateway::status() const {
     return status_;
 }
 
+bool Mt5Gateway::requestHistoryExport(const std::string& symbols, int bars) {
+    return sendEa({{"c", "export"}, {"symbols", symbols}, {"bars", bars}});
+}
+
 std::vector<muuk::core::Bar> Mt5Gateway::takeHistoryBars() {
     std::scoped_lock lock(mutex_);
     return std::exchange(historyBars_, {});
@@ -403,6 +407,14 @@ void Mt5Gateway::onEaLine(const std::string& line) {
         r.set(tag::CxlRejResponseTo, std::string("1"));
         r.set(tag::Text, jsonString(j, "text"));
         sendFix(tc, r);
+        return;
+    }
+    if (t == "exported") {
+        const std::string sym = jsonString(j, "symbol");
+        const auto n = static_cast<long long>(jsonNumber(j, "bars", 0.0));
+        log("[mt5] history export: " + (sym.empty() ? jsonString(j, "want") : sym) + " -- " +
+            (n > 0 ? std::to_string(n) + " one-minute bars written to MQL5\\Files\\MuukHistory"
+                   : jsonString(j, "text")));
         return;
     }
     if (t == "bars") {
