@@ -412,7 +412,7 @@ void Mt5Gateway::onEaLine(const std::string& line) {
     if (t == "exported") {
         const std::string sym = jsonString(j, "symbol");
         const auto n = static_cast<long long>(jsonNumber(j, "bars", 0.0));
-        log("[mt5] history export: " + (sym.empty() ? jsonString(j, "want") : sym) + " -- " +
+        log("history export: " + (sym.empty() ? jsonString(j, "want") : sym) + " -- " +
             (n > 0 ? std::to_string(n) + " one-minute bars written to MQL5\\Files\\MuukHistory"
                    : jsonString(j, "text")));
         return;
