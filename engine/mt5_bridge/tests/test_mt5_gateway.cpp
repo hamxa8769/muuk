@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #define WIN32_LEAN_AND_MEAN
@@ -73,6 +74,13 @@ public:
         });
         if (!ok) throw std::runtime_error("FakeEa: no '" + c + "' command");
         return found;
+    }
+    std::optional<nlohmann::json> tryWaitFor(const std::string& c, std::chrono::milliseconds timeout) {
+        try {
+            return waitFor(c, timeout);
+        } catch (const std::runtime_error&) {
+            return std::nullopt;
+        }
     }
     // tickValue: account money per 0.01 per lot -- 1 when a cent lot is 1/100 of a
     // standard lot (JustMarkets), 100 when the lot is standard but money is in cents.
@@ -499,4 +507,53 @@ TEST_CASE("MT5 bridge: a freshly started MT5 that doesn't know the tick value ye
     ea.send({{"t", "fill"}, {"id", close.at("id")}, {"price", 4339.465}, {"volume", 0.01}, {"pos", "94000001"}, {"buy", false}});
     REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
     REQUIRE(runner.snapshot().baskets[0].gross == Catch::Approx(2.465).margin(0.001));
+}
+
+TEST_CASE("MT5 bridge: a position closed elsewhere just before the bot's close is booked at MT5's real closing price") {
+    GatewayConfig gc;
+    gc.pipeName = uniquePipe();
+    gc.fixPort = 0;
+    Mt5Gateway gateway(gc, [](const std::string&) {});
+    gateway.start();
+    FakeEa ea(gateway.pipeName());
+    ea.hello();
+    REQUIRE(waitUntil([&] { return gateway.status().ready; }));
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+
+    LiveConfig cfg = mt5Config(gateway.fixPort());
+    cfg.connection.verifySeconds = 1;
+    LiveRunner runner(cfg);
+    runner.setLogHandler([](const std::string&) {});
+    runner.setStateFile(freshState("mt5_closed_elsewhere"));
+    RunnerThread thread(runner);
+    auto answerChecks = [&](const nlohmann::json& positions) {
+        const auto posReq = ea.waitFor("positions");
+        ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", positions}});
+        const auto ordReq = ea.waitFor("orders");
+        ea.send({{"t", "orders"}, {"req", ordReq.at("req")}, {"list", nlohmann::json::array()}});
+    };
+    answerChecks(nlohmann::json::array());
+    ea.send({{"t", "tick"}, {"bid", 4336.40}, {"ask", 4336.50}});
+    const auto buy = ea.waitFor("stop");
+    ea.send({{"t", "fill"}, {"id", buy.at("id")}, {"price", 4337.00}, {"volume", 0.01}, {"pos", "70001"}, {"buy", true}});
+    REQUIRE(waitUntil([&] { return runner.snapshot().positions.size() == 1; }));
+
+    // Close range -- but the position was closed elsewhere a moment ago: MT5 refuses the close.
+    runner.closeRange(false);
+    const auto close = ea.waitFor("market");
+    ea.send({{"t", "reject"}, {"id", close.at("id")}, {"text", "INCORRECT_POSITION_ID: Unknown position. PositionId=70001"}});
+    // The check finds it gone; the bot asks MT5 again and the bridge answers with the closing deal.
+    for (int i = 0; i < 5; ++i) {
+        const auto posReq = ea.waitFor("positions");
+        ea.send({{"t", "positions"}, {"req", posReq.at("req")}, {"list", nlohmann::json::array()}});
+        if (const auto again = ea.tryWaitFor("market", std::chrono::milliseconds(800))) {
+            REQUIRE(again->at("pos") == "70001");
+            REQUIRE(again->at("id") != close.at("id"));
+            ea.send({{"t", "fill"}, {"id", again->at("id")}, {"price", 4339.50}, {"volume", 0.01}, {"pos", "70001"},
+                     {"buy", false}});
+            break;
+        }
+    }
+    REQUIRE(waitUntil([&] { return runner.snapshot().baskets.size() == 1; }));
+    REQUIRE(runner.snapshot().baskets[0].net == Catch::Approx(2.50));  // 0.01 lot x $2.50, not 0
 }

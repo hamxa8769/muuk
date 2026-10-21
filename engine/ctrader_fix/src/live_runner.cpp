@@ -2576,6 +2576,15 @@ void LiveRunner::finishPositionSync(const std::vector<PositionReportInfo>& repor
             pendingCloses_.erase(clOrdId);
             closeSentAt_.erase(clOrdId);
             closeRecheck_.erase(clOrdId);
+            if (config_.connection.isMt5() && closeHistoryAsked_.insert(leg.positionId).second) {
+                // MT5 knows how it closed: the bridge answers a close of a closed
+                // position with its closing deal from the history -- booked as
+                // this close's fill (its real price and P/L, not 0).
+                auditEventLocked(3, 1, "position " + leg.positionId +
+                                           " is already closed at MT5 -- asking MT5 for its closing deal");
+                closeLegs({leg});
+                continue;
+            }
             closeAttempts_.erase(leg.positionId);
             closedPositionIds_.insert(leg.positionId);
             recordLegClosed(leg, 0.0, 0.0, 0.0, "closed at the broker (no fill report) -- see cTrader for its price");

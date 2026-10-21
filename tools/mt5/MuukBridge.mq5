@@ -523,6 +523,9 @@ void PlaceMarket(const string line)
       const ulong ticket = (ulong)StringToInteger(pos);
       if(!PositionSelectByTicket(ticket))
       {
+         // Already closed (by hand, from a phone, another program, a stop-out):
+         // report how it really closed, so the basket books MT5's own result.
+         if(SendClosedAsFill(id, ticket)) return;
          SendReject(id, "INCORRECT_POSITION_ID: Unknown position. PositionId=" + pos);
          return;
       }
@@ -554,6 +557,36 @@ void PlaceMarket(const string line)
       return;
    }
    MapPut(res.order, id);  // the fill itself arrives through OnTradeTransaction (the deal comment carries the id too)
+}
+
+// A position that is no longer open: its closing deal(s) from MT5's history,
+// sent as the fill of the bot's closing order `id` (volume-weighted price,
+// what closing cost). false = MT5 has no closing deal for it.
+bool SendClosedAsFill(const string id, const ulong positionId)
+{
+   if(!HistorySelectByPosition(positionId)) return false;
+   double vol = 0.0, pv = 0.0, cost = 0.0;
+   bool buyDeal = false;
+   string by = "";
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+   {
+      const ulong d = HistoryDealGetTicket(i);
+      if(d == 0) continue;
+      const long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
+      const double v = HistoryDealGetDouble(d, DEAL_VOLUME);
+      vol += v;
+      pv += v * HistoryDealGetDouble(d, DEAL_PRICE);
+      cost += -(HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE));
+      buyDeal = HistoryDealGetInteger(d, DEAL_TYPE) == DEAL_TYPE_BUY;
+      if(HistoryDealGetInteger(d, DEAL_MAGIC) != MagicNumber) by = " (closed outside the bot: by hand, a phone or another program)";
+   }
+   if(vol <= 0.0) return false;
+   Print("MuukBridge: position #", positionId, " was already closed", by, " -- its closing deal booked for ", id);
+   Send("{\"t\":\"fill\",\"id\":\"" + Esc(id) + "\",\"price\":" + Num(pv / vol, g_digits) + ",\"volume\":" + Num(vol, 4) +
+        ",\"pos\":\"" + IntegerToString((long)positionId) + "\",\"buy\":" + (buyDeal ? "true" : "false") +
+        ",\"comm\":" + Num(cost, 4) + "}");
+   return true;
 }
 
 void CancelOrder(const string line)
