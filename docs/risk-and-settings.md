@@ -81,14 +81,14 @@ Test on demo first.
   - uses the account that is already logged in there;
   - installs and starts its bridge on a gold chart.
 
-  You don't attach an EA by hand and you don't type any details (`10d2dbe`, `4254671`).
-- **The broker's symbol is used as it is.** This includes names like `XAUUSD.c`, the digits, the lot min/step/max and the order limit (`81066b7`, `c44bea9`).
+  You don't attach an EA by hand and you don't type any details (`f5912fe`, `58b0bdc`).
+- **The broker's symbol is used as it is.** This includes names like `XAUUSD.c`, the digits, the lot min/step/max and the order limit (`6f9b025`, `df93ce0`).
 - **Cent vs standard is detected** from the account currency (USC = cent).
 - **Balance, equity, margin, leverage, hedged margin and swap come straight from MT5.**
 - **Safety checks:**
   - a REAL account under a demo config is refused before any order;
   - a netting account is refused (the strategy needs hedging).
-- **Commission comes from the broker** (`9664ff3`):
+- **Commission comes from the broker** (`79e427b`):
   - the rate is learned from the account's gold deals of the last 90 days;
   - every fill reports the commission + fee it really cost, and the basket books exactly that.
 
@@ -96,7 +96,7 @@ Test on demo first.
 
 ### Protection against a margin call
 
-These came in `0884b78`:
+These came in `fdd60e2`:
 
 - **Margin guards:**
   - hold the next level under 300% margin level (a lock stop waits there instead);
@@ -108,7 +108,7 @@ These came in `0884b78`:
 
 ### Costs and slippage
 
-- **Slippage counts the closing fills too** (`ca77cbd`).
+- **Slippage counts the closing fills too** (`7f2cf91`).
   - *Entry slippage:* each Stop fill vs its order price.
   - *Exit slippage:* what the closing fills booked vs the net when the target fired.
 
@@ -126,7 +126,7 @@ These came in `0884b78`:
 ### The app
 
 - **Menu:** one menu icon at the top. It opens on hover and closes after you choose; the page uses the full width.
-- **Risk & capital page** (`310a27b`):
+- **Risk & capital page** (`59c590d`):
   - **Account cards** at the top of the **Positions** page (the first page): balance, equity, margin used, free margin and margin level. They come from MT5; on cTrader they use the balance you type in. The Risk & capital page repeats them in one line.
   - **One place for every risk setting.** Lot sizing and loss limits moved here from Settings, so no setting appears on two pages.
   - **On MT5, the fields the broker already reports are hidden.** These are balance, leverage, hedged margin, account type and commission; the cards show the broker's values instead.
