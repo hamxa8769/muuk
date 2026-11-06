@@ -363,7 +363,17 @@ TEST_CASE("MT5 config: the example loads, needs no FIX login and points the bot 
     REQUIRE(cfg.connection.quote.port == "5201");
     REQUIRE(cfg.connection.trade.port == "5201");
     REQUIRE(cfg.connection.accountKind == "cent");
-    REQUIRE(cfg.strategy.lotProgression.multiplier == Catch::Approx(2.0));
+    // The defaults a new install starts on: +0.01 lots, random $0.50-$1 ranges,
+    // the last-lot target, break-even from level 18, lock at level 21.
+    REQUIRE(cfg.strategy.lotProgression.multiplier == Catch::Approx(1.0));
+    REQUIRE(cfg.connection.entry.randomRange());
+    REQUIRE(cfg.connection.entry.rangeRandomMin == Catch::Approx(0.5));
+    REQUIRE(cfg.connection.entry.rangeRandomMax == Catch::Approx(1.0));
+    REQUIRE(cfg.connection.entryTimeoutSeconds == 30);
+    REQUIRE(cfg.connection.lockAtLevel == 21);
+    REQUIRE(cfg.strategy.riskLimits.maxOrders == 21);
+    REQUIRE(cfg.strategy.lastLotTarget);
+    REQUIRE(cfg.strategy.escapeFromLevel == 18);
 }
 
 TEST_CASE("MT5 bridge: any broker -- the symbol's digits, lot sizes and order limit are taken from MT5") {

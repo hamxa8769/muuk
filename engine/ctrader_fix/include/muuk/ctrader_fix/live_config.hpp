@@ -75,6 +75,13 @@ struct EntryFilterConfig {
     // autoRangeWidthPoints and never over rangeMaxWidth. 0 = fixed width.
     double rangeAtr = 0.0;
     double rangeMaxWidth = 15.0;
+    // Both >0: each new range gets a random width between these two ($),
+    // drawn afresh every time a range opens. Replaces the fixed width and
+    // rangeAtr. A width under the spread can't be placed: its orders wait and
+    // the entry timeout opens the range again with a new width.
+    double rangeRandomMin = 0.0;
+    double rangeRandomMax = 0.0;
+    [[nodiscard]] bool randomRange() const { return rangeRandomMin > 0.0 && rangeRandomMax >= rangeRandomMin; }
     // The last-lot target's price move = half the range width (it grows with
     // a wider range) instead of the fixed lastLotTargetMove.
     bool targetHalfRange = false;
@@ -84,7 +91,9 @@ struct EntryFilterConfig {
     // The first order goes with the trend: a Buy Stop when EMA8 > EMA21, a
     // Sell Stop when below (instead of the fixed "First order" side).
     bool startWithTrend = false;
-    [[nodiscard]] bool anyOn() const { return rangeAtr > 0.0 || targetHalfRange || trendMin > 0.0 || startWithTrend; }
+    [[nodiscard]] bool anyOn() const {
+        return rangeAtr > 0.0 || randomRange() || targetHalfRange || trendMin > 0.0 || startWithTrend;
+    }
 };
 
 struct LiveConnectionConfig {

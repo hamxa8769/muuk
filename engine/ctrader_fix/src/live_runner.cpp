@@ -38,9 +38,22 @@ std::optional<OrderId> tryParseOrderId(const std::optional<std::string>& clOrdId
     }
 }
 
+// A cent account's money is US cents: the texts below say "USC" instead of "$".
+std::atomic<bool> g_moneyInCents{false};
+
+std::string plainAmount(double v) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.2f", v);
+    return buf;
+}
+
 std::string usdText(double v) {
     char buf[48];
-    std::snprintf(buf, sizeof(buf), v < 0.0 ? "-$%.2f" : "$%.2f", std::fabs(v));
+    if (g_moneyInCents.load()) {
+        std::snprintf(buf, sizeof(buf), "%s%.2f USC", v < 0.0 ? "-" : "", std::fabs(v));
+    } else {
+        std::snprintf(buf, sizeof(buf), v < 0.0 ? "-$%.2f" : "$%.2f", std::fabs(v));
+    }
     return buf;
 }
 
@@ -79,7 +92,9 @@ double secondsSinceStamp(const std::string& stamp) {
 }
 }  // namespace
 
-LiveRunner::LiveRunner(LiveConfig config) : config_(std::move(config)) {}
+LiveRunner::LiveRunner(LiveConfig config) : config_(std::move(config)) {
+    g_moneyInCents = config_.connection.accountKind == "cent";
+}
 
 LiveRunner::~LiveRunner() { stop(); }
 
@@ -583,7 +598,7 @@ void LiveRunner::run() {
                     const EngineStatus st = engine_->status();
                     oss << "[status] " << (st == EngineStatus::Active ? "range active" : st == EngineStatus::Completed ? "basket booked" : st == EngineStatus::HaltedByRisk ? "halted by risk" : "idle")
                         << " | " << openLegs_.size() << " position(s), " << (placedOrderInfo_.size() + waitingOrders_.size())
-                        << " pending | net $" << live.net << " | " << (ticksProcessed_ - statusTicks_) << " quotes/min";
+                        << " pending | net " << usdText(live.net) << " | " << (ticksProcessed_ - statusTicks_) << " quotes/min";
                     if (rtt.samples > 0) oss << " | round trip " << rtt.avg << " ms avg";
                     statusTicks_ = ticksProcessed_;
                     log(oss.str());
@@ -1037,8 +1052,8 @@ void LiveRunner::applyFillLocked(OrderId orderId, Price fillPrice, const std::st
             oss << "[fill] " << (buy ? "BUY " : "SELL ") << lots << " lot @ " << filled.price.toDouble(spec)
                 << " (order price " << filled.requestedPrice.toDouble(spec) << "), slippage "
                 << (slipTicks > 0 ? "+" : "") << static_cast<double>(slipTicks) * spec.tickSize << " = "
-                << (slipTicks > 0 ? "-$" : (slipTicks < 0 ? "+$" : "$"))
-                << std::abs(static_cast<double>(slipTicks) * spec.tickValue * lots)
+                << (slipTicks > 0 ? "-" : (slipTicks < 0 ? "+" : ""))
+                << usdText(std::abs(static_cast<double>(slipTicks) * spec.tickValue * lots))
                 << (slipTicks > 0 ? " (worse)" : (slipTicks < 0 ? " (better)" : ""));
             log(oss.str());
         }
@@ -1177,7 +1192,7 @@ void LiveRunner::maybeLockLocked() {
     if (!basketRunningLocked() && guardLockOrderId_ == 0) return;
     const double net = floatingNetLocked();
     if (net > -lockAt) return;
-    lockNowLocked("the basket reached " + usdText(net) + " (lock at -" + usdText(lockAt).substr(1) + ")", net);
+    lockNowLocked("the basket reached " + usdText(net) + " (lock at " + usdText(-lockAt) + ")", net);
 }
 
 void LiveRunner::lockNowLocked(const std::string& why, double net) {
@@ -1326,7 +1341,7 @@ void LiveRunner::onAccountInfoLocked(const FixMessage& msg) {
     brokerAccountAt_ = std::chrono::steady_clock::now();
     if (first && a.known) {
         log("[mt5] account " + a.login + " on " + a.server + " (" + a.company + "): " + a.currency + " " +
-            usdText(a.balance).substr(a.balance < 0.0 ? 2 : 1) + ", 1:" + std::to_string(static_cast<int>(a.leverage)) +
+            plainAmount(a.balance) + ", 1:" + std::to_string(static_cast<int>(a.leverage)) +
             (a.cent() ? " -- a cent account (every amount is in US cents)" : "") + ", symbol " + a.symbol);
     }
     // The symbol is taken over once MT5 knows what a price move is worth:
@@ -1378,6 +1393,7 @@ void LiveRunner::adoptBrokerSymbolLocked(const BrokerAccountInfo& a) {
     std::string notes;
     // Cent or standard: what the account's currency says (the report and the app count in it).
     config_.connection.accountKind = a.cent() ? "cent" : "standard";
+    g_moneyInCents = a.cent();
     // Commission: what this account really pays, learned from its own deals.
     if (a.commissionInPerLot >= 0.0 || a.commissionOutPerLot >= 0.0) {
         const double in = a.commissionInPerLot >= 0.0 ? a.commissionInPerLot : a.commissionOutPerLot;
@@ -2196,6 +2212,16 @@ double LiveRunner::rangeWidthNowLocked() {
                              ? config_.connection.autoRangeWidthPoints
                              : (config_.strategy.range.upperBound - config_.strategy.range.lowerBound).toDouble(spec);
     const EntryFilterConfig& e = config_.connection.entry;
+    if (e.randomRange()) {
+        // In whole ticks, and an even count: prepareNextCycle halves the width
+        // in ticks, so an odd one would come out a tick under the minimum.
+        const double tick = spec.tickSize > 0.0 ? spec.tickSize : 0.01;
+        const auto lowest = std::max<int64_t>(2, static_cast<int64_t>(std::ceil(e.rangeRandomMin / tick - 1e-9)));
+        const auto highest = std::max(lowest, static_cast<int64_t>(std::floor(e.rangeRandomMax / tick + 1e-9)));
+        int64_t ticks = std::uniform_int_distribution<int64_t>(lowest, highest)(rangeRng_);
+        if (ticks % 2 != 0) ticks += ticks < highest ? 1 : -1;
+        return static_cast<double>(std::max(ticks, lowest)) * tick;
+    }
     if (e.rangeAtr <= 0.0) return fixed;
     readMarketLocked();
     if (!marketRead_.enoughData || !(marketRead_.atr > 0.0)) return fixed;  // no bars yet: the fixed width
@@ -3014,8 +3040,8 @@ void LiveRunner::applySettings(const LiveSettings& settings) {
     marketDirty_ = true;
     marketWaitLogged_ = false;
     log("[settings] updated -- range width " + std::to_string(settings.rangeWidth) + ", lots " +
-        std::to_string(settings.initialLot) + " +" + std::to_string(settings.lotIncrement) + ", target $" +
-        std::to_string(settings.profitTarget) + (settings.autoContinue ? ", auto-continue on" : ", auto-continue off") +
+        std::to_string(settings.initialLot) + " +" + std::to_string(settings.lotIncrement) + ", target " +
+        usdText(settings.profitTarget) + (settings.autoContinue ? ", auto-continue on" : ", auto-continue off") +
         " (range and lots apply from the next range; target, stop loss and market hours now)");
 }
 

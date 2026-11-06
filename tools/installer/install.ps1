@@ -34,11 +34,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$info = Get-Content (Join-Path $here 'setup-info.json') -Raw | ConvertFrom-Json
 $logFile = Join-Path $env:TEMP 'Muuk-Setup.log'
 $script:warnings = New-Object System.Collections.ArrayList
 $script:form = $null
 $script:ui = @{}
+$payloadFiles = 'muuk-desktop.exe', 'uninstall.ps1', 'setup-info.json', 'first-config.json'
+
+# IExpress unpacks Setup into %TEMP%\IXP000.TMP and removes that folder on its
+# own schedule -- another self-extracting installer run meanwhile (a first
+# install downloads two) can take it away before Muuk is copied. So Setup
+# works from its own copy, made before anything is downloaded.
+$payload = Join-Path $env:TEMP ('Muuk-Setup-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $payload | Out-Null
+foreach ($file in $payloadFiles + 'muuk.ico') {
+    $src = Join-Path $here $file
+    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $payload -Force }
+}
+$missing = @($payloadFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $payload $_)) })
+$here = $payload
+$info = if (-not $missing) { Get-Content (Join-Path $here 'setup-info.json') -Raw | ConvertFrom-Json } else { [pscustomobject]@{ version = '?'; vcMinor = 0 } }
 
 function Say([string]$text) {
     Add-Content -Path $logFile -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $text)
@@ -49,22 +63,103 @@ function Say([string]$text) {
     }
 }
 
-function Set-Progress([int]$percent) {
-    if (-not $Silent -and $script:ui.Bar) {
-        $script:ui.Bar.Value = [Math]::Min(100, [Math]::Max(0, $percent))
+# The line above the bar: what Setup is doing right now.
+function Set-Status([string]$text) {
+    if (-not $Silent -and $script:ui.Status) {
+        $script:ui.Status.Text = $text
         [System.Windows.Forms.Application]::DoEvents()
     }
 }
 
-# Waits for a process while the window stays responsive.
-function Wait-Process-Ui($process, [int]$timeoutSeconds) {
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+function Set-Progress([double]$percent) {
+    if (-not $Silent -and $script:ui.Bar) {
+        $script:ui.Bar.Value = [int][Math]::Min(100, [Math]::Max(0, $percent))
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+}
+
+# Each step owns a stretch of the bar; a download fills its part as it goes.
+$script:stepFrom = 0
+$script:stepTo = 100
+function Start-Step([int]$from, [int]$to, [string]$text) {
+    $script:stepFrom = $from
+    $script:stepTo = $to
+    Set-Progress $from
+    Set-Status $text
+}
+function Set-StepFraction([double]$fraction) {
+    Set-Progress ($script:stepFrom + ($script:stepTo - $script:stepFrom) * [Math]::Min(1.0, [Math]::Max(0.0, $fraction)))
+}
+
+# Waits for a process while the window stays responsive, counting the seconds.
+function Wait-Process-Ui($process, [int]$timeoutSeconds, [string]$what = '') {
+    $start = Get-Date
+    $deadline = $start.AddSeconds($timeoutSeconds)
     while (-not $process.HasExited) {
         if ((Get-Date) -gt $deadline) { return $false }
+        if ($what) { Set-Status ("{0} ({1:N0} s)" -f $what, ((Get-Date) - $start).TotalSeconds) }
         if (-not $Silent) { [System.Windows.Forms.Application]::DoEvents() }
         Start-Sleep -Milliseconds 200
     }
     return $true
+}
+
+function Sleep-Ui([int]$milliseconds) {
+    $until = (Get-Date).AddMilliseconds($milliseconds)
+    while ((Get-Date) -lt $until) {
+        if (-not $Silent) { [System.Windows.Forms.Application]::DoEvents() }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+# Downloads $url to $path with the bytes shown as they come; tries 3 times.
+function Get-Download([string]$url, [string]$path, [string]$label) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    for ($try = 1; $try -le 3; $try++) {
+        $response = $null; $in = $null; $out = $null
+        try {
+            $request = [Net.HttpWebRequest]::Create($url)
+            $request.UserAgent = 'Muuk-Setup'
+            # Generous: a slow line (or one busy with another download) answers late.
+            $request.Timeout = 60000
+            $request.ReadWriteTimeout = 120000
+            $request.AllowAutoRedirect = $true
+            $response = $request.GetResponse()
+            $total = $response.ContentLength
+            $in = $response.GetResponseStream()
+            $out = [IO.File]::Create($path)
+            $buffer = New-Object byte[] 65536
+            $done = 0L
+            $shown = [DateTime]::MinValue
+            while (($n = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $out.Write($buffer, 0, $n)
+                $done += $n
+                if (((Get-Date) - $shown).TotalMilliseconds -ge 150) {
+                    $shown = Get-Date
+                    if ($total -gt 0) {
+                        Set-Status ("Downloading {0}: {1:N0}% ({2:N1} of {3:N1} MB)" -f $label, (100.0 * $done / $total), ($done / 1MB), ($total / 1MB))
+                        Set-StepFraction ($done / $total)
+                    } else {
+                        Set-Status ("Downloading {0}: {1:N1} MB" -f $label, ($done / 1MB))
+                    }
+                }
+            }
+            $out.Close(); $out = $null
+            if ($total -gt 0 -and $done -ne $total) { throw "the download stopped at $done of $total bytes" }
+            Set-StepFraction 1.0
+            return
+        } catch {
+            Say ("{0}: download try {1} of 3 failed: {2}" -f $label, $try, $_.Exception.Message)
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($try -eq 3) { throw "$label could not be downloaded: $($_.Exception.Message)" }
+            Set-Status "Downloading ${label}: trying again..."
+            Sleep-Ui (2000 * $try)
+        } finally {
+            if ($out) { $out.Close() }
+            if ($in) { $in.Close() }
+            if ($response) { $response.Close() }
+        }
+    }
 }
 
 function Test-VcRuntime {
@@ -131,17 +226,10 @@ function Find-MetaTrader {
 }
 
 # Downloads to the temp folder; returns the path only with a valid signature from $publisher.
-function Get-SignedDownload([string]$url, [string]$fileName, [string]$publisher) {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $path = Join-Path $env:TEMP $fileName
-    $web = New-Object Net.WebClient
-    $task = $web.DownloadFileTaskAsync($url, $path)
-    while (-not $task.IsCompleted) {
-        if (-not $Silent) { [System.Windows.Forms.Application]::DoEvents() }
-        Start-Sleep -Milliseconds 200
-    }
-    $web.Dispose()
-    if ($task.IsFaulted) { throw $task.Exception.InnerException }
+function Get-SignedDownload([string]$url, [string]$fileName, [string]$publisher, [string]$label) {
+    $path = Join-Path $payload $fileName
+    Get-Download $url $path $label
+    Set-Status "Checking the signature of $fileName..."
     $sig = Get-AuthenticodeSignature -FilePath $path
     if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch $publisher) {
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
@@ -159,14 +247,14 @@ function Install-VcRuntime {
             $p = Start-Process -FilePath $winget.Source -PassThru -WindowStyle Hidden -ArgumentList @(
                 'install', '--id', 'Microsoft.VCRedist.2015+.x64', '--exact', '--silent',
                 '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-            [void](Wait-Process-Ui $p 600)
+            [void](Wait-Process-Ui $p 600 'Visual C++ runtime: downloading and installing with winget')
         } catch { Say ('winget: ' + $_.Exception.Message) }
         if (Test-VcRuntime) { Say 'Visual C++ runtime: installed (winget).'; return }
     }
     try {
-        $exe = Get-SignedDownload 'https://aka.ms/vs/17/release/vc_redist.x64.exe' 'vc_redist.x64.exe' 'Microsoft'
+        $exe = Get-SignedDownload 'https://aka.ms/vs/17/release/vc_redist.x64.exe' 'vc_redist.x64.exe' 'Microsoft' 'the Visual C++ runtime'
         $p = Start-Process -FilePath $exe -PassThru -Verb RunAs -ArgumentList '/install', '/quiet', '/norestart'
-        [void](Wait-Process-Ui $p 600)
+        [void](Wait-Process-Ui $p 600 'Visual C++ runtime: installing (Windows may ask for permission)')
         Remove-Item -Path $exe -Force -ErrorAction SilentlyContinue
     } catch { Say ('vc_redist: ' + $_.Exception.Message) }
     if (Test-VcRuntime) { Say 'Visual C++ runtime: installed.'; return }
@@ -179,13 +267,19 @@ function Install-MetaTrader {
     if ($found) { Say "MetaTrader 5: already installed ($found) -- nothing to download."; return }
     Say 'MetaTrader 5: downloading from MetaQuotes...'
     try {
-        $exe = Get-SignedDownload 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' 'mt5setup.exe' 'MetaQuotes'
+        $exe = Get-SignedDownload 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' 'mt5setup.exe' 'MetaQuotes' 'MetaTrader 5'
         Say 'MetaTrader 5: installing (Windows may ask for permission)...'
         $p = Start-Process -FilePath $exe -PassThru -Verb RunAs -ArgumentList '/auto'
-        $deadline = (Get-Date).AddMinutes(10)
-        while (-not (Find-MetaTrader) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+        $start = Get-Date
+        $deadline = $start.AddMinutes(10)
+        $nextScan = $start
+        $found = $null
+        # MetaQuotes' setup downloads the terminal itself: it can take a few minutes.
+        while (-not $found -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            Set-Status ("MetaTrader 5: installing, MetaQuotes' setup downloads the terminal ({0:N0} s)" -f ((Get-Date) - $start).TotalSeconds)
+            if ((Get-Date) -ge $nextScan) { $found = Find-MetaTrader; $nextScan = (Get-Date).AddSeconds(3) }
             if (-not $Silent) { [System.Windows.Forms.Application]::DoEvents() }
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 300
         }
     } catch { Say ('mt5setup: ' + $_.Exception.Message) }
     if (Find-MetaTrader) { Say 'MetaTrader 5: installed.'; return }
@@ -209,14 +303,34 @@ function Write-TextFile([string]$path, [string]$text) {
 
 function Install-Muuk([bool]$desktopShortcut) {
     $exe = Join-Path $InstallDir 'muuk-desktop.exe'
-    $running = Get-Process -Name 'muuk-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
-    if ($running) { throw 'Muuk is running from this folder. Close it (check its open trades first) and run Setup again.' }
+    # After "Restart & install" in Muuk the app may still be closing: give it a minute.
+    $start = Get-Date
+    while ($true) {
+        $running = Get-Process -Name 'muuk-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
+        if (-not $running) { break }
+        if (((Get-Date) - $start).TotalSeconds -ge 60) {
+            throw 'Muuk is still running from this folder. Close it (check its open trades first), then press Retry.'
+        }
+        Set-Status ("Waiting for Muuk to close ({0:N0} s)" -f ((Get-Date) - $start).TotalSeconds)
+        Sleep-Ui 500
+    }
 
     Say "Muuk: copying to $InstallDir"
+    Set-Status 'Muuk: copying the app...'
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     foreach ($file in 'muuk-desktop.exe', 'uninstall.ps1', 'setup-info.json') {
-        Copy-Item -Path (Join-Path $here $file) -Destination $InstallDir -Force
+        # Windows can hold a just-closed exe for a moment: try again before giving up.
+        for ($try = 1; ; $try++) {
+            try {
+                Copy-Item -LiteralPath (Join-Path $here $file) -Destination $InstallDir -Force
+                break
+            } catch {
+                if ($try -ge 10) { throw "Can't write $file to ${InstallDir}: $($_.Exception.Message)" }
+                Sleep-Ui 500
+            }
+        }
     }
+    Set-StepFraction 0.5
 
     # First config and preferences: only where there are none yet.
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
@@ -260,26 +374,45 @@ function Install-Muuk([bool]$desktopShortcut) {
 }
 
 function Invoke-Setup([bool]$withMetaTrader, [bool]$desktopShortcut) {
+    if ($missing) { throw ("Setup is incomplete ({0} missing). Download Muuk-Setup.exe again." -f ($missing -join ', ')) }
+    $script:warnings.Clear()
     if (-not $SkipDependencies) {
-        Set-Progress 5
+        Start-Step 2 30 'Visual C++ runtime: checking...'
         Install-VcRuntime
-        Set-Progress 35
-        if ($withMetaTrader) { Install-MetaTrader } else { Say 'MetaTrader 5: skipped.' }
+        if ($withMetaTrader) {
+            Start-Step 30 80 'MetaTrader 5: checking...'
+            Install-MetaTrader
+        } else { Say 'MetaTrader 5: skipped.' }
     }
-    Set-Progress 75
+    Start-Step 80 100 'Muuk: installing...'
     $exe = Install-Muuk $desktopShortcut
     Set-Progress 100
+    Set-Status 'Done.'
     return $exe
+}
+
+function Remove-Payload {
+    Remove-Item -LiteralPath $payload -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- no window
 if ($Silent) {
-    $exe = Invoke-Setup (-not $NoMetaTrader) $true
-    foreach ($w in $script:warnings) { Write-Host "WARNING: $w" }
+    try {
+        $exe = Invoke-Setup (-not $NoMetaTrader) $true
+        foreach ($w in $script:warnings) { Write-Host "WARNING: $w" }
+    } finally { Remove-Payload }
     exit 0
 }
 
 # ---------------------------------------------------------------- the window
+# Its own taskbar identity, so the taskbar shows the Muuk icon, not PowerShell's.
+try {
+    Add-Type -Namespace MuukSetup -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+'@
+    [void][MuukSetup.Native]::SetCurrentProcessExplicitAppUserModelID('Muuk.Setup')
+} catch { Say ('taskbar id: ' + $_.Exception.Message) }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -316,21 +449,29 @@ $desktopBox = New-Object System.Windows.Forms.CheckBox
 $desktopBox.Text = 'Put a shortcut on the desktop'
 $desktopBox.Checked = $true
 $desktopBox.SetBounds(16, 124, 508, 22)
+$status = New-Object System.Windows.Forms.Label
+$status.Text = 'Ready to install.'
+$status.AutoEllipsis = $true
+$status.SetBounds(16, 150, 508, 18)
 $bar = New-Object System.Windows.Forms.ProgressBar
-$bar.SetBounds(16, 154, 508, 18)
+$bar.SetBounds(16, 170, 508, 18)
 $log = New-Object System.Windows.Forms.TextBox
 $log.Multiline = $true
 $log.ReadOnly = $true
 $log.ScrollBars = 'Vertical'
-$log.SetBounds(16, 180, 508, 166)
+$log.SetBounds(16, 196, 508, 150)
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = 'Install'
 $installButton.SetBounds(344, 358, 86, 30)
 $closeButton = New-Object System.Windows.Forms.Button
 $closeButton.Text = 'Cancel'
 $closeButton.SetBounds(438, 358, 86, 30)
-$form.Controls.AddRange(@($title, $intro, $mt5Box, $desktopBox, $bar, $log, $installButton, $closeButton))
-$script:ui = @{ Log = $log; Bar = $bar }
+$form.Controls.AddRange(@($title, $intro, $mt5Box, $desktopBox, $status, $bar, $log, $installButton, $closeButton))
+$script:ui = @{ Log = $log; Bar = $bar; Status = $status }
+if ($missing) {
+    Say ("Setup is incomplete ({0} missing). Download Muuk-Setup.exe again." -f ($missing -join ', '))
+    $installButton.Enabled = $false
+}
 
 $script:installedExe = $null
 $script:busy = $false
@@ -362,9 +503,15 @@ $installButton.Add_Click({
         Say ''
         Say ('Setup failed: ' + $_.Exception.Message)
         Say "Details: $logFile"
+        Say 'Press Retry: what is already installed is not downloaded again.'
+        Set-Status ('Failed: ' + $_.Exception.Message)
+        $installButton.Text = 'Retry'
+        $installButton.Enabled = $true
+        $mt5Box.Enabled = -not $mt5Found
+        $desktopBox.Enabled = $true
         $closeButton.Text = 'Close'
     }
     $closeButton.Enabled = $true
     $script:busy = $false
 })
-[void]$form.ShowDialog()
+try { [void]$form.ShowDialog() } finally { Remove-Payload }

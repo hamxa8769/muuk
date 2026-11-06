@@ -2,12 +2,13 @@
 // title-bar icon -- GLFW picks it by that name) and the version info that
 // Explorer and Task Manager show ("Muuk" instead of muuk-desktop.exe).
 #include <winver.h>
+#include "../src/version.hpp"
 
 GLFW_ICON ICON "muuk.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION MUUK_VERSION_COMMAS
+ PRODUCTVERSION MUUK_VERSION_COMMAS
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -20,11 +21,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Muuk"
             VALUE "FileDescription", "Muuk"
-            VALUE "FileVersion", "1.0.0"
+            VALUE "FileVersion", MUUK_VERSION_STR
             VALUE "InternalName", "muuk-desktop"
             VALUE "OriginalFilename", "muuk-desktop.exe"
             VALUE "ProductName", "Muuk"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", MUUK_VERSION_STR
         END
     END
     BLOCK "VarFileInfo"

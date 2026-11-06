@@ -13,6 +13,7 @@
 #include "app_prefs.hpp"
 #include "live_controller.hpp"
 #include "system_monitor.hpp"
+#include "updater.hpp"
 #include "muuk/ctrader_fix/volume_stats.hpp"
 
 struct ImFont;
@@ -68,6 +69,11 @@ public:
     // the positions open, or stay. The app quits once exitApproved().
     void requestExit(LiveController& controller);
     [[nodiscard]] bool exitApproved() const { return exitApproved_; }
+    // After the app has stopped: opens the downloaded update's Setup when the
+    // operator chose "Restart & install" (main.cpp calls it on the way out).
+    void launchPendingUpdate() {
+        if (updateOnExit_) (void)updater_.launchSetup();
+    }
     // Opens on this tab ("positions", "history", "audit", ...; --tab on the command line).
     void selectTabByName(const std::string& name);
 
@@ -186,6 +192,8 @@ private:
 
     bool exitApproved_ = false;
     bool openExitRequested_ = false;
+    Updater updater_;
+    bool updateOnExit_ = false;  // "Restart & install": Setup opens once the app has exited
     bool exitClosing_ = false;      // "Close everything & exit" in progress
     double exitClosingSince_ = 0.0;
 

@@ -14,6 +14,7 @@
 #include "config_discovery.hpp"
 #include "glass_ui.hpp"
 #include "open_path.hpp"
+#include "version.hpp"
 #include "windows_startup.hpp"
 #include "muuk/core/risk_table.hpp"
 #include "muuk/ctrader_fix/basket_history.hpp"
@@ -142,8 +143,10 @@ std::string lots(double v) {
     return buf;
 }
 
-// "$1,464,993"
+// "$1,464,993". Value traded comes in account money: on a cent account that's
+// US cents, so 100 of them make the $1 shown here.
 std::string dollarsWhole(double v) {
+    if (g_centUnits) v /= 100.0;
     char digits[32];
     std::snprintf(digits, sizeof(digits), "%.0f", std::fabs(v));
     std::string out;
@@ -259,7 +262,7 @@ void breakdownRow(const char* label, const char* help, double value, bool isCost
     ImGui::TableNextColumn();
     char buf[32];
     if (isCost) {
-        std::snprintf(buf, sizeof(buf), "%s$%.2f", value < -0.005 ? "+" : "-", std::fabs(value));
+        std::snprintf(buf, sizeof(buf), "%s%s", value < -0.005 ? "+" : "-", amount(std::fabs(value)).c_str());
     } else {
         std::snprintf(buf, sizeof(buf), "%s", money(value).c_str());
     }
@@ -641,7 +644,7 @@ void basketLegsTable(const BasketRecord& b, bool inProgress) {
         ImGui::TextUnformatted(price(leg.entryPrice).c_str());
         ImGui::TableNextColumn();
         if (const double slip = muuk::ctrader_fix::legSlippage(leg, b.contractSize); std::fabs(slip) < 0.005) {
-            ImGui::TextDisabled("$0.00");
+            ImGui::TextDisabled("%s", amount(0.0).c_str());
         } else {
             ImGui::TextColored(slip > 0 ? kRed : kGreen, "%s", money(-slip).c_str());
             ImGui::SetItemTooltip("Filled %+.2f from the order price", leg.entryPrice - leg.requestedPrice);
@@ -663,7 +666,7 @@ void basketLegsTable(const BasketRecord& b, bool inProgress) {
             ImGui::TextDisabled("--");
         } else {
             ImGui::TextColored(pnlColor(leg.net), "%s", money(leg.net).c_str());
-            ImGui::SetItemTooltip("Gross %s - commission $%.2f", money(leg.gross).c_str(), leg.commission);
+            ImGui::SetItemTooltip("Gross %s - commission %s", money(leg.gross).c_str(), amount(leg.commission).c_str());
         }
         ImGui::TableNextColumn();
         ImGui::TextDisabled("%s%s%s", timeOf(leg.openedAt).c_str(), open ? "" : "  -  ",
@@ -739,7 +742,9 @@ void DashboardWindow::render(LiveController& controller) {
     const std::optional<LiveSnapshot> snap = controller.snapshot();
     samplePerformance(snap);
     const bool connected = running && snap && snap->connected;
-    g_centUnits = (snap && snap->brokerAccountFresh && snap->brokerAccount.cent()) || editSettings_.accountKind == "cent";
+    // The broker's own word when it has one: a config saved as cent mustn't show
+    // a standard account's dollars as cents.
+    g_centUnits = snap && snap->brokerAccountFresh ? snap->brokerAccount.cent() : editSettings_.accountKind == "cent";
 
     // Load the tunable settings from the config file once, so they can be
     // reviewed/edited before connecting; while connected (and not being
@@ -771,22 +776,8 @@ void DashboardWindow::render(LiveController& controller) {
     if (!controller.demo() && account_.loaded && account_.platform == 1) {
         if (!mt5HintsPushed_) pushMt5ServerHints(controller);
         rememberMt5Account(controller);
-        // Backtest data, once a day: MT5 writes the history of the research symbols.
-        if (const auto b = controller.bridgeStatus(); b && b->ready && !prefs_.historySymbols.empty()) {
-            const std::time_t t = std::time(nullptr);
-            std::tm lt{};
-#ifdef _WIN32
-            localtime_s(&lt, &t);
-#else
-            localtime_r(&t, &lt);
-#endif
-            char day[16];
-            std::strftime(day, sizeof(day), "%Y-%m-%d", &lt);
-            if (prefs_.historyExportedOn != day && controller.exportMt5History(prefs_.historySymbols)) {
-                prefs_.historyExportedOn = day;
-                savePrefs(prefs_);
-            }
-        }
+        // The backtest history export is by hand only (Settings > This PC): it
+        // holds up the bridge for minutes, with no prices and no order answers.
         controller.keepMt5OnAccount(configPathBuffer_.data(), savedMt5Login_, prefs_.mt5AutoSwitch);
         if (const auto b = controller.bridgeStatus(); b && b->ready && !savedMt5Login_.empty() &&
                                                       b->login != savedMt5Login_ && !controller.mt5Starting() &&
@@ -856,7 +847,36 @@ void DashboardWindow::renderHeader(LiveController& controller, bool running, boo
 
     // Row 1: brand, connection pill, theme toggle.
     withFont(largeFont_, [] { ImGui::TextColored(kBlue, "MUUK"); });
+    ImGui::SetItemTooltip("Muuk %s", MUUK_VERSION_STR);
     ImGui::SameLine(0.0f, 14.0f);
+    // A newer release on GitHub: download, check, then install after the app exits.
+    {
+        updater_.start();
+        const Updater::Status u = updater_.status();
+        if (u.state == Updater::State::Available) {
+            if (glass::button(("Update to " + u.latest).c_str(), kGreen)) updater_.download();
+            ImGui::SetItemTooltip("%s.\nDownloads its Setup from GitHub and checks its SHA-256 before anything runs.",
+                                  u.message.c_str());
+            ImGui::SameLine(0.0f, 10.0f);
+        } else if (u.state == Updater::State::Downloading) {
+            glass::pill(("Downloading update " + std::to_string(static_cast<int>(u.progress * 100.0)) + "%").c_str(),
+                        kBlue, true);
+            ImGui::SameLine(0.0f, 10.0f);
+        } else if (u.state == Updater::State::Ready) {
+            if (glass::button(("Restart & install " + u.latest).c_str(), kGreen)) {
+                updateOnExit_ = true;
+                requestExit(controller);
+            }
+            ImGui::SetItemTooltip("Muuk closes (with open trades it asks first), then Muuk %s Setup opens: press "
+                                  "Install there. Your accounts, settings and history stay.",
+                                  u.latest.c_str());
+            ImGui::SameLine(0.0f, 10.0f);
+        } else if (u.state == Updater::State::Failed && !u.latest.empty()) {
+            if (glass::button("Update failed - retry", kAmber)) updater_.download();
+            ImGui::SetItemTooltip("%s", u.message.c_str());
+            ImGui::SameLine(0.0f, 10.0f);
+        }
+    }
     // Which broker and account: while connected, what the running bot is
     // really logged into; otherwise what the config file will connect to.
     const auto live = controller.snapshot();
@@ -1308,7 +1328,7 @@ void DashboardWindow::renderKpiCards(const std::optional<LiveSnapshot>& snap, bo
          snap ? "Range " + price(snap->rangeLower) + " - " + price(snap->rangeUpper) : "", Tab::Settings,
          "Settings (range width, entry offset)");
     card("k_float", "NET P/L (AFTER COSTS)", connected ? money(shownFloating) : std::string("--"), pnlColor(floating),
-         connected && snap ? "Gross " + money(snap->live.gross) + " | costs $" + price(snap->live.costs())
+         connected && snap ? "Gross " + money(snap->live.gross) + " | costs " + amount(snap->live.costs())
                            : std::string(""),
          Tab::Positions, "Positions");
     card("k_pos", "OPEN POSITIONS", snap ? std::to_string(snap->positions.size()) : std::string("--"), text,
@@ -1629,6 +1649,23 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
                               &e.rangeMaxWidth, 0.5, "%.2f", &settingsDirty_);
                 e.rangeMaxWidth = std::clamp(e.rangeMaxWidth, std::max(0.1, s.rangeWidth), 1000.0);
             }
+            bool randomOn = e.randomRange();
+            double randomMin = e.rangeRandomMin > 0.0 ? e.rangeRandomMin : 0.5;
+            toggleWithValue("Random range",
+                            "On: each new range gets a random width between this smallest width and the widest below, "
+                            "instead of the 'Range width' above or the ATR. A width under the spread can't be placed: "
+                            "its orders wait, and the entry timeout opens the range again with a new width.",
+                            "rangerandom", &randomOn, &randomMin, 0.0, 0.5, 0.05, "from $%.2f");
+            if (randomOn) {
+                e.rangeRandomMin = std::clamp(randomMin, 0.01, 1000.0);
+                if (e.rangeRandomMax < e.rangeRandomMin) e.rangeRandomMax = std::max(1.0, e.rangeRandomMin);
+                settingDouble("  widest random range ($)", "The widest a random range can be.", &e.rangeRandomMax, 0.05,
+                              "%.2f", &settingsDirty_);
+                e.rangeRandomMax = std::clamp(e.rangeRandomMax, e.rangeRandomMin, 1000.0);
+            } else {
+                e.rangeRandomMin = 0.0;
+                e.rangeRandomMax = 0.0;
+            }
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
@@ -1655,7 +1692,7 @@ void DashboardWindow::renderSettingsPanel(LiveController& controller, const std:
             if (ImGui::Checkbox("On##withtrend", &e.startWithTrend)) settingsDirty_ = true;
         }
         ImGui::BeginDisabled(s.autoTarget);
-        settingDouble("Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
+        settingDouble(g_centUnits ? "Profit target (\xC2\xA2)" : "Profit target ($)", "Floating net profit at which the whole basket is booked and closed.",
                       &s.profitTarget, 0.25, "%.2f", &settingsDirty_);
         ImGui::EndDisabled();
         ImGui::TableNextRow();
@@ -1865,7 +1902,7 @@ void DashboardWindow::renderPositionsTab(LiveController& controller, const LiveS
                 ImGui::TextDisabled("--");
                 ImGui::SetItemTooltip("Opened before the bot connected: its order price isn't known.");
             } else if (std::fabs(p.pnl.slippage) < 0.005) {
-                ImGui::TextDisabled("$0.00");
+                ImGui::TextDisabled("%s", amount(0.0).c_str());
             } else {
                 ImGui::TextColored(p.pnl.slippage > 0 ? kRed : kGreen, "%s", money(-p.pnl.slippage).c_str());
                 ImGui::SetItemTooltip("Order price %.2f, filled %.2f (%+.2f)", p.requestedPrice, p.entryPrice,
@@ -2232,9 +2269,10 @@ void DashboardWindow::renderLotPreview(const LiveSettings& s, double livePrice) 
         } else if (s.commissionPerMillion <= 0.0 && s.commissionPerLot <= 0.0) {
             ImGui::TextColored(kAmber, "Commission is 0 - net P/L will look better than your broker's.");
         } else {
-            ImGui::TextDisabled("Commission at %s%.2f: %.2f lot = $%.2f round trip (open + close), all of the above = "
-                                "$%.2f -- should equal cTrader's Commission column.",
-                                livePrice > 0.0 ? "" : "e.g. ", at, s.initialLot, first, all);
+            ImGui::TextDisabled("Commission at %s%.2f: %.2f lot = %s round trip (open + close), all of the above = "
+                                "%s -- should equal cTrader's Commission column.",
+                                livePrice > 0.0 ? "" : "e.g. ", at, s.initialLot, amount(first).c_str(),
+                                amount(all).c_str());
         }
     }
     if (limitAt > 0) {
@@ -2355,7 +2393,7 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
              text);
         stat("IN PROFIT", winRate, text);
         stat("NET P/L (ALL TIME)", money(net), pnlColor(net));
-        stat("COMMISSION PAID", "$" + price(commission), commission > 0.005 ? kAmber : text);
+        stat("COMMISSION PAID", amount(commission), commission > 0.005 ? kAmber : text);
         stat("BEST / WORST", money(best) + "  /  " + money(worst), text);
         ImGui::EndTable();
     }
@@ -2493,8 +2531,8 @@ void DashboardWindow::renderHistoryTab(LiveController& controller, const std::op
                                   "the market moved while the closing orders were filled.");
         }
         if (open) {
-            ImGui::TextDisabled("Range %s - %s   |   gross %s   commission $%.2f   net %s", price(b.rangeLower).c_str(),
-                                price(b.rangeUpper).c_str(), money(b.gross).c_str(), b.commission,
+            ImGui::TextDisabled("Range %s - %s   |   gross %s   commission %s   net %s", price(b.rangeLower).c_str(),
+                                price(b.rangeUpper).c_str(), money(b.gross).c_str(), amount(b.commission).c_str(),
                                 money(b.net).c_str());
             basketLegsTable(b, false);
             ImGui::TreePop();
@@ -2550,6 +2588,7 @@ void DashboardWindow::renderExitPopup(LiveController& controller, const std::opt
     auto finish = [&](bool approve) {
         exitClosing_ = false;
         if (approve) exitApproved_ = true;
+        if (!approve) updateOnExit_ = false;  // staying: no Setup later on a plain exit
         ImGui::CloseCurrentPopup();
     };
 
@@ -2668,7 +2707,7 @@ void DashboardWindow::renderVolumeTab() {
     ImGui::SetItemTooltip(
         "Lots: every position counted once - it was opened and closed (one round turn).\n"
         "Broker volume: brokers count each side, so opening and closing = twice the lots.\n"
-        "Value traded: lots x %.0f (contract size) x entry price, in USD.\n"
+        "Value traded: lots x %.0f (contract size) x entry price, in USD (a cent account's is divided by 100).\n"
         "Won / lost lots: lots in baskets that closed in profit / in loss.\n"
         "Commission is worked out per position like the broker does (Settings). Baskets count on the day they closed.",
         history_.empty() ? 100.0 : history_.back().contractSize);
@@ -2728,13 +2767,13 @@ void DashboardWindow::renderVolumeTab() {
         ImGui::TextColored(kRed, "%s", lots(b.lostLots).c_str());
         ImGui::TableNextColumn();
         if (b.commission > 0.005) {
-            ImGui::TextColored(kAmber, "-$%.2f", b.commission);
+            ImGui::TextColored(kAmber, "-%s", amount(b.commission).c_str());
         } else {
-            ImGui::TextDisabled("$0.00");
+            ImGui::TextDisabled("%s", amount(0.0).c_str());
         }
         ImGui::TableNextColumn();
         if (std::fabs(b.slippage) < 0.005) {
-            ImGui::TextDisabled("$0.00");
+            ImGui::TextDisabled("%s", amount(0.0).c_str());
         } else {
             ImGui::TextColored(b.slippage > 0 ? kAmber : kGreen, "%s", money(-b.slippage).c_str());
         }
@@ -3340,10 +3379,16 @@ void DashboardWindow::renderThisPcSection() {
             savePrefs(prefs_);
         }
         ImGui::SetItemTooltip("Symbols (comma separated, the broker's own names are found: XAGUSD -> XAGUSD.c). MT5 "
-                              "writes their one-minute history to MQL5\\Files\\MuukHistory once a day, so new "
-                              "symbols can be tested before they are traded. Read only: nothing is traded.");
+                              "writes their one-minute history to MQL5\\Files\\MuukHistory when you press Export "
+                              "now, so new symbols can be tested before they are traded. Nothing is traded, but "
+                              "the export holds up the bridge for minutes, so it's off while the bot is connected.");
         ImGui::SameLine();
+        // Disconnected, the bridge still runs in MT5, so the export can be asked for.
+        const bool botRunning = controller_ && controller_->isRunning();
+        ImGui::BeginDisabled(botRunning);
         if (glass::button("Export now", kBlue) && controller_) (void)controller_->exportMt5History(prefs_.historySymbols);
+        ImGui::EndDisabled();
+        if (botRunning) ImGui::SetItemTooltip("Disconnect first: the export stops prices and order answers meanwhile.");
     }
     // Shortcuts, so Muuk opens like any other app.
     for (const auto place : {ShortcutPlace::Desktop, ShortcutPlace::StartMenu}) {
@@ -4291,7 +4336,7 @@ void DashboardWindow::renderRiskCalculator(const std::optional<LiveSnapshot>& sn
         // --- Account (cTrader only: MT5 reports all of this itself).
         if (!mt5) {
             section("Account", "cTrader FIX sends no balance or margin");
-            settingDouble("Account balance ($)",
+            settingDouble(g_centUnits ? "Account balance (\xC2\xA2)" : "Account balance ($)",
                           "Your balance -- FIX doesn't send it. The account cards (Positions page), the table, the "
                           "margin guards and the Audit use it.",
                           &s.accountBalance, 100.0, "%.2f", &settingsDirty_);

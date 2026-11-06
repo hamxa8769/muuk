@@ -254,7 +254,8 @@ void volumeTable(Layout& lay, const std::string& title, const std::vector<Volume
         doc.textRight(c[1], lay.y(), std::to_string(b.baskets), 7.5f, bold, kInk);
         doc.textRight(c[2], lay.y(), std::to_string(b.won) + " / " + std::to_string(b.lost), 7.5f, bold, kInk);
         doc.textRight(c[3], lay.y(), fmt("%.2f", b.lots), 7.5f, bold, kInk);
-        doc.textRight(c[4], lay.y(), fmt("$%.0f", b.notional), 7.5f, bold, kInk);
+        // In USD: a cent account's value traded comes in US cents.
+        doc.textRight(c[4], lay.y(), fmt("$%.0f", g_centReport ? b.notional / 100.0 : b.notional), 7.5f, bold, kInk);
         doc.textRight(c[5], lay.y(), fmt("%.2f", b.wonLots), 7.5f, bold, kGreen);
         doc.textRight(c[6], lay.y(), fmt("%.2f", b.lostLots), 7.5f, bold, kRed);
         doc.textRight(c[7], lay.y(), money(-b.commission), 7.5f, bold, b.commission > 0.005 ? kRed : kDim);
@@ -328,13 +329,16 @@ void settingsTable(Layout& lay, const SessionReportInput& in) {
         {"Account", s.accountKind == "cent" ? std::string("cent (amounts in USC)") : std::string("standard ($)")},
         {"Entry offset", fmt("$%.2f", s.seedOffset)},
         {"Commission", s.commissionPerMillion > 0 ? fmt("$%.2f per $1M traded, each side", s.commissionPerMillion)
-                                                : fmt("$%.2f per lot, round turn", s.commissionPerLot)},
+                                                : amount(s.commissionPerLot) + " per lot, round turn"},
         {"Cooldown between baskets", std::to_string(s.cooldownSeconds) + " s"},
         {"Entry timeout", s.entryTimeoutSeconds > 0 ? std::to_string(s.entryTimeoutSeconds) + " s, then a new range"
                                                     : std::string("off")},
         {"Range from ATR", s.entry.rangeAtr > 0 ? fmt("%.2f x ATR, ", s.entry.rangeAtr) + fmt("$%.2f", s.rangeWidth) +
                                                       fmt(" to $%.2f", s.entry.rangeMaxWidth)
                                                 : std::string("off (fixed width)")},
+        {"Random range", s.entry.randomRange()
+                             ? fmt("$%.2f", s.entry.rangeRandomMin) + fmt(" to $%.2f", s.entry.rangeRandomMax)
+                             : std::string("off")},
         {"Target move", s.entry.targetHalfRange ? std::string("half the range") : fmt("$%.2f", s.lastLotTargetMove)},
         {"Trend filter", s.entry.trendMin > 0 ? fmt("EMA8-EMA21 at least %.1f x ATR", s.entry.trendMin)
                                               : std::string("off")},
@@ -401,7 +405,7 @@ void chart(Layout& lay, const std::string& title, const std::vector<BasketRecord
 
     // Axis: zero line and the two extremes.
     doc.line(x0, yOf(0.0), x1, yOf(0.0), kDim, 0.6f);
-    doc.textRight(x0 - 4.0f, yOf(0.0) + 3.0f, "$0", 7.0f, false, kDim);
+    doc.textRight(x0 - 4.0f, yOf(0.0) + 3.0f, g_centReport ? "0 USC" : "$0", 7.0f, false, kDim);
     doc.textRight(x0 - 4.0f, plotTop + 3.0f, money(hi), 7.0f, false, kDim);
     if (lo < -0.005) doc.textRight(x0 - 4.0f, plotBottom + 3.0f, money(lo), 7.0f, false, kDim);
 

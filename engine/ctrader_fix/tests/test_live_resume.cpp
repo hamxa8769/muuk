@@ -2,6 +2,7 @@
 // and started again (LiveRunner::setStateFile).
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <deque>
 #include <exception>
@@ -1677,6 +1678,36 @@ TEST_CASE("Smart entry: the range is ATR x rangeAtr wide (never under the fixed 
     const LiveSnapshot snap = bot.runner().snapshot();
     REQUIRE(snap.rangeWidthNow == Catch::Approx(width).margin(0.02));
     REQUIRE(snap.targetMoveNow == Catch::Approx(width / 2.0).margin(0.02));
+
+    bot.finish();
+    bot.rethrow();
+}
+
+TEST_CASE("Smart entry: a random range stays between its two widths, in even ticks, and is drawn again") {
+    MockFixServer server;
+    LiveConfig cfg = resumeConfig(server);
+    cfg.connection.entryTimeoutSeconds = 1;
+    cfg.connection.entry.rangeRandomMin = 0.20;
+    cfg.connection.entry.rangeRandomMax = 1.00;
+    Bot bot(cfg, freshStateFile("entry_random"));
+    (void)handshake(server, {}, {});
+    (void)server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const auto check = [&] {
+        const double width = bot.runner().snapshot().rangeWidthNow;
+        REQUIRE(width >= 0.20 - 1e-9);
+        REQUIRE(width <= 1.00 + 1e-9);
+        const auto ticks = static_cast<long long>(std::llround(width / 0.01));
+        REQUIRE(ticks % 2 == 0);
+    };
+    check();
+    // The entry times out and the range opens again, with its own width.
+    std::this_thread::sleep_for(1200ms);
+    sendQuote(server, 2, 4345.00, 4345.10);
+    (void)server.waitForMessage(msgtype::OrderCancelRequest, kTradeConn, 3s);
+    const FixMessage again = server.waitForMessage(msgtype::NewOrderSingle, kTradeConn, 3s);
+    const double half = bot.runner().snapshot().rangeWidthNow / 2.0;
+    REQUIRE(again.getDouble(tag::StopPx) == Catch::Approx(4345.05 + half).margin(0.02));
+    check();
 
     bot.finish();
     bot.rethrow();

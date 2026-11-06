@@ -8,6 +8,7 @@ add_executable(muuk-desktop
     src/app_prefs.cpp
     src/system_monitor.cpp
     src/windows_startup.cpp
+    src/updater.cpp
 )
 
 target_link_libraries(muuk-desktop PRIVATE muuk_ctrader_fix muuk_mt5_bridge imgui)
@@ -23,5 +24,7 @@ if(WIN32)
     # dwmapi: dark native title bar to match the app theme; shell32: open PDFs/folders.
     # ole32/uuid: the desktop / Start menu shortcuts (IShellLink).
     target_link_libraries(muuk-desktop PRIVATE dwmapi shell32 psapi wtsapi32 ole32 uuid)
+    # winhttp/bcrypt: the updater (GitHub releases over HTTPS, SHA-256 check).
+    target_link_libraries(muuk-desktop PRIVATE winhttp bcrypt)
 endif()
 target_compile_features(muuk-desktop PRIVATE cxx_std_20)

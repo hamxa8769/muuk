@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -651,8 +652,9 @@ private:
     std::string anotherTrader_;
     void flagAnotherTraderLocked(const std::string& why);
 
-    // Smart entry (connection.entry). The width a new range gets now (ATR x
-    // rangeAtr, clamped), whether the trend filter holds new ranges back
+    // Smart entry (connection.entry). The width a new range gets now (random
+    // between rangeRandomMin and Max, or ATR x rangeAtr, clamped; call once per
+    // range: a random width is drawn on every call), whether the trend filter holds new ranges back
     // (logs once per change, sets entryWait_), and config_.strategy with this
     // range's own first side and target move -- what the engine runs on.
     [[nodiscard]] double rangeWidthNowLocked();
@@ -664,6 +666,7 @@ private:
     muuk::core::StartSide rangeStartSide_ = muuk::core::StartSide::BuyOnly;
     bool rangeSideSet_ = false;
     double rangeTargetMove_ = 0.0;  // 0 = the configured lastLotTargetMove
+    std::mt19937 rangeRng_{std::random_device{}()};  // random range widths; touched under engineMutex_
     // Broker check.
     std::chrono::steady_clock::time_point orderStatusRequestedAt_;
     std::string brokerCheckedAt_;

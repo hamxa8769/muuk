@@ -12,9 +12,17 @@ This note covers two things:
 
 On a cent account, 0.01 lot earns or loses **1¢ per $1 move** of gold. On a standard account the same 0.01 lot earns or loses **$1**. So all the examples below read the same on both accounts: just change "¢" to "$".
 
+**Prices are always in dollars.** Range width, target move and other price distances mean the same gold move on both accounts: a $0.50 range is 50 cents of gold's price, not 50¢ of account money. **Value traded** is always shown in USD.
+
 ---
 
 ## 1. Recent changes
+
+### Random range
+
+Settings → **Random range** (off by default). Each new range gets a random width between *from* and *widest random range*, drawn afresh every time a range opens. It replaces Range width and Range from ATR.
+
+A width under the spread can't be placed: both Stop orders are already past the market, so they wait. The entry timeout (keep it on) then opens the range again with a new width. The last-lot target's move stays fixed unless *Target move = half the range* is on.
 
 ### Smart entry: a range that fits the market (16 October 2026)
 

@@ -71,6 +71,8 @@ EntryFilterConfig entryFromJson(const nlohmann::json& j) {
     EntryFilterConfig e;
     e.rangeAtr = std::clamp(j.value("rangeAtr", e.rangeAtr), 0.0, 20.0);
     e.rangeMaxWidth = std::clamp(j.value("rangeMaxWidth", e.rangeMaxWidth), 0.1, 1000.0);
+    e.rangeRandomMin = std::clamp(j.value("rangeRandomMin", e.rangeRandomMin), 0.0, 1000.0);
+    e.rangeRandomMax = std::clamp(j.value("rangeRandomMax", e.rangeRandomMax), 0.0, 1000.0);
     e.targetHalfRange = j.value("targetHalfRange", e.targetHalfRange);
     e.trendMin = std::clamp(j.value("trendMin", e.trendMin), 0.0, 10.0);
     e.startWithTrend = j.value("startWithTrend", e.startWithTrend);
@@ -80,6 +82,8 @@ EntryFilterConfig entryFromJson(const nlohmann::json& j) {
 nlohmann::json entryToJson(const EntryFilterConfig& e) {
     return {{"rangeAtr", e.rangeAtr},
             {"rangeMaxWidth", e.rangeMaxWidth},
+            {"rangeRandomMin", e.rangeRandomMin},
+            {"rangeRandomMax", e.rangeRandomMax},
             {"targetHalfRange", e.targetHalfRange},
             {"trendMin", e.trendMin},
             {"startWithTrend", e.startWithTrend}};

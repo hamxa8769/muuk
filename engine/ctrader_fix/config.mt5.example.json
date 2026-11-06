@@ -14,19 +14,57 @@
     "environment": "demo",
     "traderLogin": "YOUR_MT5_ACCOUNT_NUMBER",
     "symbolName": "XAUUSD",
-    "autoRangeWidthPoints": 2.0,
     "accountKind": "cent",
+    "accountBalance": 0.0,
+    "leverage": 500.0,
+    "autoContinue": true,
+    "autoRangeWidthPoints": 1.0,
+    "basketCooldownSeconds": 30,
+    "manualCloseCooldownSeconds": 15,
+    "entryTimeoutSeconds": 30,
+    "dailyLossLimitMoney": 0.0,
+    "lockAtLossMoney": 0.0,
+    "lockAtLossPercent": 0.0,
+    "lockAtLevel": 21,
+    "closeLockedAfterSeconds": 1,
+    "entry": {
+      "rangeAtr": 0.0,
+      "rangeMaxWidth": 15.0,
+      "rangeRandomMin": 0.5,
+      "rangeRandomMax": 1.0,
+      "targetHalfRange": false,
+      "trendMin": 0.0,
+      "startWithTrend": false
+    },
     "recovery": {
-      "guardLockMarginLevel": 300,
-      "guardStopMarginLevel": 200,
-      "hedgedMarginPercent": 100,
+      "guardLockMarginLevel": 300.0,
+      "guardStopMarginLevel": 200.0,
+      "hedgedMarginPercent": 100.0,
       "closeAtBreakEven": true,
       "escapeEnabled": false,
       "escapeMove": 2.0,
       "escapeBuffer": 0.3,
       "escapeTrailAt": 1.0,
-      "escapeMaxTries": 2
+      "escapeMaxTries": 2,
+      "escapeAnalyzeMinutes": 5,
+      "escapeAutoRetry": false,
+      "escapeLookbackBars": 15,
+      "escapeStopAtr": 1.0
     }
+  },
+  "market": {
+    "enabled": true,
+    "closeRangeAt": "never",
+    "pauseAroundClose": true,
+    "pauseMinutesBefore": 15,
+    "pauseMinutesAfter": 1,
+    "newsGuard": true,
+    "newsCurrencies": "USD",
+    "newsHigh": true,
+    "newsMedium": false,
+    "newsMinutesBefore": 15,
+    "newsMinutesAfter": 15,
+    "news": []
   },
   "strategy": {
     "symbol": {
@@ -41,15 +79,15 @@
     },
     "range": {
       "lower": 4336.0,
-      "upper": 4338.0
+      "upper": 4337.0
     },
     "lotProgression": {
-      "initialLot": 0.1,
+      "initialLot": 0.01,
       "lotIncrement": 0.01,
-      "lotMultiplier": 2.0
+      "lotMultiplier": 1.0
     },
     "riskLimits": {
-      "maxOrders": 20,
+      "maxOrders": 21,
       "maxLot": 50.0,
       "maxBasketLossMoney": 0.0,
       "maxDrawdownMoney": 0.0,
@@ -62,15 +100,21 @@
       "commissionPerMillionPerSide": 0.0
     },
     "basketProfitTargetMoney": 20.0,
+    "basketStopLossMoney": 0.0,
     "autoProfitTarget": {
-      "enabled": true,
+      "enabled": false,
       "percent": 200
     },
+    "lastLotTarget": {
+      "enabled": true,
+      "move": 1.0
+    },
     "breakEvenEscape": {
-      "fromLevel": 5,
+      "fromLevel": 18,
       "profit": 0.5
     },
+    "seedOffsetPoints": 0.0,
     "reArmOnFill": true,
-    "startSide": "both"
+    "startSide": "buy"
   }
 }

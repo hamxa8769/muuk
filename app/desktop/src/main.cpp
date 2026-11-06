@@ -498,6 +498,8 @@ int main(int argc, char** argv) {
     }
 
     controller.stop();
+    // The bot has stopped: now the update's Setup may replace this exe.
+    dashboard.launchPendingUpdate();
     // MUUK_FRAME_STATS=1: how many frames the app went through, to check the pacing.
 #ifdef _WIN32
     char* stats = nullptr;

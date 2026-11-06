@@ -568,7 +568,9 @@ void PlaceMarket(const string line)
 // is (digits, point, contract, tick size/value in the account's money,
 // currency, description), then time,open,high,low,close,tickvol,spread
 // (spread in points) per bar, oldest first. Read only -- nothing is traded.
-// One symbol per timer pass, so the bridge keeps running meanwhile.
+// One symbol per timer pass. That pass blocks the bridge (no prices, no order
+// answers) until CopyRates and the file are done: a first export takes minutes,
+// so the app only asks for it by hand, and not while the bot is connected.
 string g_exportList[];
 int    g_exportIdx = 0;
 int    g_exportTries = 0;
