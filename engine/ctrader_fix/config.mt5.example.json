@@ -18,7 +18,7 @@
     "accountBalance": 0.0,
     "leverage": 500.0,
     "autoContinue": true,
-    "autoRangeWidthPoints": 1.0,
+    "autoRangeWidthPoints": 0.5,
     "basketCooldownSeconds": 30,
     "manualCloseCooldownSeconds": 15,
     "entryTimeoutSeconds": 30,
@@ -30,8 +30,8 @@
     "entry": {
       "rangeAtr": 0.0,
       "rangeMaxWidth": 15.0,
-      "rangeRandomMin": 0.5,
-      "rangeRandomMax": 1.0,
+      "rangeRandomMin": 0.0,
+      "rangeRandomMax": 0.0,
       "targetHalfRange": false,
       "trendMin": 0.0,
       "startWithTrend": false

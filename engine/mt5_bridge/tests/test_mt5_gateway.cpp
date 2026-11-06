@@ -363,12 +363,12 @@ TEST_CASE("MT5 config: the example loads, needs no FIX login and points the bot 
     REQUIRE(cfg.connection.quote.port == "5201");
     REQUIRE(cfg.connection.trade.port == "5201");
     REQUIRE(cfg.connection.accountKind == "cent");
-    // The defaults a new install starts on: +0.01 lots, random $0.50-$1 ranges,
+    // The defaults a new install starts on: +0.01 lots, every range $0.50 wide,
     // the last-lot target, break-even from level 18, lock at level 21.
     REQUIRE(cfg.strategy.lotProgression.multiplier == Catch::Approx(1.0));
-    REQUIRE(cfg.connection.entry.randomRange());
-    REQUIRE(cfg.connection.entry.rangeRandomMin == Catch::Approx(0.5));
-    REQUIRE(cfg.connection.entry.rangeRandomMax == Catch::Approx(1.0));
+    REQUIRE_FALSE(cfg.connection.entry.randomRange());
+    REQUIRE(cfg.connection.autoRangeWidthPoints == Catch::Approx(0.5));
+    REQUIRE(cfg.connection.entry.rangeAtr == Catch::Approx(0.0));
     REQUIRE(cfg.connection.entryTimeoutSeconds == 30);
     REQUIRE(cfg.connection.lockAtLevel == 21);
     REQUIRE(cfg.strategy.riskLimits.maxOrders == 21);
